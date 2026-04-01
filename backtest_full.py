@@ -123,14 +123,18 @@ class FullBacktest:
             'session_stats': {}
         }
 
-        # Anti-clustering tracking
-        self.last_trade_time = {}  # {condition: timestamp}
-        self.trades_per_condition_hour = {}  # {(condition, hour): count}
-        self.last_sl_hit_time = None  # Cooldown after SL hit
-        self.last_any_trade_time = None  # Global cooldown
-        self.cooldown_minutes = 15  # Minutes to wait after SL hit
-        self.global_cooldown_minutes = 10  # Minutes between ANY trades
-        self.max_trades_per_condition_hour = 2  # Max trades per condition per hour (reduced from 3)
+        # Open positions tracking (CRITICAL for preventing overlapping trades)
+        self.open_positions = []  # List of currently open trades
+        # Each position: {
+        #   'condition': str,
+        #   'entry': float,
+        #   'sl': float,
+        #   'tp1': float,
+        #   'open_time': datetime,
+        #   'open_candle_idx': int,
+        #   'action': str,
+        #   'lot': float
+        # }
 
     def run(self, start_date: datetime, end_date: datetime, symbol: str = 'XAUUSD'):
         """
@@ -225,49 +229,25 @@ class FullBacktest:
 
             self.results['g3_decisions'] += 1
 
-            # === Anti-Clustering Check (before G3b) ===
-            from datetime import datetime, timedelta
+            # === Open Positions Check (CRITICAL) ===
+            from datetime import datetime
 
-            current_time = datetime.fromisoformat(world_state['timestamp'].replace('Z', '+00:00'))
             condition = decision['chart_condition']
 
-            # Check 0: Global cooldown (ANY trade)
-            if self.last_any_trade_time:
-                time_since_any = (current_time - self.last_any_trade_time).total_seconds() / 60
-                if time_since_any < self.global_cooldown_minutes:
-                    if self.verbose:
-                        print(f"   ⏸️  Global cooldown: {time_since_any:.1f}/{self.global_cooldown_minutes} min since last trade")
-                    self.results['guardian_blocked_cooldown'] += 1
-                    continue
+            # Check 1: Max 2 open positions total
+            if len(self.open_positions) >= 2:
+                if self.verbose:
+                    print(f"   ⏸️  Max open positions reached: {len(self.open_positions)}/2")
+                self.results['guardian_blocked_clustering'] += 1
+                continue
 
-            # Check 1: Cooldown after SL hit (stricter)
-            if self.last_sl_hit_time:
-                time_since_sl = (current_time - self.last_sl_hit_time).total_seconds() / 60
-                if time_since_sl < self.cooldown_minutes:
-                    if self.verbose:
-                        print(f"   ⏸️  SL cooldown active: {time_since_sl:.1f}/{self.cooldown_minutes} min since last SL")
-                    self.results['guardian_blocked_cooldown'] += 1
-                    continue
-
-            # Check 2: Max trades per condition per hour
-            current_hour = current_time.replace(minute=0, second=0, microsecond=0)
-            hour_key = (condition, current_hour)
-
-            if hour_key in self.trades_per_condition_hour:
-                if self.trades_per_condition_hour[hour_key] >= self.max_trades_per_condition_hour:
-                    if self.verbose:
-                        print(f"   ⏸️  Max trades reached: {self.trades_per_condition_hour[hour_key]}/{self.max_trades_per_condition_hour} for {condition} this hour")
-                    self.results['guardian_blocked_clustering'] += 1
-                    continue
-
-            # Check 3: Minimum time between same condition trades (5 minutes)
-            if condition in self.last_trade_time:
-                time_since_last = (current_time - self.last_trade_time[condition]).total_seconds() / 60
-                if time_since_last < 5.0:
-                    if self.verbose:
-                        print(f"   ⏸️  Too soon: {time_since_last:.1f} min since last {condition} trade")
-                    self.results['guardian_blocked_clustering'] += 1
-                    continue
+            # Check 2: No duplicate condition (same condition already open)
+            open_conditions = [pos['condition'] for pos in self.open_positions]
+            if condition in open_conditions:
+                if self.verbose:
+                    print(f"   ⏸️  Position already open for {condition}")
+                self.results['guardian_blocked_clustering'] += 1
+                continue
 
             # === G3b: Money Management ===
             lot = calculate_lot_size(decision, self.account_balance, self.risk_profile)
@@ -278,7 +258,7 @@ class FullBacktest:
                 'balance': self.account_balance,
                 'daily_pnl_pct': (self.daily_pnl / self.account_balance) * 100,
                 'total_dd_pct': 0.0,  # Simplified for backtest
-                'open_trades': 0,  # Simplified - no tracking of open positions
+                'open_trades': len(self.open_positions),  # Real-time tracking
                 'news_active': world_state.get('news_flag', False)
             }
 
@@ -290,6 +270,20 @@ class FullBacktest:
                 continue
 
             self.results['guardian_approved'] += 1
+
+            # Add to open positions
+            current_time = datetime.fromisoformat(world_state['timestamp'].replace('Z', '+00:00'))
+            open_position = {
+                'condition': condition,
+                'entry': decision['entry'],
+                'sl': decision['sl'],
+                'tp1': decision['tp1'],
+                'open_time': current_time,
+                'open_candle_idx': i,
+                'action': decision['action'],
+                'lot': lot
+            }
+            self.open_positions.append(open_position)
 
             # === Simulated Execution ===
             subsequent_candles = m5_candles[i:i+50]
@@ -339,18 +333,8 @@ class FullBacktest:
             # Update distribution stats
             self._update_stats(trade)
 
-            # Update anti-clustering tracking
-            self.last_trade_time[condition] = current_time
-            self.last_any_trade_time = current_time  # Global tracking
-
-            # Track trades per condition per hour
-            if hour_key not in self.trades_per_condition_hour:
-                self.trades_per_condition_hour[hour_key] = 0
-            self.trades_per_condition_hour[hour_key] += 1
-
-            # Update cooldown if SL hit
-            if close_reason == 'SL_HIT':
-                self.last_sl_hit_time = current_time
+            # Close position (remove from open positions)
+            self.open_positions = [pos for pos in self.open_positions if pos['condition'] != condition]
 
             # Progress
             if self.results['guardian_approved'] % 10 == 0:
