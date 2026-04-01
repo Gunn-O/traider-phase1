@@ -25,6 +25,7 @@ from agents.g3_decision_mock import G3MockDecisionAgent
 from agents.g3_money_management import calculate_lot_size
 from agents.g3_risk_gate import guardian_check
 from agents.g4_notify import notify_signal
+from agents.g4_sheets_logger import SheetsLogger
 
 # Import utils
 from utils import create_connector, PositionTracker
@@ -72,6 +73,15 @@ class TraiderMainLoop:
         self.g1_scanner = G1MarketScanner(config={'verbose': False})
         self.g2_analyzer = G2QuantAnalyzer(config={'verbose': False})
         self.g3_decision = G3MockDecisionAgent(config={'verbose': False})
+
+        # Sheets Logger
+        try:
+            self.sheets_logger = SheetsLogger()
+            if self.sheets_logger.enabled:
+                print("✓ Google Sheets logging enabled")
+        except Exception as e:
+            print(f"⚠️  Sheets logger disabled: {e}")
+            self.sheets_logger = None
 
         # Risk profile
         self.risk_profile = {
@@ -304,11 +314,44 @@ class TraiderMainLoop:
         else:
             print("   ⚠️  LINE notification disabled or failed")
 
+        # === Step 8: Log to Google Sheets ===
+        print("\n📝 Step 8: Log to Google Sheets...")
+
+        trade_id = None
+        if self.sheets_logger and self.sheets_logger.enabled:
+            # Generate trade_id
+            trade_id = self.sheets_logger._generate_trade_id()
+            decision['trade_id'] = trade_id
+
+            # Log to sheets
+            log_success = self.sheets_logger.log_trade(decision, world_state)
+            if log_success:
+                print(f"   ✓ Logged to Sheets: {trade_id}")
+            else:
+                print(f"   ⚠️  Failed to log to Sheets")
+        else:
+            print("   ⏸️  Sheets logging disabled")
+
         # === Add Position to Tracker ===
+        print("\n📍 Step 9: Track Position...")
         position = self.position_tracker.add_position(decision)
         if position:
             print(f"   ✓ Position tracked: {position.id}")
             self.account_state['open_trades'] = len(self.position_tracker.open_positions)
+
+            # Set callback to update Sheets when position closes
+            if self.sheets_logger and self.sheets_logger.enabled and trade_id:
+                def on_position_close(pos):
+                    """Callback เมื่อ position ปิด"""
+                    result = 'WIN' if pos.pnl > 0 else 'LOSS'
+                    self.sheets_logger.update_trade_result(
+                        trade_id=pos.trade_id,
+                        result=result,
+                        pnl_usd=pos.pnl,
+                        close_reason=pos.close_reason
+                    )
+
+                position.on_close_callback = on_position_close
         else:
             print(f"   ⚠️  Failed to track position")
 

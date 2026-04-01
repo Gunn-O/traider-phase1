@@ -25,8 +25,10 @@ class Position:
                 - tp1, tp2, tp3: Take profit levels
                 - lot_size: Position size
                 - timestamp: Entry time
+                - trade_id: Trade ID from sheets logger (optional)
         """
-        self.id = f"{signal['condition']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.id = signal.get('trade_id') or f"{signal['condition']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.trade_id = self.id  # Alias for sheets integration
         self.action = signal['action']
         self.condition = signal['condition']
         self.entry = signal['entry']
@@ -41,6 +43,9 @@ class Position:
         self.close_reason = None
         self.pnl = 0.0
         self.is_open = True
+
+        # Callback for when position closes
+        self.on_close_callback = None
 
     def check_hit(self, current_price: float, current_high: float, current_low: float) -> bool:
         """
@@ -96,6 +101,10 @@ class Position:
             self.pnl = (close_price - self.entry) * self.lot_size * 10  # $10 per point per lot
         elif self.action == 'SELL':
             self.pnl = (self.entry - close_price) * self.lot_size * 10
+
+        # Call callback if set (for sheets logging)
+        if self.on_close_callback:
+            self.on_close_callback(self)
 
     def to_dict(self) -> Dict:
         """Export เป็น dict"""

@@ -1,13 +1,7 @@
 """
-Data Connector - รองรับ 3 modes: backtest, simulate, live
-- backtest: yfinance historical data (⚠️ Limitation: intraday data max 60 days)
-- simulate: yfinance near real-time (delay ~15 min) - RECOMMENDED for development
-- live: MetaTrader5 real-time data (Windows only)
-
-⚠️ IMPORTANT: yfinance intraday data limitations:
-- 5m/15m/30m: Last 60 days only
-- 1h: Last 730 days only
-- For historical backtesting beyond 60 days, use daily data or CSV files
+Data Connector - รองรับ 2 modes: simulate, live
+- simulate: TradingView real-time data (accurate spot prices) ✨ RECOMMENDED
+- live: MetaTrader5 real-time data (Windows only, Phase II)
 """
 
 import os
@@ -17,13 +11,6 @@ import pandas as pd
 import numpy as np
 
 # Mode-specific imports
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except ImportError:
-    YFINANCE_AVAILABLE = False
-    print("Warning: yfinance not installed - backtest/simulate modes unavailable")
-
 try:
     import MetaTrader5 as mt5
     MT5_AVAILABLE = True
@@ -44,33 +31,9 @@ class DataConnector:
     Data connector สำหรับ Tra(i)der Phase I
 
     Modes:
-    - backtest: Historical data จาก yfinance สำหรับ backtesting
-    - simulate: Real-time data จาก TradingView (accurate spot prices) ✨ RECOMMENDED
+    - simulate: Real-time data จาก TradingView (XAUUSD/OANDA, accurate spot prices) ✨ RECOMMENDED
     - live: Real-time data จาก MetaTrader5 (Windows only, Phase II)
-
-    Symbol Mapping:
-    - yfinance: XAUUSD → GC=F (Gold Futures, ~$25 premium)
-    - TradingView: XAUUSD/OANDA (Spot prices, accurate)
     """
-
-    # Symbol mapping สำหรับ yfinance (backtest mode)
-    SYMBOL_MAP = {
-        "XAUUSD": "GC=F",  # Gold Futures
-        "EURUSD": "EURUSD=X",
-        "GBPUSD": "GBPUSD=X",
-        "USDJPY": "USDJPY=X",
-    }
-
-    # Timeframe mapping สำหรับ yfinance
-    YF_INTERVAL_MAP = {
-        1: "1m",
-        5: "5m",
-        15: "15m",
-        30: "30m",
-        60: "1h",
-        240: "4h",
-        1440: "1d"
-    }
 
     # Timeframe mapping สำหรับ TradingView
     if TVDATAFEED_AVAILABLE:
@@ -97,24 +60,21 @@ class DataConnector:
         1440: mt5.TIMEFRAME_D1 if MT5_AVAILABLE else None,
     }
 
-    def __init__(self, mode: str = "backtest"):
+    def __init__(self, mode: str = "simulate"):
         """
         Initialize DataConnector
 
         Args:
-            mode: "backtest" | "simulate" | "live"
+            mode: "simulate" | "live"
         """
-        if mode not in ["backtest", "simulate", "live"]:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'backtest', 'simulate', or 'live'")
+        if mode not in ["simulate", "live"]:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'simulate' or 'live'")
 
         self.mode = mode
         self.connected = False
         self.tv_client = None  # TradingView client instance
 
         # Validate dependencies
-        if mode == "backtest" and not YFINANCE_AVAILABLE:
-            raise RuntimeError("Mode 'backtest' requires yfinance. Install: pip install yfinance")
-
         if mode == "simulate" and not TVDATAFEED_AVAILABLE:
             raise RuntimeError("Mode 'simulate' requires tvdatafeed. Install: pip install git+https://github.com/rongardF/tvdatafeed.git")
 
@@ -144,9 +104,7 @@ class DataConnector:
         elif self.mode == "simulate":
             return self._connect_tradingview(**kwargs)
         else:
-            # backtest mode (yfinance) ไม่ต้อง connect
-            self.connected = True
-            return True
+            raise ValueError(f"Unknown mode: {self.mode}")
 
     def _connect_mt5(self, login: Optional[int] = None,
                      password: Optional[str] = None,
@@ -200,9 +158,7 @@ class DataConnector:
             print("MT5 disconnected")
         self.connected = False
 
-    def get_candles(self, symbol: str, timeframe: int, count: int,
-                    start_date: Optional[datetime] = None,
-                    end_date: Optional[datetime] = None) -> pd.DataFrame:
+    def get_candles(self, symbol: str, timeframe: int, count: int) -> pd.DataFrame:
         """
         Get OHLCV candles
 
@@ -210,8 +166,6 @@ class DataConnector:
             symbol: Symbol name (e.g., "XAUUSD")
             timeframe: Timeframe in minutes (5, 15, 60, etc.)
             count: Number of candles to retrieve
-            start_date: Start date (for backtest mode)
-            end_date: End date (for backtest mode)
 
         Returns:
             DataFrame with columns: time, open, high, low, close, volume
@@ -223,91 +177,8 @@ class DataConnector:
             return self._get_candles_mt5(symbol, timeframe, count)
         elif self.mode == "simulate":
             return self._get_candles_tradingview(symbol, timeframe, count)
-        else:  # backtest
-            return self._get_candles_yfinance(symbol, timeframe, count, start_date, end_date)
-
-    def _get_candles_yfinance(self, symbol: str, timeframe: int, count: int,
-                               start_date: Optional[datetime] = None,
-                               end_date: Optional[datetime] = None) -> pd.DataFrame:
-        """Get candles from yfinance"""
-
-        # Map symbol
-        yf_symbol = self.SYMBOL_MAP.get(symbol, symbol)
-
-        # Map interval
-        yf_interval = self.YF_INTERVAL_MAP.get(timeframe)
-        if not yf_interval:
-            raise ValueError(f"Unsupported timeframe: {timeframe} minutes")
-
-        # Calculate date range
-        if self.mode == "backtest":
-            if not start_date or not end_date:
-                raise ValueError("backtest mode requires start_date and end_date")
-
-            # Check yfinance limitations
-            days_ago = (datetime.now() - start_date).days
-            if timeframe <= 30 and days_ago > 60:
-                print(f"\n⚠️  WARNING: yfinance limitation detected!")
-                print(f"   Timeframe: {timeframe}m, Date: {start_date.date()}")
-                print(f"   yfinance only provides 5m/15m/30m data for last 60 days")
-                print(f"   Your request is {days_ago} days ago")
-                print(f"\n💡 Solutions:")
-                print(f"   1. Use 'simulate' mode for recent 60 days (RECOMMENDED)")
-                print(f"   2. Use hourly (60m) or daily data for historical backtest")
-                print(f"   3. Download and save data as CSV, then load from file")
-                raise ValueError(f"Intraday data not available for {days_ago} days ago (limit: 60 days)")
-
-            period = None
-        else:  # simulate mode
-            # Get recent data (period based on timeframe and count)
-            if timeframe <= 60:  # intraday
-                # yfinance มีข้อจำกัด 60 วันสำหรับ intraday data
-                period = "60d"
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=60)
-            else:
-                period = "60d"
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=60)
-
-        try:
-            ticker = yf.Ticker(yf_symbol)
-
-            if period:
-                df = ticker.history(period=period, interval=yf_interval)
-            else:
-                df = ticker.history(start=start_date, end=end_date, interval=yf_interval)
-
-            if df.empty:
-                print(f"Warning: No data retrieved for {yf_symbol}")
-                return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-
-            # Rename columns และจัด format
-            df = df.reset_index()
-            df = df.rename(columns={
-                'Date': 'time' if 'Date' in df.columns else 'Datetime',
-                'Datetime': 'time',
-                'Open': 'open',
-                'High': 'high',
-                'Low': 'low',
-                'Close': 'close',
-                'Volume': 'volume'
-            })
-
-            # เลือกเฉพาะ columns ที่ต้องการ
-            df = df[['time', 'open', 'high', 'low', 'close', 'volume']]
-
-            # Get last N candles
-            df = df.tail(count)
-
-            # Reset index
-            df = df.reset_index(drop=True)
-
-            return df
-
-        except Exception as e:
-            print(f"Error fetching data from yfinance: {e}")
-            return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
 
     def _get_candles_mt5(self, symbol: str, timeframe: int, count: int) -> pd.DataFrame:
         """Get candles from MetaTrader5"""
@@ -383,9 +254,7 @@ class DataConnector:
             print(f"Error fetching data from TradingView: {e}")
             return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
 
-    def get_latest_candles(self, symbol: str, m5_count: int = 80, h1_count: int = 20,
-                          start_date: Optional[datetime] = None,
-                          end_date: Optional[datetime] = None) -> Dict:
+    def get_latest_candles(self, symbol: str, m5_count: int = 80, h1_count: int = 20) -> Dict:
         """
         Get latest candles for both M5 and H1 timeframes
 
@@ -393,17 +262,15 @@ class DataConnector:
             symbol: Symbol name (e.g., "XAUUSD")
             m5_count: Number of M5 candles (default: 80)
             h1_count: Number of H1 candles (default: 20)
-            start_date: Start date (backtest mode only)
-            end_date: End date (backtest mode only)
 
         Returns:
             Dict with keys: m5_ohlcv, h1_candles, current_price, timestamp
         """
         # Get M5 data
-        m5_data = self.get_candles(symbol, 5, m5_count, start_date, end_date)
+        m5_data = self.get_candles(symbol, 5, m5_count)
 
         # Get H1 data
-        h1_data = self.get_candles(symbol, 60, h1_count, start_date, end_date)
+        h1_data = self.get_candles(symbol, 60, h1_count)
 
         if m5_data.empty:
             raise RuntimeError(f"Failed to get M5 data for {symbol}")
