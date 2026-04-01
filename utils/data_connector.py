@@ -31,6 +31,13 @@ except ImportError:
     MT5_AVAILABLE = False
     print("Warning: MetaTrader5 not installed - live mode unavailable")
 
+try:
+    from tvDatafeed.main import TvDatafeed, Interval
+    TVDATAFEED_AVAILABLE = True
+except ImportError:
+    TVDATAFEED_AVAILABLE = False
+    print("Warning: tvdatafeed not installed - TradingView mode unavailable")
+
 
 class DataConnector:
     """
@@ -38,14 +45,15 @@ class DataConnector:
 
     Modes:
     - backtest: Historical data จาก yfinance สำหรับ backtesting
-    - simulate: Near real-time data จาก yfinance (delay ~15 min)
-    - live: Real-time data จาก MetaTrader5 (Windows only)
+    - simulate: Real-time data จาก TradingView (accurate spot prices) ✨ RECOMMENDED
+    - live: Real-time data จาก MetaTrader5 (Windows only, Phase II)
 
     Symbol Mapping:
-    - XAUUSD → GC=F (Gold Futures) สำหรับ yfinance
+    - yfinance: XAUUSD → GC=F (Gold Futures, ~$25 premium)
+    - TradingView: XAUUSD/OANDA (Spot prices, accurate)
     """
 
-    # Symbol mapping สำหรับ yfinance
+    # Symbol mapping สำหรับ yfinance (backtest mode)
     SYMBOL_MAP = {
         "XAUUSD": "GC=F",  # Gold Futures
         "EURUSD": "EURUSD=X",
@@ -63,6 +71,20 @@ class DataConnector:
         240: "4h",
         1440: "1d"
     }
+
+    # Timeframe mapping สำหรับ TradingView
+    if TVDATAFEED_AVAILABLE:
+        TV_INTERVAL_MAP = {
+            1: Interval.in_1_minute,
+            5: Interval.in_5_minute,
+            15: Interval.in_15_minute,
+            30: Interval.in_30_minute,
+            60: Interval.in_1_hour,
+            240: Interval.in_4_hour,
+            1440: Interval.in_daily
+        }
+    else:
+        TV_INTERVAL_MAP = {}
 
     # Timeframe mapping สำหรับ MT5
     MT5_TIMEFRAME_MAP = {
@@ -87,10 +109,14 @@ class DataConnector:
 
         self.mode = mode
         self.connected = False
+        self.tv_client = None  # TradingView client instance
 
         # Validate dependencies
-        if mode in ["backtest", "simulate"] and not YFINANCE_AVAILABLE:
-            raise RuntimeError(f"Mode '{mode}' requires yfinance. Install: pip install yfinance")
+        if mode == "backtest" and not YFINANCE_AVAILABLE:
+            raise RuntimeError("Mode 'backtest' requires yfinance. Install: pip install yfinance")
+
+        if mode == "simulate" and not TVDATAFEED_AVAILABLE:
+            raise RuntimeError("Mode 'simulate' requires tvdatafeed. Install: pip install git+https://github.com/rongardF/tvdatafeed.git")
 
         if mode == "live" and not MT5_AVAILABLE:
             raise RuntimeError("Mode 'live' requires MetaTrader5. Install: pip install MetaTrader5")
@@ -101,18 +127,24 @@ class DataConnector:
         """
         Connect to data source
 
-        Args (live mode only):
-            login: MT5 login
-            password: MT5 password
-            server: MT5 server
+        Args:
+            For live mode:
+                - login: MT5 login
+                - password: MT5 password
+                - server: MT5 server
+            For simulate mode (TradingView):
+                - tv_username: TradingView username
+                - tv_password: TradingView password
 
         Returns:
             True if connected successfully
         """
         if self.mode == "live":
             return self._connect_mt5(**kwargs)
+        elif self.mode == "simulate":
+            return self._connect_tradingview(**kwargs)
         else:
-            # yfinance ไม่ต้อง connect
+            # backtest mode (yfinance) ไม่ต้อง connect
             self.connected = True
             return True
 
@@ -140,6 +172,26 @@ class DataConnector:
 
         self.connected = True
         return True
+
+    def _connect_tradingview(self, tv_username: Optional[str] = None,
+                             tv_password: Optional[str] = None) -> bool:
+        """Connect to TradingView"""
+        if not TVDATAFEED_AVAILABLE:
+            raise RuntimeError("tvdatafeed not available")
+
+        # Get credentials from kwargs or environment
+        username = tv_username or os.getenv('TV_USERNAME')
+        password = tv_password or os.getenv('TV_PASSWORD')
+
+        try:
+            # Create TradingView client
+            self.tv_client = TvDatafeed(username, password)
+            self.connected = True
+            print(f"TradingView connected (username: {username})")
+            return True
+        except Exception as e:
+            print(f"TradingView connection failed: {e}")
+            return False
 
     def disconnect(self):
         """Disconnect from data source"""
@@ -169,7 +221,9 @@ class DataConnector:
 
         if self.mode == "live":
             return self._get_candles_mt5(symbol, timeframe, count)
-        else:
+        elif self.mode == "simulate":
+            return self._get_candles_tradingview(symbol, timeframe, count)
+        else:  # backtest
             return self._get_candles_yfinance(symbol, timeframe, count, start_date, end_date)
 
     def _get_candles_yfinance(self, symbol: str, timeframe: int, count: int,
@@ -285,6 +339,48 @@ class DataConnector:
 
         except Exception as e:
             print(f"Error fetching data from MT5: {e}")
+            return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+
+    def _get_candles_tradingview(self, symbol: str, timeframe: int, count: int) -> pd.DataFrame:
+        """Get candles from TradingView"""
+
+        if not self.tv_client:
+            raise RuntimeError("TradingView client not initialized")
+
+        # Map interval
+        tv_interval = self.TV_INTERVAL_MAP.get(timeframe)
+        if tv_interval is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe} minutes")
+
+        try:
+            # Get data from TradingView
+            # XAUUSD on OANDA exchange
+            df = self.tv_client.get_hist(
+                symbol='XAUUSD',
+                exchange='OANDA',
+                interval=tv_interval,
+                n_bars=count
+            )
+
+            if df is None or df.empty:
+                print(f"Warning: No data retrieved for {symbol}")
+                return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+
+            # Reset index (datetime → column)
+            df = df.reset_index()
+
+            # Rename columns
+            df = df.rename(columns={
+                'datetime': 'time'
+            })
+
+            # เลือกเฉพาะ columns ที่ต้องการ
+            df = df[['time', 'open', 'high', 'low', 'close', 'volume']]
+
+            return df
+
+        except Exception as e:
+            print(f"Error fetching data from TradingView: {e}")
             return pd.DataFrame(columns=['time', 'open', 'high', 'low', 'close', 'volume'])
 
     def get_latest_candles(self, symbol: str, m5_count: int = 80, h1_count: int = 20,

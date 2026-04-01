@@ -27,7 +27,7 @@ from agents.g3_risk_gate import guardian_check
 from agents.g4_notify import notify_signal
 
 # Import utils
-from utils import create_connector
+from utils import create_connector, PositionTracker
 
 # Load environment
 load_dotenv()
@@ -57,7 +57,15 @@ class TraiderMainLoop:
         # Initialize data connector
         print(f"\n📡 Initializing data connector ({self.data_mode} mode)...")
         self.connector = create_connector(self.data_mode)
-        self.connector.connect()
+
+        # Connect with appropriate credentials
+        if self.data_mode == 'simulate':
+            # TradingView credentials
+            tv_username = os.getenv('TV_USERNAME')
+            tv_password = os.getenv('TV_PASSWORD')
+            self.connector.connect(tv_username=tv_username, tv_password=tv_password)
+        else:
+            self.connector.connect()
 
         # Initialize agents
         print("🤖 Initializing agents...")
@@ -77,6 +85,9 @@ class TraiderMainLoop:
             'min_rr_ratio': 1.2
         }
 
+        # Position Tracker (simulated)
+        self.position_tracker = PositionTracker(max_total_positions=2)
+
         # Account state tracking (simple version for Phase I)
         self.account_state = {
             'balance': self.account_balance,
@@ -85,11 +96,6 @@ class TraiderMainLoop:
             'open_trades': 0,
             'news_active': False
         }
-
-        # Anti-clustering: ป้องกันส่ง signal ซ้ำๆ
-        self.last_signal_time = None  # เวลาที่ส่ง signal ล่าสุด
-        self.signal_cooldown_minutes = 30  # ห่างกัน 30 นาทีขึ้นไป
-        self.last_signal_condition = None  # condition ล่าสุดที่ส่ง
 
         print("✓ System initialized\n")
 
@@ -155,8 +161,29 @@ class TraiderMainLoop:
         print(f"🔄 Pipeline Run - {timestamp}")
         print(f"{'='*70}")
 
+        # === Step 0: Update Positions (เช็คว่า positions เก่าปิดหรือยัง) ===
+        print("🔄 Step 0: Update Open Positions...")
+        market_data_temp = self.fetch_market_data()
+        if market_data_temp:
+            current_price = market_data_temp['current_price']
+            # ดึง candle ล่าสุดเพื่อเอา high/low
+            m5_df_temp = market_data_temp['m5_ohlcv']
+            if m5_df_temp:
+                latest = m5_df_temp[-1]
+                self.position_tracker.update_positions(
+                    current_price=current_price,
+                    current_high=latest['high'],
+                    current_low=latest['low']
+                )
+
+        summary = self.position_tracker.get_summary()
+        print(f"   Open: {summary['open_positions']} | Closed: {summary['closed_positions']}")
+        print(f"   Total P&L: ${summary['total_pnl']:,.2f}")
+        if summary['open_conditions']:
+            print(f"   Open Conditions: {', '.join(summary['open_conditions'])}")
+
         # === Step 1: Fetch Market Data ===
-        print("📊 Step 1: Fetching market data...")
+        print("\n📊 Step 1: Fetching market data...")
         market_data = self.fetch_market_data()
 
         if not market_data:
@@ -225,6 +252,10 @@ class TraiderMainLoop:
 
         # === Step 6: G3c Guardian Check ===
         print("\n🛡️  Step 6: Guardian Risk Check...")
+
+        # Update account_state with current open trades
+        self.account_state['open_trades'] = len(self.position_tracker.open_positions)
+
         guardian_result = guardian_check(
             decision=decision,
             lot=lot_size,
@@ -239,25 +270,20 @@ class TraiderMainLoop:
 
         print("   ✓ Risk check passed")
 
-        # === Anti-Clustering Check ===
-        print("\n🚫 Anti-Clustering Check...")
+        # === Position Check (ห้ามเปิด condition ซ้อน) ===
+        print("\n🚫 Position Check...")
 
-        # ตรวจสอบว่าส่ง signal ไปเมื่อไหร่
-        if self.last_signal_time:
-            time_since_last = (datetime.now() - self.last_signal_time).total_seconds() / 60
-            if time_since_last < self.signal_cooldown_minutes:
-                print(f"   ⏸️  BLOCKED: Signal sent {time_since_last:.1f} min ago")
-                print(f"   Cooldown: {self.signal_cooldown_minutes} min")
-                return
+        can_open = self.position_tracker.can_open_new(condition)
+        if not can_open:
+            print(f"   ⏸️  BLOCKED: Cannot open {condition}")
+            open_conditions = self.position_tracker.get_open_conditions()
+            if condition in open_conditions:
+                print(f"   Reason: Position {condition} already open")
+            else:
+                print(f"   Reason: Max positions reached ({len(open_conditions)}/2)")
+            return
 
-        # ตรวจสอบว่าเป็น condition เดิมหรือไม่ (ภายใน 1 ชั่วโมง)
-        if self.last_signal_time and self.last_signal_condition == condition:
-            time_since_last = (datetime.now() - self.last_signal_time).total_seconds() / 60
-            if time_since_last < 60:  # ภายใน 1 ชั่วโมง
-                print(f"   ⏸️  BLOCKED: Same condition ({condition}) within 1 hour")
-                return
-
-        print("   ✓ Anti-clustering check passed")
+        print(f"   ✓ Can open new position for {condition}")
 
         # === Step 7: G4 Notification ===
         print("\n📱 Step 7: Send LINE Notification...")
@@ -278,10 +304,13 @@ class TraiderMainLoop:
         else:
             print("   ⚠️  LINE notification disabled or failed")
 
-        # Update tracking (ป้องกัน signal ซ้ำ)
-        self.last_signal_time = datetime.now()
-        self.last_signal_condition = condition
-        self.account_state['open_trades'] += 1  # เพิ่มจำนวน open trades
+        # === Add Position to Tracker ===
+        position = self.position_tracker.add_position(decision)
+        if position:
+            print(f"   ✓ Position tracked: {position.id}")
+            self.account_state['open_trades'] = len(self.position_tracker.open_positions)
+        else:
+            print(f"   ⚠️  Failed to track position")
 
         # === Summary ===
         print(f"\n{'='*70}")
