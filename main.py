@@ -28,7 +28,7 @@ from agents.g4_notify import notify_signal
 from agents.g4_sheets_logger import SheetsLogger
 
 # Import utils
-from utils import create_connector, PositionTracker
+from utils import create_connector, PositionTracker, get_full_condition_name
 
 # Load environment
 load_dotenv()
@@ -212,7 +212,8 @@ class TraiderMainLoop:
             return
 
         condition = world_state.get('condition_candidate', 'N/A')
-        print(f"   ✓ Condition: {condition}")
+        condition_name = world_state.get('condition_name', '')
+        print(f"   ✓ Condition: {condition} {condition_name}")
         print(f"   RSI: {world_state.get('rsi', 0):.1f}")
         print(f"   Nearest S/R: ${world_state.get('nearest_sr', 0):.2f}")
 
@@ -359,7 +360,7 @@ class TraiderMainLoop:
         print(f"\n{'='*70}")
         print(f"✅ SIGNAL GENERATED")
         print(f"{'='*70}")
-        print(f"   {action} {condition}")
+        print(f"   {action} {condition} {condition_name}")
         print(f"   Entry: ${entry:.2f} | SL: ${sl:.2f} | TP1: ${tp1:.2f}")
         print(f"   Lot: {lot_size} | Confidence: {confidence:.1%}")
         print(f"{'='*70}\n")

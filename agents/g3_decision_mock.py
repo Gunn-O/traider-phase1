@@ -53,7 +53,7 @@ class G3MockDecisionAgent:
         Returns:
             decision Dict if action != SKIP, None if SKIP
         """
-        condition = world_state.get('condition_candidate', 'A6_unclear')
+        condition = world_state.get('condition_candidate', 'A6')
         pattern = world_state.get('pattern_candidate', 'ไม่มี')
         rsi = world_state.get('rsi', 50)
         rsi_zone = world_state.get('rsi_zone', 'neutral')
@@ -178,36 +178,36 @@ class G3MockDecisionAgent:
         """Determine BUY/SELL/SKIP based on condition and pattern"""
 
         # A1: Uptrend → BUY only
-        if condition == 'A1_uptrend':
+        if condition == 'A1':
             if rsi <= 65:  # Not overbought
                 return 'BUY'
 
         # A2: Downtrend → SELL only
-        elif condition == 'A2_downtrend':
+        elif condition == 'A2':
             if rsi >= 35:  # Not oversold
                 return 'SELL'
 
         # A3: Mountain → BUY at base
-        elif condition == 'A3_mountain':
+        elif condition == 'A3':
             if rsi <= 55:  # Oversold or neutral
                 return 'BUY'
 
         # A4: Sideways up → BUY at lower bound
-        elif condition == 'A4_sideways_up':
+        elif condition == 'A4':
             if rsi <= 60:
                 return 'BUY'
             elif rsi >= 55 and pattern == 'แนวเด้ง':
                 return 'SELL'  # Action รอง at upper bound
 
         # A5: Sideways down → SELL at upper bound
-        elif condition == 'A5_sideways_down':
+        elif condition == 'A5':
             if rsi >= 40:
                 return 'SELL'
             elif rsi <= 45 and pattern == 'แนวเด้ง':
                 return 'BUY'  # Action รอง at lower bound
 
         # A6: Unclear → Use pattern only
-        elif condition == 'A6_unclear':
+        elif condition == 'A6':
             # ไม้รวย (Spike Reversal)
             if pattern == 'ไม้รวย':
                 if rsi <= 45:
@@ -240,7 +240,7 @@ class G3MockDecisionAgent:
         tp1 = tp2 = tp3 = None
 
         # A1/A2: Trend following
-        if condition in ['A1_uptrend', 'A2_downtrend']:
+        if condition in ['A1', 'A2']:
             if action == 'BUY':
                 sl = price - default_sl_distance
                 tp1 = price + default_tp_distance * 0.5
@@ -253,7 +253,7 @@ class G3MockDecisionAgent:
                 tp3 = price - default_tp_distance
 
         # A3: Mountain
-        elif condition == 'A3_mountain':
+        elif condition == 'A3':
             # BUY at base, TP = portions of mountain height
             if action == 'BUY':
                 mountain_height = 150.0  # Increased from 100 to 150 for better R:R
@@ -263,7 +263,7 @@ class G3MockDecisionAgent:
                 tp3 = price + mountain_height * 0.90
 
         # A4/A5: Sideways range
-        elif condition in ['A4_sideways_up', 'A5_sideways_down']:
+        elif condition in ['A4', 'A5']:
             range_size = 60.0  # Increased from 50 to 60
             if action == 'BUY':
                 sl = price - 15.0  # Reduced from 20 to 15
@@ -277,7 +277,7 @@ class G3MockDecisionAgent:
                 tp3 = price - range_size
 
         # A6: Unclear - use S/R levels
-        elif condition == 'A6_unclear':
+        elif condition == 'A6':
             if nearest_sr:
                 # Determine if nearest_sr is support (below) or resistance (above)
                 sr_is_below = nearest_sr < price
@@ -347,12 +347,12 @@ class G3MockDecisionAgent:
     def _get_expected_criteria(self, condition: str) -> str:
         """Get expected criteria for a condition"""
         criteria = {
-            'A1_uptrend': 'BUY when RSI ≤ 65 (not overbought)',
-            'A2_downtrend': 'SELL when RSI ≥ 35 (not oversold)',
-            'A3_mountain': 'BUY when RSI ≤ 55 (oversold/neutral)',
-            'A4_sideways_up': 'BUY when RSI ≤ 60, or SELL when RSI ≥ 55 + แนวเด้ง',
-            'A5_sideways_down': 'SELL when RSI ≥ 40, or BUY when RSI ≤ 45 + แนวเด้ง',
-            'A6_unclear': 'Pattern-based: ไม้รวย (RSI ≤45 BUY, ≥55 SELL) or แนวเด้ง (RSI ≤50 BUY, ≥50 SELL)'
+            'A1': 'BUY when RSI ≤ 65 (not overbought)',
+            'A2': 'SELL when RSI ≥ 35 (not oversold)',
+            'A3': 'BUY when RSI ≤ 55 (oversold/neutral)',
+            'A4': 'BUY when RSI ≤ 60, or SELL when RSI ≥ 55 + แนวเด้ง',
+            'A5': 'SELL when RSI ≥ 40, or BUY when RSI ≤ 45 + แนวเด้ง',
+            'A6': 'Pattern-based: ไม้รวย (RSI ≤45 BUY, ≥55 SELL) or แนวเด้ง (RSI ≤50 BUY, ≥50 SELL)'
         }
         return criteria.get(condition, 'Unknown condition')
 
@@ -395,7 +395,7 @@ if __name__ == "__main__":
         'rsi': 36.2,
         'rsi_zone': 'near_oversold',
         'h1_trend': 'bullish',
-        'condition_candidate': 'A3_mountain',
+        'condition_candidate': 'A3',
         'pattern_candidate': 'แนวเด้ง',
         'nearest_sr': 3050.00,
         'sr_distance': 0.48,

@@ -23,7 +23,9 @@ from utils import (
     detect_trend,
     get_rsi_zone,
     find_nearest_sr_level,
-    analyze_candle_pattern
+    analyze_candle_pattern,
+    get_condition_name,
+    get_pattern_name
 )
 
 
@@ -177,7 +179,9 @@ class G1MarketScanner:
             "rsi_zone": rsi_zone,
             "h1_trend": h1_trend,
             "condition_candidate": condition_candidate,
+            "condition_name": get_condition_name(condition_candidate),
             "pattern_candidate": pattern_candidate,
+            "pattern_name": get_pattern_name(pattern_candidate) if pattern_candidate != "ไม่มี" else "ไม่มี",
             "nearest_sr": round(nearest_sr['price'], 2) if nearest_sr else None,
             "sr_distance": round(sr_distance, 2),
             "sr_touches": nearest_sr['touches'] if nearest_sr else 0,
@@ -212,14 +216,13 @@ class G1MarketScanner:
         ระบุ Condition A1-A6 จากรูปแบบกราฟ
 
         Returns:
-            "A1_uptrend" | "A2_downtrend" | "A3_mountain" |
-            "A4_sideways_up" | "A5_sideways_down" | "A6_unclear"
+            "A1" | "A2" | "A3" | "A4" | "A5" | "A6"
         """
         # ใช้ 80 แท่งล่าสุด
         df = m5_df.tail(80).copy()
 
         if len(df) < 50:
-            return "A6_unclear"
+            return "A6"
 
         # คำนวณ trend ของ M5
         m5_trend = detect_trend(df, method='combined')
@@ -235,7 +238,7 @@ class G1MarketScanner:
             hl_count = sum(1 for i in range(10, len(lows)) if lows[i] > lows[i-10])
 
             if hh_count > 6 and hl_count > 6:
-                return "A1_uptrend"
+                return "A1"
 
         # A2: Downtrend - ราคาลงชัด + H1 bearish
         if m5_trend == 'bearish' and h1_trend in ['bearish', 'sideways']:
@@ -246,7 +249,7 @@ class G1MarketScanner:
             ll_count = sum(1 for i in range(10, len(lows)) if lows[i] < lows[i-10])
 
             if lh_count > 6 and ll_count > 6:
-                return "A2_downtrend"
+                return "A2"
 
         # A3: Mountain - ขึ้นแล้วลง (ใช้ 50 แท่ง)
         if len(df) >= 50:
@@ -284,7 +287,7 @@ class G1MarketScanner:
                     if not is_still_falling and is_base_stable:
                         # เช็คว่า H1 ไม่ bearish (ถ้า bearish แรง → ไม่ควรเข้า mountain BUY)
                         if h1_trend != 'bearish':
-                            return "A3_mountain"
+                            return "A3"
 
         # A4/A5: Sideways - ราคาสวิงออกข้าง
         if m5_trend == 'sideways':
@@ -302,12 +305,12 @@ class G1MarketScanner:
                     earlier_trend = earlier['close'].iloc[-1] - earlier['close'].iloc[0]
 
                     if earlier_trend > 0:
-                        return "A4_sideways_up"
+                        return "A4"
                     else:
-                        return "A5_sideways_down"
+                        return "A5"
 
         # Default: A6 Unclear
-        return "A6_unclear"
+        return "A6"
 
     def _identify_pattern_candidate(self, pattern_analysis: Dict, spike_detected: bool,
                                     nearest_sr: Optional[Dict], current_rsi: float) -> str:
