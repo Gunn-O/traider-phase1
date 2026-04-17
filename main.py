@@ -344,6 +344,30 @@ class TraiderMainLoop:
             logger.error("Failed to fetch data")
             return
 
+        # CRITICAL: Extract candle_time and current_candle from fetched data (simulate mode fix)
+        # In simulate mode, candle_time=None → need to use latest candle timestamp
+        # In backtest mode, candle_time and current_candle are already passed in
+        if candle_time is None or current_candle is None:
+            # Get timestamp and current_candle from first available TF (usually M5)
+            for tf in TIMEFRAMES:
+                if tf in candles_by_tf and candles_by_tf[tf]:
+                    last_candle = candles_by_tf[tf][-1]  # Most recent candle
+
+                    # Extract candle_time if needed
+                    if candle_time is None and 'timestamp' in last_candle:
+                        candle_time = last_candle['timestamp']
+                        if isinstance(candle_time, str):
+                            from dateutil import parser
+                            candle_time = parser.parse(candle_time)
+                        logger.debug(f"Extracted candle_time from {tf}: {candle_time.isoformat()}")
+
+                    # Extract current_candle if needed (for position monitoring)
+                    if current_candle is None:
+                        current_candle = last_candle
+                        logger.debug(f"Extracted current_candle from {tf}")
+
+                    break
+
         # Step 2: G1 Pattern Detection
         logger.info("\n[STEP 2] G1 Pattern Detection (MTF)...")
         world_state = self.g1.scan_all_tf(candles_by_tf)
