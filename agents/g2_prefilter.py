@@ -79,11 +79,11 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
 
     # Check 1b: Quality threshold (ประหยัด Claude calls)
     quality = world_state.get('quality', 0)
-    if quality < 0.65:
-        logger.info(f"SKIP: Quality too low ({quality:.2f} < 0.65)")
+    if quality < 0.50:  # Strategy v2.1: chart_quality < 0.5 → SKIP
+        logger.info(f"SKIP: Quality too low ({quality:.2f} < 0.50)")
         return {
             'pre_approved': False,
-            'skip_reason': f'Quality {quality:.2f} ต่ำเกิน (ต้อง ≥ 0.65)',
+            'skip_reason': f'Quality {quality:.2f} ต่ำเกิน (ต้อง ≥ 0.50)',
             'chart_context': {}
         }
 
@@ -207,9 +207,10 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
         if current_tech_price > 0 and current_price > 0:
             price_diff = abs(current_price - current_tech_price)
 
-            # Touch range: 1.0-3.0 USD (100-300 pip)
-            TOUCH_MIN = 1.0   # 100 pip - ราคาใกล้จุดเทคนิคเกินไป (ยังไม่ย่อมา)
-            TOUCH_MAX = 3.0   # 300 pip - ราคาห่างจากจุดเทคนิคเกินไป (ยังไม่แตะ)
+            # Touch range: 1.0-10.0 USD (100-1000 pip)
+            # NOTE: เพิ่ม TOUCH_MAX เป็น 10.0 เพื่อรองรับกรณี technical point ไม่ refresh
+            TOUCH_MIN = 1.0    # 100 pip - ราคาใกล้จุดเทคนิคเกินไป (ยังไม่ย่อมา)
+            TOUCH_MAX = 10.0   # 1000 pip - ผ่อนเพื่อให้โอกาสเข้ามากขึ้น (workaround)
 
             if price_diff < TOUCH_MIN:
                 # ราคายังอยู่ที่จุดเทคนิค (ยังไม่ออกไป) หรือใกล้เกินไป
@@ -228,7 +229,7 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
                     'chart_context': {}
                 }
             else:
-                # ราคาอยู่ในช่วง 100-300 pip จากจุดเทคนิค (ถูกต้อง)
+                # ราคาอยู่ในช่วง 100-1000 pip จากจุดเทคนิค (ถูกต้อง)
                 logger.info(f"✅ Touch OK: current={current_price:.2f}, tech={current_tech_price:.2f}, diff={price_diff:.2f} (in range {TOUCH_MIN}-{TOUCH_MAX})")
 
     # สร้าง chart_context
