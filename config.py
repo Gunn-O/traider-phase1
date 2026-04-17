@@ -101,7 +101,8 @@ def calc_lot(balance: float, sl_pip: int, winrate_test: bool = False) -> dict:
 # Single TF mode: ง่าย, เร็ว, reliable กว่า MTF
 # M1: signal เยอะ (20-50/day) เหมาะสำหรับ testing
 # M5: balanced quality (5-15/day) เหมาะสำหรับ production
-TIMEFRAMES = ['M5']  # Balanced: quality + frequency
+TIMEFRAMES = ['M5']  # Balanced: quality + frequency (DEFAULT)
+# TIMEFRAMES = ['M1']  # Uncomment for more signals per day
 
 TF_SIZE = {
     'H4': 6,

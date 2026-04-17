@@ -13,6 +13,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Import TIMEFRAMES from config (for Single TF / MTF selection)
+try:
+    from config import TIMEFRAMES
+except ImportError:
+    # Fallback if config not available (shouldn't happen in normal use)
+    TIMEFRAMES = ['M5']
+    logger.warning("Could not import TIMEFRAMES from config, using default ['M5']")
+
 # Timeframe mapping (string → minutes)
 TF_MINUTES = {
     'H4': 240,
@@ -402,7 +410,8 @@ class DataConnector:
     def get_all_timeframes_optimized(self, symbol: str, base_tf: str = 'M5',
                                       count: int = 55) -> Dict[str, List[Dict]]:
         """
-        Optimized: Fetch M5 once, resample to all other timeframes
+        Optimized: Fetch M5 once, resample to requested timeframes
+        (respects TIMEFRAMES from config.py for Single TF / MTF mode)
 
         Args:
             symbol: Symbol name
@@ -411,70 +420,75 @@ class DataConnector:
 
         Returns:
             {
-                'H4': [candles],
-                'H1': [candles],
-                'M30': [candles],
-                'M15': [candles],
-                'M5': [candles],
-                'M1': [candles]  # Not resampled, fetched separately
+                'M5': [candles],  # if TIMEFRAMES = ['M5']
+                or
+                'H4': [candles], 'H1': [candles], ...  # if MTF mode
             }
         """
         if not self.connected:
             raise RuntimeError("Not connected")
 
-        # Calculate how many M5 bars needed to generate 55 bars of H4
-        # H4 = 240 min = 48 M5 bars per H4 bar
-        # To get 55 H4 bars, need: 55 × 48 = 2,640 M5 bars
-        max_bars_needed = count * 48  # Conservative: enough for H4
+        # Filter: only resample TFs that are >= M5 (can't downsample to M1 from M5)
+        resample_tfs = [tf for tf in TIMEFRAMES if tf != 'M1']
 
-        # Fetch M5 data once
-        m5_minutes = TF_MINUTES['M5']
-        m5_df = self.get_candles(symbol, m5_minutes, max_bars_needed)
+        # If only M1 requested, skip resampling (will fetch M1 separately below)
+        if not resample_tfs:
+            result = {}
+        else:
+            # Calculate max bars needed (for largest TF in TIMEFRAMES)
+            # H4 = 240 min = 48 M5 bars per H4 bar
+            max_multiplier = max([TF_MINUTES.get(tf, 5) // 5 for tf in resample_tfs])
+            max_bars_needed = count * max_multiplier
 
-        if m5_df.empty:
-            return {}
+            # Fetch M5 data once
+            m5_minutes = TF_MINUTES['M5']
+            m5_df = self.get_candles(symbol, m5_minutes, max_bars_needed)
 
-        # Ensure 'time' is datetime index for resampling
-        if 'time' in m5_df.columns:
-            m5_df = m5_df.set_index('time')
+            if m5_df.empty:
+                return {}
 
-        # Resample to other timeframes
-        result = {}
+            # Ensure 'time' is datetime index for resampling
+            if 'time' in m5_df.columns:
+                m5_df = m5_df.set_index('time')
 
-        for tf in ['H4', 'H1', 'M30', 'M15', 'M5']:
-            if tf == 'M5':
-                # Use original M5 data
-                df_resampled = m5_df.copy()
-            else:
-                # Resample
-                freq = f'{TF_MINUTES[tf]}min'
-                df_resampled = m5_df.resample(freq).agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum'
-                }).dropna()
+            # Resample to requested timeframes (from config.py)
+            result = {}
 
-            # Take last `count` bars
-            df_final = df_resampled.tail(count).reset_index()
-
-            # Convert to list of dicts
-            candles = df_final.to_dict('records')
-            for candle in candles:
-                if 'time' in candle and isinstance(candle['time'], pd.Timestamp):
-                    candle['timestamp'] = candle['time'].to_pydatetime()
+            for tf in resample_tfs:
+                if tf == 'M5':
+                    # Use original M5 data
+                    df_resampled = m5_df.copy()
                 else:
-                    candle['timestamp'] = candle.get('time', datetime.now())
+                    # Resample
+                    freq = f'{TF_MINUTES[tf]}min'
+                    df_resampled = m5_df.resample(freq).agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
 
-            result[tf] = candles
+                # Take last `count` bars
+                df_final = df_resampled.tail(count).reset_index()
+
+                # Convert to list of dicts
+                candles = df_final.to_dict('records')
+                for candle in candles:
+                    if 'time' in candle and isinstance(candle['time'], pd.Timestamp):
+                        candle['timestamp'] = candle['time'].to_pydatetime()
+                    else:
+                        candle['timestamp'] = candle.get('time', datetime.now())
+
+                result[tf] = candles
 
         # M1 needs separate fetch (can't downsample from M5)
-        try:
-            m1_candles = self.get_latest_candles(symbol, 'M1', count)
-            result['M1'] = m1_candles
-        except:
-            result['M1'] = []
+        if 'M1' in TIMEFRAMES:
+            try:
+                m1_candles = self.get_latest_candles(symbol, 'M1', count)
+                result['M1'] = m1_candles
+            except:
+                result['M1'] = []
 
         return result
 
