@@ -1,174 +1,228 @@
-# CLAUDE.md
+# CLAUDE.md — Tra(i)der Phase I v2.1
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> **อ่านไฟล์นี้ก่อนทำงานทุกครั้ง — ห้ามข้าม**
+> มี 2 Roles: Dev Agent และ Strategy Auditor
 
-## Project Overview
+---
 
-**Tra(i)der** is an AI-powered trading system that uses Claude to execute XAUUSD (Gold) trading strategies. The system removes emotional decision-making by following a structured rule-based strategy and operates 24/7.
+## ⚠️ Strategy ที่ใช้จริง
 
-**Core Principle:** Two-layer architecture
-1. **Strategy Layer** (read-only) - `strategy/XAUUSD_Strategy_v5.md` defines 6 trading conditions and 3 techniques
-2. **System Layer** - 5 Agent Groups (G1-G5) execute the strategy via Claude API
+| ไฟล์ | สถานะ |
+|------|-------|
+| `strategy/XAUUSD_AI_Trading_System_v2.1.md` | ✅ **ใช้จริง** — read-only |
+| `strategy/XAUUSD_Strategy_v5.md` | ❌ **เลิกใช้แล้ว** — ห้ามอ้างอิง |
+| `docs/TRAIDER_MASTER_PLAN_v2.1.md` | ✅ Architecture reference |
+| `docs/pattern_detection_spec.md` | ✅ G1 spec |
+| `docs/claude_prompt_template.md` | ✅ G3a spec |
 
-## Phase I Focus (Current)
+---
 
-**Goal:** Prove AI can read strategy correctly via **Simulated Trading** (no real MT5 execution)
+## 🔧 Role 1: Dev Agent
 
-**KPI to pass:** Win Rate ≥ 60% for 4 consecutive weeks
+รับผิดชอบ: เขียนโค้ด, แก้ bug, implement feature ตาม Master Plan v2.1
 
-**Key constraint:** Never modify Strategy Layer directly - it's read-only. Only G5 can propose changes after user approval.
+### กฎ Dev:
+1. **Strategy MD อ่านอย่างเดียว** — ห้าม hardcode rule ใน Python แทน MD
+2. **Claude API ทุก trade** — ห้ามใช้ mock/rule-based ใน production pipeline
+3. **RSI เป็น metadata เท่านั้น** — ไม่ใช้ตัดสิน BUY/SELL
+4. **Lot = max_loss_usd / sl_pip** — ไม่ใช่ balance × 1.5%
+5. **Risk 10% per plan** — ไม่ใช่ 1.5%
+6. **1 แผนต่อครั้ง** — ห้ามเปิดแผนใหม่ถ้ายังมีแผนเปิดอยู่
+7. **Timestamp = candle time** — ห้ามใช้ datetime.now() ใน backtest
+8. **Technique log** มาจาก decision['technique'] ไม่ใช่ world_state
 
-## Architecture - 5 Agent Groups
+### Architecture Pipeline:
+```
+Market Data (M5 Single TF)
+    ↓
+G1: Visual Pattern Detector
+    scan M5 only → build world_state
+    ↓ world_state
+G2: Pre-filter
+    block ก่อน Claude ถ้าไม่มี Setup จริง
+    ↓ pre_approved
+G3a: Claude API Decision (REQUIRED ทุกครั้ง)
+    system=[strategy cached, rules]
+    ↓ BUY/SELL/SKIP
+G3b: Lot = (balance × 10%) / sl_pip
+G3c: Guardian (R:R ≥ 1.0, consecutive_loss, plan active)
+    ↓
+G4a: LINE Notify
+G4b: Sheets Log (candle timestamp ไม่ใช่ datetime.now())
+G4c: Position Monitor (ตรวจทุก candle close)
+```
 
-Pipeline flow: `Market Data → G1 → G2 → G3 → G4 ⇄ G5`
+### Risk Config (v2.1):
+```python
+risk_per_plan_pct = 0.10       # 10% ไม่ใช่ 1.5%
+min_rr_ratio = 1.0             # ไม่ใช่ 1.2 หรือ 1.5
+max_consecutive_loss = 3
+max_loss_30pct = 0.30
+max_loss_50pct = 0.50
+min_chart_quality = 0.50
+trailing_sl_min_tp = 3000      # pip
+winrate_test_lot = 0.01
+```
 
-- **G1: Market Scanning** - RSI(14), S/R levels, detect Conditions A1-A6, news filter
-- **G2: Quantitative Analysis** - Score RSI/S/R/Trend → confidence 0.0-1.0 (filter: ≥0.70)
-- **G3: Decision + MM + Guardian**
-  - G3a: Claude Decision Agent (reads Strategy MD → BUY/SELL/SKIP)
-  - G3b: Money Management (calculate lot size from risk %)
-  - G3c: Guardian (enforce risk limits: max DD, daily loss, R:R, news block)
-- **G4: Monitoring & Logging**
-  - G4a: LINE Notify (Thai language messages)
-  - G4b: Google Sheets Logger (Trade Log with simulated results)
-- **G5: Weekly Learning** - Analyze performance → propose threshold adjustments
+---
 
-## Directory Structure
+## 📊 Role 2: Strategy Auditor
 
-- `agents/` - G1-G5 implementations (will contain g1_signal_logic.py, g2_quant_analysis.py, etc.)
-- `strategy/` - `XAUUSD_Strategy_v5.md` (Source of Truth - read-only)
-- `utils/` - Data connectors, S/R detection, simulated result calculator
-- `backtest/` - Backtest results (gitignored)
-- `tests/` - Unit tests
-- `logs/` - Runtime logs
+รับผิดชอบ: ตรวจโค้ดว่าสอดคล้องกับ Strategy MD ก่อน run ทุกครั้ง
+
+### เรียกใช้เมื่อ:
+- Dev เขียน/แก้โค้ดเสร็จ
+- ก่อน run backtest หรือ simulate
+- เมื่อ SKIP rate สูงผิดปกติ (> 90%)
+- เมื่อ cost per call สูงผิดปกติ (> $0.025)
+
+### Checklist:
+
+**G1 Pattern Detector — agents/g1_pattern_detector.py:**
+- [ ] Slope วัดจาก first_swing_low → last_swing_high (ไม่ใช่ระหว่าง 2 แท่ง)
+- [ ] Slope threshold: 43-52° (±3° tolerance)
+- [ ] แท่งคู่: body ≥ 5% Range AND gap ≤ 10 pip (0.10 USD)
+- [ ] แท่งพ่อ: เคลื่อน 60-100% Range ใน 1-5 แท่ง (เนื้อเทียนเท่านั้น ไม่รวมไส้)
+- [ ] Sideway: กรอบ ≤ 50% Range ถึงจะเป็น sideway
+- [ ] Mountain: tolerance ฐาน ≤ 5% Range หรือ 300 pip
+- [ ] Breakout box (ตามเจ้า): ≤ 35% Range
+- [ ] Single TF: ใช้ M5 เท่านั้น (config: TIMEFRAMES = ['M5'])
+- [ ] SKIP เมื่อ M5 chart = unclear หรือ quality < 0.5
+
+**G2 Pre-filter — agents/g2_prefilter.py:**
+- [ ] Block ก่อน Claude: uptrend/downtrend แต่ไม่มี twin_candle AND ไม่มี breakout_box
+- [ ] Block ก่อน Claude: mountain แต่ tolerance_ok = False
+- [ ] Block ก่อน Claude: มี active_plan_id อยู่แล้ว
+- [ ] Block ก่อน Claude: consecutive_loss ≥ 3
+- [ ] ไม่ block เพราะ RSI zone (RSI เป็นแค่ metadata)
+
+**G3a Claude Decision — agents/g3_claude_decision.py:**
+- [ ] system prompt ใช้ list format พร้อม cache_control (ไม่ใช่ string)
+- [ ] strategy_content อยู่ใน block แรก พร้อม `"cache_control": {"type": "ephemeral"}`
+- [ ] llm_log บันทึก cache_read_tokens และ cache_hit
+- [ ] reason ใน output format ≤ 80 ตัวอักษร
+- [ ] ไม่มีการเรียก Claude เมื่อ G2 block แล้ว
+
+**G3b Money Management — agents/g3_money_management.py:**
+- [ ] `lot = (balance × 0.10) / sl_pip` — ไม่ใช่ balance × 0.015
+- [ ] winrate_test mode: lot = 0.01 เสมอ
+
+**G3c Guardian — agents/g3_risk_gate.py:**
+- [ ] R:R ≥ 1.0 (ไม่ใช่ 1.2 หรือ 1.5)
+- [ ] Block ถ้า active_plan_id ไม่ว่าง
+- [ ] Block ถ้า consecutive_loss ≥ 3
+- [ ] Block ถ้า total_loss_pct > 0.30
+- [ ] ไม่มี confidence threshold (เลิกใช้แล้ว)
+
+**G4 Position Monitor — agents/g4_position_monitor.py:**
+- [ ] check_and_update() ถูกเรียกใน run_once() เป็น Step 0
+- [ ] check_and_update() ถูกเรียกทุก candle ใน backtest loop
+- [ ] generate_plan_id() รับ candle_time parameter
+- [ ] generate_trade_id() รับ candle_time parameter
+- [ ] ไม่มี datetime.now() ใน backtest path
+- [ ] _update_portfolio_after_closes() auto-clear active_plan_id เมื่อปิดหมด
+
+**G4 Sheets Logger — agents/g4_sheets_logger.py:**
+- [ ] timestamp_open ใช้ candle_time ไม่ใช่ datetime.now()
+- [ ] technique มาจาก decision['technique'] ไม่ใช่ world_state['technique_candidate']
+- [ ] reason ไม่ถูก truncate (prompt บังคับ ≤ 80 ตัวแล้ว)
+
+**Backtest — main.py:**
+- [ ] วนลูปทุก M5 candle ไม่ใช่ทุกวัน
+- [ ] ส่ง candle_time เข้า pipeline ทุก step
+- [ ] monitor_positions() เรียกทุก candle (ไม่ว่าจะมี active plan หรือไม่)
+- [ ] **CRITICAL:** orders ต้องมี required fields ก่อนส่ง PositionMonitor:
+  ```python
+  order['plan_id'] = plan_id
+  order['result'] = 'PENDING'
+  order['entry_price'] = order['entry']  # alias
+  order['sl_price'] = order['sl']
+  order['tp_price'] = order['tp']
+  order['lot_size'] = order['lot']
+  ```
+
+### Output Format ของ Auditor:
+
+```
+## Strategy Audit Report — [วันที่]
+
+### ✅ PASS
+- [รายการที่ผ่าน]
+
+### ❌ FAIL
+- [ไฟล์:บรรทัด] — [สิ่งที่พบ] ≠ [สิ่งที่ควรเป็น] (Strategy ref: section X.X)
+
+### ⚠️ WARN
+- [รายการที่น่าสงสัย]
+
+### 💰 Cost Check
+- Cost per call: $X.XXX (target: < $0.010 หลัง cache)
+- Cache hit rate: XX% (target: > 80%)
+- G2 block rate: XX% (target: > 70% เพื่อลด Claude calls)
+
+### Recommendation
+[ ] Run ได้เลย
+[ ] แก้ก่อน: [รายการ]
+```
+
+---
+
+## วิธีใช้ 2 Roles
+
+```bash
+# ต้องการแก้โค้ด
+"@Dev แก้ g2_prefilter.py เพิ่ม Setup Pre-check..."
+
+# ต้องการตรวจก่อน run
+"@Auditor ตรวจโค้ดที่แก้ล่าสุดก่อน run backtest"
+
+# ต้องการทั้งคู่ (แก้แล้วตรวจทันที)
+"@Dev แก้ X แล้ว @Auditor ตรวจก่อน run"
+
+# SKIP rate สูงผิดปกติ
+"@Auditor SKIP 95% ใน backtest วิเคราะห์ว่า filter ไหนเข้มเกินไป"
+
+# Cost สูงผิดปกติ
+"@Auditor cost $0.018/call แสดงว่า cache ไม่ทำงาน หาสาเหตุ"
+```
+
+---
 
 ## Environment Setup
 
-1. Create a virtual environment and activate it:
 ```bash
 python3 -m venv venv
-source venv/bin/activate  # On macOS/Linux
-```
-
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-3. Configure environment variables by copying `.env.example` to `.env` and filling in:
-   - `DATA_MODE` - **Critical:** "backtest" | "simulate" | "live"
-   - `ANTHROPIC_API_KEY` - Claude API key (required for G3 Decision Agent)
-   - `LINE_NOTIFY_TOKEN` - LINE notification token
-   - `LINE_NOTIFY_ENABLED` - true/false (disable during backtest)
-   - `GOOGLE_SHEETS_ID` / `GOOGLE_CREDENTIALS_JSON` - Google Sheets integration
-   - `SHEETS_ENABLED` - true/false (disable during backtest)
-   - `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER` - MetaTrader5 credentials (live mode only, Windows)
-   - `TV_USERNAME` / `TV_PASSWORD` - TradingView credentials (if using tvdatafeed)
-   - Backtest parameters: `BACKTEST_START`, `BACKTEST_END`, `BACKTEST_SYMBOL`, `BACKTEST_TF`
-   - Risk management: `ACCOUNT_BALANCE`, `RISK_PCT`
-
-## Key Dependencies
-
-- **anthropic** - Claude AI integration for trading decisions
-- **tvdatafeed** - Fetches market data from TradingView
-- **gspread** - Google Sheets integration for logging trades
-- **ta** - Technical analysis indicators
-- **pandas/numpy** - Data processing and analysis
-- **schedule** - Task scheduling for live trading
-- **pytest** - Testing framework
-
-## Data Modes (utils/data_connector.py)
-
-The system supports 3 data modes via `DATA_MODE` environment variable:
-
-### simulate ⭐ RECOMMENDED for Phase I Development
-- Data source: **yfinance** near real-time (~15 min delay)
-- Symbol mapping: XAUUSD → GC=F (Gold Futures)
-- Data range: Last 60 days automatically
-- No MT5 required, works on macOS/Linux
-- **Use this for developing and testing G1-G5 agents**
-- Can enable LINE and Sheets for integration testing
-
-```python
-# No date parameters needed
-connector = create_connector('simulate')
-data = connector.get_latest_candles('XAUUSD', m5_count=80, h1_count=20)
-```
-
-### backtest ⚠️ Limited to 60 days
-- Data source: **yfinance** historical data
-- Symbol mapping: XAUUSD → GC=F
-- **Limitation:** Intraday data (5m/15m/30m) available for last 60 days only
-- For older historical data: use hourly/daily intervals or CSV files
-- Requires: `BACKTEST_START` and `BACKTEST_END` dates (within 60 days)
-- Disable: `LINE_NOTIFY_ENABLED=false`, `SHEETS_ENABLED=false`
-
-```python
-# Must be within last 60 days
-start = datetime.now() - timedelta(days=30)
-end = datetime.now()
-data = connector.get_latest_candles('XAUUSD', 80, 20, start, end)
-```
-
-### live (Phase II only)
-- Data source: **MetaTrader5** real-time API
-- Requires: Windows OS + MT5 installed + valid credentials
-- Symbol: XAUUSD (native MT5 symbol)
-- Phase II feature (Phase I uses simulated execution only)
-
-```python
-connector.connect(login=12345, password='xxx', server='ICMarkets-Demo')
-```
-
-## Development Commands
-
-Run tests:
-```bash
-pytest tests/
-```
-
-Run a specific test:
-```bash
-pytest tests/test_name.py::test_function_name
-```
-
-Activate virtual environment:
-```bash
 source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-## Critical Development Rules
+**.env สำคัญ:**
+```
+ANTHROPIC_API_KEY=sk-ant-...
+LINE_NOTIFY_ENABLED=false      # ปิดระหว่าง backtest
+SHEETS_ENABLED=false           # ปิดระหว่าง backtest
+DATA_MODE=backtest
+ACCOUNT_BALANCE=500
+WINRATE_TEST=true              # 0.01 lot ทุกไม้
+```
 
-### Strategy Layer Rules
-1. **NEVER modify `strategy/XAUUSD_Strategy_v5.md` directly** - it's the Source of Truth
-2. **NEVER hardcode strategy rules in Python** - always read from Strategy MD
-3. Only G5 (Evaluate & Relearn) can propose changes, and only after user approval
+**Run commands:**
+```bash
+python main.py --winrate-test              # Winrate test (0.01 lot)
+python main.py --simulate                  # Paper trading
+python main.py --backtest --start 2026-03-01 --end 2026-03-07
+```
 
-### Phase Discipline
-4. **DO NOT implement Phase II/III features during Phase I** - follow the roadmap strictly
-5. Phase I = Simulated trading only (no real MT5 order execution)
-6. Must achieve Win Rate ≥ 60% for 4 weeks before Phase II
+---
 
-### Decision Rules (G3 Guardian)
-7. **confidence < 0.70 = SKIP** - no exceptions
-8. **R:R < 1:2 = SKIP** - no exceptions
-9. **news_flag = true = SKIP** - block ±30 min around high-impact events
-10. **SKIP if uncertain** - better to skip than trade incorrectly
+## สิ่งที่ห้ามทำ
 
-### Risk Limits (Default)
-- Max Drawdown: 5%
-- Max Daily Loss: 3%
-- Max Open Trades: 2
-- Risk per Trade: 1.5%
-
-### Token Usage
-- G3 Decision Agent: ~250 tokens/call, ~10-15 calls/day
-- Estimated cost: $0.02-0.06/day with claude-sonnet-4-5
-
-## Important Notes
-
-- Never commit `.env`, `credentials.json`, or `token.json` files (they contain sensitive credentials)
-- Backtest results are stored in `backtest/results/` and are gitignored
-- The project uses Thai language in LINE messages and some configuration comments
-- Always test strategies in backtest mode before enabling live trading
-- Symbol mapping: XAUUSD uses GC=F for yfinance (Gold Futures)
+- ❌ อ้างอิง `XAUUSD_Strategy_v5.md` (เลิกใช้แล้ว)
+- ❌ ใช้ confidence threshold ≥ 0.70 (เลิกใช้แล้ว)
+- ❌ ใช้ R:R ≥ 1.2 หรือ 1.5 (ปัจจุบันใช้ 1.0)
+- ❌ ใช้ lot = balance × 1.5% (ปัจจุบันใช้ 10% / sl_pip)
+- ❌ เรียก Claude ทุก candle โดยไม่มี G2 block ก่อน
+- ❌ ใช้ datetime.now() ใน backtest path
+- ❌ ใช้ mock agent ใน production
+- ❌ Implement Phase II feature ระหว่าง Phase I

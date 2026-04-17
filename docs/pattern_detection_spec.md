@@ -14,7 +14,7 @@ SCREEN_Y = 7.4              # หน่วยแกน Y (สัดส่วน�
 TARGET_SLOPE_DEG = 47.5     # ความชันอ้างอิง Uptrend/Downtrend (45-50°)
 MIN_TWIN_CANDLE_BODY = 0.05 # แท่งคู่: เนื้อเทียนต้องหนา ≥ 5% Range
 MAX_TWIN_CANDLE_GAP = 10    # แท่งคู่: Open/Close ห่างกันได้ไม่เกิน 10 pip
-TIMEFRAMES = ['H4','H1','M30','M15','M5','M1']
+TIMEFRAMES = ['M5']  # Single TF mode
 ```
 
 ---

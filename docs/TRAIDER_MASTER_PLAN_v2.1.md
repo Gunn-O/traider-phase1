@@ -109,28 +109,36 @@ def calc_lot(balance: float, sl_pip: int, winrate_test: bool = False) -> dict:
 
 ---
 
-## 3. MTF Selection Rules
+## 3. Timeframe Configuration (Single TF Mode)
 
-### TF ที่ Scan
+### Current Setup
 ```
-ทุก cycle scan: H4, H1, M30, M15, M5, M1
+TIMEFRAMES = ['M5']  # Single TF only
 ```
 
-### Priority Rules
+### Why Single TF?
 ```
-Rule 1 — ทิศทางเดียวกัน บริเวณเดียวกัน:
-  → เลือก TF ใหญ่กว่า (H4 > H1 > M30 > M15 > M5 > M1)
+✅ Advantages:
+- Simple & Reliable (no TF conflict)
+- Fast (6x faster than MTF)
+- Cost-effective (1/6 API calls)
+- Clear decision logic
 
-Rule 2 — ทิศทางสวนกัน:
-  → เลือก quality สูงกว่าเพียง 1 TF
+❌ MTF Disadvantages:
+- Complex selection logic
+- TF conflicts common
+- Slow (scan 6 TF per cycle)
+- Expensive (6x API calls)
+```
 
-Rule 3 — Quality ใกล้กัน (ต่างกัน < 0.10):
-  → เลือกสัญญาณที่เกิดก่อน (ตรวจจาก chart pattern เก่ากว่า)
+### การเปลี่ยน TF
+```
+config.py → TIMEFRAMES = ['M5']
 
-Rule 4 — ทุก TF เป็น Unclear:
-  → SKIP รอบนั้น
-
-TF Size: H4=6, H1=5, M30=4, M15=3, M5=2, M1=1
+Options:
+- ['M1'] → signal เยอะ (testing, high frequency)
+- ['M5'] → balanced (recommended)
+- ['M15'] → signal คุณภาพสูง (low frequency)
 ```
 
 ---

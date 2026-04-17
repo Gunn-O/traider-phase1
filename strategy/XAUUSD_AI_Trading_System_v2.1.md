@@ -713,20 +713,21 @@ R:R    = Reward / Risk  → ต้องได้ >= 1.0
 
 ---
 
-#### กฎการเลือก Timeframe (MTF Selection)
+#### Timeframe Selection (Single TF Mode)
 
-**Step 1:** Scan ทุก TF — M1, M5, M15, M30, H1, H4
-**Step 2:** ระบุลักษณะกราฟและ Setup ของแต่ละ TF
-**Step 3:** เลือก TF ที่มี Setup สวยที่สุดโดยใช้กฎต่อไปนี้
+**Current Configuration: M5 Single TF**
 
-| กรณี | กฎ |
-|------|-----|
-| TF หลายตัวมี Setup ทิศทาง**เดียวกัน**บริเวณ**ใกล้เคียงกัน** | เลือก **TF ที่ใหญ่กว่า** |
-| TF หลายตัวมี Setup ทิศทาง**สวนกัน** | เลือก **TF ที่มี Quality สูงกว่า** เพียง 1 TF |
-| Quality ใกล้เคียงกัน (ต่างกัน < 0.10) | เลือก **สัญญาณที่เกิดก่อน** (pattern เก่ากว่า) |
-| ทุก TF เป็นไม่ชัด | **SKIP รอบนั้น** ไม่เปิดแผน |
+- System วิเคราะห์เฉพาะ **M5 timeframe** เท่านั้น
+- ไม่มี MTF (Multi-Timeframe) selection
+- เหตุผล:
+  - ⚡ เร็วกว่า (scan 1 TF แทน 6 TF)
+  - 🎯 Simple & Reliable (ไม่มี TF conflict)
+  - 💰 Cost-effective (ลด API calls 6x)
 
-> 💡 ใช้เพียง **1 TF ต่อแผน** — ไม่ผสม TF ในแผนเดียวกัน
+> 💡 **การเปลี่ยน TF:** แก้ `config.py → TIMEFRAMES = ['M5']`
+> - เปลี่ยนเป็น `['M1']` → signal เยอะ (testing)
+> - เปลี่ยนเป็น `['M15']` → signal คุณภาพสูง (production)
+> - **ไม่แนะนำ MTF** → complexity สูง, TF conflict
 
 ---
 
@@ -816,12 +817,13 @@ TP > 3,000 pip → เมื่อราคาไป 2,000 pip → ย้าย 
 ### 5.1 ขั้นตอนการตัดสินใจ (Decision Flow)
 
 ```
-Step 1: Scan ทุก TF (H4, H1, M30, M15, M5, M1)
-        → ระบุลักษณะกราฟแต่ละ TF
-        → คำนวณ chart_quality แต่ละ TF
+Step 1: Scan M5 Timeframe (Single TF)
+        → ระบุลักษณะกราฟ (uptrend/downtrend/sideway/mountain/unclear)
+        → คำนวณ chart_quality (0.0-1.0)
 
-Step 2: เลือก TF ที่ดีที่สุด (ตามกฎ MTF ใน 4.2)
-        → ถ้าทุก TF เป็น "ไม่ชัด" → SKIP
+Step 2: ตรวจสอบ Chart Quality
+        → ถ้า chart = "unclear" → SKIP
+        → ถ้า quality < 0.5 → SKIP
 
 Step 3: ระบุ Setup และ Technique
         → ใช้ลำดับ Priority จาก 1.1
@@ -861,7 +863,7 @@ AI ต้องตอบในรูป JSON เสมอ ครบทุก fie
 {
   "chart_type": "uptrend|downtrend|sideway_down|sideway_up|mountain|unclear",
   "technique": "twin_candle|breakout_follow|mai_ruay|support_bounce|none",
-  "timeframe": "H4|H1|M30|M15|M5|M1",
+  "timeframe": "M5",  // Single TF mode (configurable: M1, M5, M15)
   "action": "BUY|SELL|SKIP",
   "confidence": 0.0,
   "entry": 0.0,

@@ -44,8 +44,8 @@
 เพิ่ม/แก้:
 - CHART_TYPES: uptrend, downtrend, sideway_down, sideway_up, mountain, unclear
 - TECHNIQUES: twin_candle, breakout_follow, mai_ruay, support_bounce
-- TIMEFRAMES: ['H4', 'H1', 'M30', 'M15', 'M5', 'M1']
-- TF_SIZE: {'H4': 6, 'H1': 5, 'M30': 4, 'M15': 3, 'M5': 2, 'M1': 1}
+- TIMEFRAMES: ['M5']  # Single TF mode (was MTF: H4, H1, M30, M15, M5, M1)
+- TF_SIZE: {'M5': 2}  # Only M5 used
 - RISK_CONFIG: ตาม Master Plan Section 2
 - ลบ/comment A1-A6 condition names เก่า
 
@@ -67,10 +67,9 @@ Functions ที่ต้องมี:
 - find_twin_candle(candles, search_start, near_price, range_usd) → dict
 - detect_breakout_box(candles, range_data, chart_type) → dict
 - check_sideway_still_valid(candles, sideway_state, range_data) → dict
-- select_best_setup(tf_results) → dict (MTF tiebreak)
-- build_world_state(candles_by_tf, selected_tf) → dict
+- build_world_state(candles, timeframe) → dict (Single TF)
 
-ต้อง scan ทุก TF แล้วเรียก select_best_setup()
+ใช้ M5 เท่านั้น (ไม่มี MTF selection)
 
 ---
 
@@ -152,9 +151,9 @@ Schema ใหม่ตาม Master Plan Section 6:
 
 ## STEP 9 — ปรับ main.py
 
-Pipeline ใหม่:
-1. Fetch data ทุก 6 TF (H4, H1, M30, M15, M5, M1)
-2. G1: detect pattern ทุก TF → select_best_setup()
+Pipeline (Single TF):
+1. Fetch M5 data (55 candles)
+2. G1: detect pattern M5 only
 3. G2: pre-filter + context builder
 4. ถ้าไม่ผ่าน → log SKIP reason → จบรอบ
 5. G3a: Claude API decision
