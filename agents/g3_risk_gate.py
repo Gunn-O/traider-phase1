@@ -1,190 +1,254 @@
 """
-G3c — Guardian Agent (Risk Gate)
+G3c — Guardian Risk Gate (v2.1)
 
 หน้าที่:
-- ตรวจสอบ risk limits ก่อน approve signal
-- Max Drawdown, Daily Loss, Max Open Trades
-- Confidence threshold, R:R ratio
-- News events
-- Blocked conditions
+- ตรวจสอบ 6 Block Conditions ก่อน approve signal
+- ไม่ใช้ Cooldown timer (Position-based rules เท่านั้น)
 
-Output: approved (True/False) + reason
+Reference: TRAIDER_MASTER_PLAN_v2.1.md Section 4
 """
 
-from typing import Dict, Optional
+import logging
+from typing import Dict
+
+from config import RISK_CONFIG
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 
-def guardian_check(decision: Dict, lot: float, account_state: Dict,
-                  risk_profile: Dict) -> Dict:
+# ============================================================================
+# GUARDIAN BLOCK RULES (v2.1)
+# ============================================================================
+
+def guardian_check(decision: Dict, lot_info: Dict,
+                   portfolio_state: Dict) -> Dict:
     """
-    ตรวจสอบ risk profile ก่อน approve signal
+    ตรวจสอบ 6 Block Conditions
 
     Args:
-        decision: Decision dict from G3a
-        lot: Calculated lot size from G3b
-        account_state: Current account state:
-            - balance: Current balance
-            - daily_pnl_pct: Daily P&L %
-            - total_dd_pct: Total drawdown %
-            - open_trades: Number of open trades
-            - news_active: News event active
-        risk_profile: Risk profile:
-            - max_dd_pct: Max drawdown % (default: 5.0)
-            - max_daily_loss_pct: Max daily loss % (default: 3.0)
-            - max_open_trades: Max open trades (default: 2)
-            - min_confidence: Min confidence (default: 0.70)
-            - min_rr_ratio: Min R:R ratio (default: 2.0)
-            - blocked_conditions: List of blocked conditions (default: [])
+        decision: {
+            'action': 'BUY' | 'SELL' | 'SKIP',
+            'rr_ratio': float,
+            'entry': float,
+            'sl': float,
+            'tp': float
+        }
+        lot_info: {
+            'lot_total': float,
+            'suggested_orders': int
+        }
+        portfolio_state: {
+            'active_plan_id': str,
+            'consecutive_loss': int,
+            'total_loss_pct': float,
+            'trading_blocked': bool,
+            'block_reason': str,
+            'news_flag': bool (optional)
+        }
 
     Returns:
-        Dict:
-            - approved: bool
-            - reason: str
-            - adjusted_lot: float (0 if blocked)
-            - blocked_condition: str
+        {
+            'approved': bool,
+            'block_reason': str,
+            'blocked_by': str (rule name)
+        }
     """
-    reasons = []
+    if decision.get('action') == 'SKIP':
+        return {'approved': False, 'block_reason': 'Decision is SKIP', 'blocked_by': 'decision'}
 
-    # 1. Max Daily Drawdown
-    daily_pnl = account_state.get('daily_pnl_pct', 0)
-    max_daily_loss = risk_profile.get('max_daily_loss_pct', 3.0)
+    # ============ Rule 1: มี Active Plan อยู่ ============
+    active_plan = portfolio_state.get('active_plan_id')
+    if active_plan and active_plan != 'ไม่มีแผนที่เปิดอยู่':
+        logger.warning(f"BLOCK: Active plan exists ({active_plan})")
+        return {
+            'approved': False,
+            'block_reason': f'มีแผนที่เปิดอยู่: {active_plan}',
+            'blocked_by': 'active_plan'
+        }
 
-    if daily_pnl <= -max_daily_loss:
-        reasons.append(f"Daily loss limit reached: {daily_pnl:.1f}% (max: -{max_daily_loss}%)")
+    # ============ Rule 2: Consecutive Loss >= 3 ============
+    consecutive_loss = portfolio_state.get('consecutive_loss', 0)
+    if consecutive_loss >= RISK_CONFIG['max_consecutive_loss']:
+        logger.warning(f"BLOCK: Consecutive loss {consecutive_loss} >= {RISK_CONFIG['max_consecutive_loss']}")
+        return {
+            'approved': False,
+            'block_reason': f'แพ้ติดกัน {consecutive_loss} ครั้ง',
+            'blocked_by': 'consecutive_loss'
+        }
 
-    # 2. Max Total Drawdown
-    total_dd = account_state.get('total_dd_pct', 0)
-    max_dd = risk_profile.get('max_dd_pct', 5.0)
+    # ============ Rule 3: Total Loss > 30% ============
+    total_loss_pct = portfolio_state.get('total_loss_pct', 0)
+    if total_loss_pct > RISK_CONFIG['max_loss_30pct']:
+        logger.warning(f"BLOCK: Total loss {total_loss_pct*100:.1f}% > 30%")
+        return {
+            'approved': False,
+            'block_reason': f'ขาดทุนสะสม {total_loss_pct*100:.1f}% > 30%',
+            'blocked_by': 'loss_30pct'
+        }
 
-    if total_dd >= max_dd:
-        reasons.append(f"Max DD reached: {total_dd:.1f}% (max: {max_dd}%)")
+    # ============ Rule 4: Total Loss > 50% (ถาวร) ============
+    if total_loss_pct > RISK_CONFIG['max_loss_50pct']:
+        logger.error(f"BLOCK PERMANENT: Total loss {total_loss_pct*100:.1f}% > 50%")
+        return {
+            'approved': False,
+            'block_reason': f'ขาดทุนรวม {total_loss_pct*100:.1f}% > 50% — BLOCK ถาวร',
+            'blocked_by': 'loss_50pct_permanent'
+        }
 
-    # 3. Max Open Trades
-    open_trades = account_state.get('open_trades', 0)
-    max_trades = risk_profile.get('max_open_trades', 2)
+    # ============ Rule 5: R:R < 1.0 ============
+    rr_ratio = decision.get('rr_ratio', 0)
+    if rr_ratio > 0 and rr_ratio < 1.0:
+        logger.warning(f"BLOCK: R:R {rr_ratio:.2f} < 1.0")
+        return {
+            'approved': False,
+            'block_reason': f'R:R = {rr_ratio:.2f} ต่ำกว่า 1.0',
+            'blocked_by': 'rr_ratio'
+        }
 
-    if open_trades >= max_trades:
-        reasons.append(f"Max open trades: {open_trades}/{max_trades}")
+    # ============ Rule 5.5: Confidence < 0.50 (Soft Block) ============
+    confidence = decision.get('confidence', 1.0)
+    if 0 < confidence < 0.50:
+        logger.warning(f"BLOCK: Confidence {confidence:.0%} < 50%")
+        return {
+            'approved': False,
+            'block_reason': f'Confidence {confidence:.0%} ต่ำกว่า 50%',
+            'blocked_by': 'confidence'
+        }
 
-    # 4. Confidence threshold
-    confidence = decision.get('confidence', 0)
-    min_confidence = risk_profile.get('min_confidence', 0.70)
+    # ============ Rule 6: News Flag = True ============
+    news_flag = portfolio_state.get('news_flag', False)
+    if news_flag:
+        logger.warning("BLOCK: News event active")
+        return {
+            'approved': False,
+            'block_reason': 'มีข่าวเศรษฐกิจ high impact (block ±30 นาที)',
+            'blocked_by': 'news_event'
+        }
 
-    if confidence < min_confidence:
-        reasons.append(f"Confidence too low: {confidence:.3f} < {min_confidence}")
-
-    # 5. R:R ratio
-    entry = decision.get('entry', 0)
-    sl = decision.get('sl', 0)
-    tp1 = decision.get('tp1', 0)
-
-    if entry > 0 and sl > 0 and tp1 > 0:
-        sl_distance = abs(entry - sl)
-        tp_distance = abs(tp1 - entry)
-        rr = tp_distance / sl_distance if sl_distance > 0 else 0
-
-        min_rr = risk_profile.get('min_rr_ratio', 2.0)
-        if rr < min_rr:
-            reasons.append(f"R:R too low: {rr:.2f} < {min_rr}")
-    else:
-        reasons.append("Invalid entry/sl/tp levels")
-
-    # 6. News flag
-    news_active = account_state.get('news_active', False)
-    if news_active:
-        reasons.append("High-impact news event active")
-
-    # 7. Blocked conditions
-    condition = decision.get('chart_condition', '')
-    blocked = risk_profile.get('blocked_conditions', [])
-
-    if condition in blocked:
-        reasons.append(f"Condition blocked by user: {condition}")
-
-    # Determine approval
-    approved = len(reasons) == 0
-
+    # ============ Passed All Checks ============
+    logger.info("✅ Guardian APPROVED")
     return {
-        'approved': approved,
-        'reason': ' | '.join(reasons) if reasons else 'All checks passed',
-        'adjusted_lot': lot if approved else 0.0,
-        'blocked_condition': condition if not approved else ''
+        'approved': True,
+        'block_reason': '',
+        'blocked_by': ''
     }
 
 
-# Example usage
+def check_if_permanently_blocked(portfolio_state: Dict) -> bool:
+    """
+    ตรวจสอบว่า block ถาวรหรือไม่ (total loss > 50%)
+
+    Returns:
+        True ถ้า block ถาวร
+    """
+    total_loss_pct = portfolio_state.get('total_loss_pct', 0)
+    return total_loss_pct > RISK_CONFIG['max_loss_50pct']
+
+
+def reset_consecutive_loss(portfolio_state: Dict) -> Dict:
+    """
+    Reset consecutive loss counter (เรียกเมื่อ WIN)
+
+    Args:
+        portfolio_state: Portfolio state dict
+
+    Returns:
+        Updated portfolio_state
+    """
+    portfolio_state['consecutive_loss'] = 0
+    logger.info("Consecutive loss counter reset to 0")
+    return portfolio_state
+
+
+def increment_consecutive_loss(portfolio_state: Dict) -> Dict:
+    """
+    เพิ่ม consecutive loss counter (เรียกเมื่อ LOSS)
+
+    Args:
+        portfolio_state: Portfolio state dict
+
+    Returns:
+        Updated portfolio_state
+    """
+    portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
+    logger.info(f"Consecutive loss incremented to {portfolio_state['consecutive_loss']}")
+    return portfolio_state
+
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+
 if __name__ == "__main__":
     print("="*70)
-    print("G3c GUARDIAN (RISK GATE) TEST")
+    print("G3c GUARDIAN RISK GATE v2.1 TEST")
     print("="*70)
 
     # Test decision
     test_decision = {
-        'chart_condition': 'A3_mountain',
         'action': 'BUY',
         'entry': 3050.00,
-        'sl': 3030.00,
-        'tp1': 3090.00,
-        'tp2': 3110.00,
-        'tp3': 3130.00,
-        'confidence': 0.86
+        'sl': 3041.00,
+        'tp': 3080.00,
+        'rr_ratio': 3.33
     }
 
-    test_lot = 0.15
-
-    # Test Scenario 1: All good
-    print(f"\n📊 Scenario 1: Normal conditions")
-    account_state = {
-        'balance': 10000,
-        'daily_pnl_pct': -0.5,
-        'total_dd_pct': 1.2,
-        'open_trades': 0,
-        'news_active': False
+    test_lot_info = {
+        'lot_total': 0.03,
+        'suggested_orders': 3
     }
 
-    risk_profile = {
-        'max_dd_pct': 5.0,
-        'max_daily_loss_pct': 3.0,
-        'max_open_trades': 2,
-        'min_confidence': 0.70,
-        'min_rr_ratio': 2.0,
-        'blocked_conditions': []
-    }
+    # Test scenarios
+    scenarios = [
+        ("Normal", {
+            'active_plan_id': 'ไม่มีแผนที่เปิดอยู่',
+            'consecutive_loss': 0,
+            'total_loss_pct': 0.0,
+            'trading_blocked': False,
+            'news_flag': False
+        }),
+        ("Has active plan", {
+            'active_plan_id': 'PLAN-20260408-001',
+            'consecutive_loss': 0,
+            'total_loss_pct': 0.0,
+            'trading_blocked': False
+        }),
+        ("Consecutive loss = 3", {
+            'active_plan_id': 'ไม่มีแผนที่เปิดอยู่',
+            'consecutive_loss': 3,
+            'total_loss_pct': 0.0,
+            'trading_blocked': False
+        }),
+        ("Total loss > 30%", {
+            'active_plan_id': 'ไม่มีแผนที่เปิดอยู่',
+            'consecutive_loss': 0,
+            'total_loss_pct': 0.35,
+            'trading_blocked': False
+        }),
+        ("News event", {
+            'active_plan_id': 'ไม่มีแผนที่เปิดอยู่',
+            'consecutive_loss': 0,
+            'total_loss_pct': 0.0,
+            'trading_blocked': False,
+            'news_flag': True
+        })
+    ]
 
-    result = guardian_check(test_decision, test_lot, account_state, risk_profile)
-    print(f"   Approved: {result['approved']}")
-    print(f"   Reason: {result['reason']}")
-    print(f"   Lot: {result['adjusted_lot']}")
+    for name, portfolio in scenarios:
+        print(f"\n📝 Scenario: {name}")
+        result = guardian_check(test_decision, test_lot_info, portfolio)
+        print(f"   Approved: {result['approved']}")
+        if not result['approved']:
+            print(f"   Reason: {result['block_reason']}")
+            print(f"   Blocked by: {result['blocked_by']}")
 
-    # Test Scenario 2: Daily loss limit
-    print(f"\n📊 Scenario 2: Daily loss limit hit")
-    account_state['daily_pnl_pct'] = -3.5
-    result = guardian_check(test_decision, test_lot, account_state, risk_profile)
+    # Test R:R < 1.0
+    print("\n📝 Scenario: R:R < 1.0")
+    bad_rr_decision = {**test_decision, 'rr_ratio': 0.8}
+    result = guardian_check(bad_rr_decision, test_lot_info, scenarios[0][1])
     print(f"   Approved: {result['approved']}")
-    print(f"   Reason: {result['reason']}")
-
-    # Test Scenario 3: Max open trades
-    print(f"\n📊 Scenario 3: Max open trades reached")
-    account_state['daily_pnl_pct'] = -0.5
-    account_state['open_trades'] = 2
-    result = guardian_check(test_decision, test_lot, account_state, risk_profile)
-    print(f"   Approved: {result['approved']}")
-    print(f"   Reason: {result['reason']}")
-
-    # Test Scenario 4: Low R:R
-    print(f"\n📊 Scenario 4: R:R too low")
-    account_state['open_trades'] = 0
-    low_rr_decision = test_decision.copy()
-    low_rr_decision['tp1'] = 3055.00  # Very close TP
-    result = guardian_check(low_rr_decision, test_lot, account_state, risk_profile)
-    print(f"   Approved: {result['approved']}")
-    print(f"   Reason: {result['reason']}")
-
-    # Test Scenario 5: Blocked condition
-    print(f"\n📊 Scenario 5: Condition blocked")
-    risk_profile['blocked_conditions'] = ['A3_mountain']
-    result = guardian_check(test_decision, test_lot, account_state, risk_profile)
-    print(f"   Approved: {result['approved']}")
-    print(f"   Reason: {result['reason']}")
+    if not result['approved']:
+        print(f"   Reason: {result['block_reason']}")
 
     print("\n" + "="*70)

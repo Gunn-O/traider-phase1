@@ -114,28 +114,52 @@ def setup_headers():
 
     print(f"   ✓ Headers written")
 
-    # Set column widths
+    # Set column widths (using batch_update for gspread)
     print(f"\n🎨 Formatting columns...")
 
-    # Set widths
-    worksheet.set_column_width('A', 150)  # trade_id
-    worksheet.set_column_width('B', 160)  # timestamp
-    worksheet.set_column_width('C', 120)  # condition
-    worksheet.set_column_width('D', 80)   # pattern
-    worksheet.set_column_width('E', 60)   # action
-    worksheet.set_column_width('F', 90)   # entry_price
-    worksheet.set_column_width('G', 90)   # sl_price
-    worksheet.set_column_width('H', 90)   # tp1_price
-    worksheet.set_column_width('I', 80)   # lot_size
-    worksheet.set_column_width('J', 90)   # confidence
-    worksheet.set_column_width('K', 60)   # rsi
-    worksheet.set_column_width('L', 100)  # h1_trend
-    worksheet.set_column_width('M', 100)  # session
-    worksheet.set_column_width('N', 80)   # result
-    worksheet.set_column_width('O', 90)   # pnl_usd
-    worksheet.set_column_width('P', 100)  # close_reason
+    try:
+        # Column widths in pixels
+        requests = []
+        column_widths = {
+            0: 150,   # A - trade_id
+            1: 160,   # B - timestamp
+            2: 120,   # C - condition
+            3: 80,    # D - pattern
+            4: 60,    # E - action
+            5: 90,    # F - entry_price
+            6: 90,    # G - sl_price
+            7: 90,    # H - tp1_price
+            8: 80,    # I - lot_size
+            9: 90,    # J - confidence
+            10: 60,   # K - rsi
+            11: 100,  # L - h1_trend
+            12: 100,  # M - session
+            13: 80,   # N - result
+            14: 90,   # O - pnl_usd
+            15: 100,  # P - close_reason
+        }
 
-    print(f"   ✓ Column widths set")
+        for col_index, width in column_widths.items():
+            requests.append({
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": col_index,
+                        "endIndex": col_index + 1
+                    },
+                    "properties": {
+                        "pixelSize": width
+                    },
+                    "fields": "pixelSize"
+                }
+            })
+
+        sheet.batch_update({"requests": requests})
+        print(f"   ✓ Column widths set")
+    except Exception as e:
+        print(f"   ⚠️  Could not set column widths: {e}")
+        print(f"   (Headers created successfully anyway)")
 
     print(f"\n{'='*70}")
     print(f"✅ Setup completed!")

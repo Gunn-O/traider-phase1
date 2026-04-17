@@ -361,7 +361,7 @@ def calculate_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def get_rsi_zone(rsi: float) -> str:
     """
-    Get RSI zone classification ตาม Strategy v5
+    Get RSI zone classification (metadata only, not used for decision)
 
     Args:
         rsi: RSI value (0-100)
@@ -500,18 +500,22 @@ if __name__ == "__main__":
     print("TECHNICAL INDICATORS TEST")
     print("="*60)
 
-    # Get market data
+    # Get market data using new MTF API
     with create_connector('simulate') as conn:
-        data = conn.get_latest_candles('XAUUSD', m5_count=100, h1_count=50)
+        m5_data = conn.get_latest_candles('XAUUSD', timeframe='M5', count=100)
+        h1_data = conn.get_latest_candles('XAUUSD', timeframe='H1', count=50)
 
     # Convert to DataFrame
-    m5_df = pd.DataFrame(data['m5_ohlcv'])
-    h1_df = pd.DataFrame(data['h1_candles'])
+    m5_df = pd.DataFrame(m5_data)
+    h1_df = pd.DataFrame(h1_data)
 
     print(f"\n📊 Data loaded:")
     print(f"   M5 candles: {len(m5_df)}")
     print(f"   H1 candles: {len(h1_df)}")
-    print(f"   Current price: ${data['current_price']:.2f}")
+
+    if len(m5_df) > 0:
+        current_price = m5_df.iloc[-1]['close']
+        print(f"   Current price: ${current_price:.2f}")
 
     # 1. Calculate RSI
     print(f"\n1️⃣  RSI Indicator")
@@ -535,7 +539,7 @@ if __name__ == "__main__":
                   f"strength: {level['strength']:.2f}")
 
     # 3. Find nearest S/R
-    nearest = find_nearest_sr_level(data['current_price'], sr_levels, max_distance=200)
+    nearest = find_nearest_sr_level(current_price, sr_levels, max_distance=200)
     if nearest:
         print(f"\n   Nearest S/R: ${nearest['price']:.2f} "
               f"({nearest['type']}) - {nearest['distance']:.2f} points away")
@@ -552,8 +556,8 @@ if __name__ == "__main__":
 
     # 5. Analyze latest candle
     print(f"\n4️⃣  Latest M5 Candle Pattern")
-    latest = data['m5_ohlcv'][-1]
-    prev = data['m5_ohlcv'][-2] if len(data['m5_ohlcv']) >= 2 else None
+    latest = m5_data[-1]
+    prev = m5_data[-2] if len(m5_data) >= 2 else None
 
     pattern = analyze_candle_pattern(latest, prev)
     print(f"   Body: {pattern['body_size']:.2f} | "

@@ -1,313 +1,524 @@
 """
-G4b — Google Sheets Logger
+G4b — Google Sheets Logger (v2.1)
 
 หน้าที่:
-- Log ทุก trade decision ลง Google Sheets
-- Sheet: "Trade Log"
-- Columns: trade_id, timestamp, condition, pattern, action, entry, sl, tp1, lot, confidence, rsi, h1_trend, session, result, pnl, close_reason
+- Log trades ลง Google Sheets (Plan-based Schema)
+- Sheet 1: Trade Log (23 columns)
+- Sheet 2: Portfolio State (10 fields)
+
+Reference: TRAIDER_MASTER_PLAN_v2.1.md Section 6
 """
 
 import os
+import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
-load_dotenv()
+from config import TRADE_LOG_COLUMNS, PORTFOLIO_STATE_FIELDS
 
-# Import gspread (Google Sheets API)
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+# Import gspread
 try:
     import gspread
     from google.oauth2.service_account import Credentials
     GSPREAD_AVAILABLE = True
 except ImportError:
     GSPREAD_AVAILABLE = False
-    print("Warning: gspread not installed - Google Sheets logging unavailable")
+    logger.warning("gspread not installed - Google Sheets logging unavailable")
 
 
 class SheetsLogger:
-    """Google Sheets logger for trade decisions"""
+    """
+    Google Sheets Logger for Plan-based Trading
 
-    def __init__(self):
-        """Initialize Sheets Logger"""
-        self.enabled = os.getenv('SHEETS_ENABLED', 'false').lower() == 'true'
+    Usage:
+        logger = SheetsLogger()
+        logger.log_plan_open(plan_id, orders, decision, world_state, llm_log)
+        logger.update_order_close(trade_id, result, close_price, ...)
+    """
+
+    def __init__(self, enabled_override=None):
+        """
+        Initialize Sheets Logger
+
+        Args:
+            enabled_override: Optional bool to override SHEETS_ENABLED env var
+                              (useful for backtest --log-sheets flag)
+        """
+        if enabled_override is not None:
+            self.enabled = enabled_override
+        else:
+            self.enabled = os.getenv('SHEETS_ENABLED', 'false').lower() == 'true'
+
         self.sheets_id = os.getenv('GOOGLE_SHEETS_ID', '')
         self.credentials_path = os.getenv('GOOGLE_CREDENTIALS_JSON', './credentials.json')
 
         self.client = None
         self.sheet = None
-        self.worksheet = None
-
-        self.trade_counter = 0  # Counter for trade IDs
+        self.trade_log_ws = None
+        self.portfolio_ws = None
 
         if self.enabled:
             if not GSPREAD_AVAILABLE:
-                raise RuntimeError("SHEETS_ENABLED=true but gspread not installed. Run: pip install gspread google-auth")
+                raise RuntimeError("SHEETS_ENABLED=true but gspread not installed")
 
             if not self.sheets_id:
-                raise ValueError("GOOGLE_SHEETS_ID required when SHEETS_ENABLED=true")
+                raise ValueError("GOOGLE_SHEETS_ID required")
 
             if not os.path.exists(self.credentials_path):
-                raise FileNotFoundError(f"Google credentials not found at: {self.credentials_path}")
+                raise FileNotFoundError(f"Credentials not found: {self.credentials_path}")
 
             self._connect()
+        else:
+            logger.info("Google Sheets logging disabled (SHEETS_ENABLED=false)")
 
     def _connect(self):
-        """Connect to Google Sheets"""
+        """Connect to Google Sheets and initialize worksheets"""
         try:
-            # Define scopes
             scopes = [
                 'https://www.googleapis.com/auth/spreadsheets',
                 'https://www.googleapis.com/auth/drive'
             ]
 
-            # Load credentials
             creds = Credentials.from_service_account_file(
-                self.credentials_path,
-                scopes=scopes
+                self.credentials_path, scopes=scopes
             )
 
-            # Create client
             self.client = gspread.authorize(creds)
-
-            # Open spreadsheet
             self.sheet = self.client.open_by_key(self.sheets_id)
 
-            # Get or create "Trade Log" worksheet
-            try:
-                self.worksheet = self.sheet.worksheet("Trade Log")
-                print("✓ Connected to existing 'Trade Log' worksheet")
-            except gspread.exceptions.WorksheetNotFound:
-                # Create new worksheet with headers
-                self.worksheet = self.sheet.add_worksheet(
-                    title="Trade Log",
-                    rows=1000,
-                    cols=16
-                )
+            # Initialize Trade Log worksheet
+            self.trade_log_ws = self._get_or_create_worksheet(
+                "Trade Log", TRADE_LOG_COLUMNS
+            )
 
-                # Add headers
-                headers = [
-                    "trade_id",
-                    "timestamp",
-                    "condition",
-                    "pattern",
-                    "action",
-                    "entry_price",
-                    "sl_price",
-                    "tp1_price",
-                    "lot_size",
-                    "confidence",
-                    "rsi",
-                    "h1_trend",
-                    "session",
-                    "result",
-                    "pnl_usd",
-                    "close_reason"
-                ]
+            # Initialize Portfolio State worksheet
+            self.portfolio_ws = self._get_or_create_worksheet(
+                "Portfolio State", PORTFOLIO_STATE_FIELDS, rows=20
+            )
 
-                self.worksheet.append_row(headers)
-                print("✓ Created new 'Trade Log' worksheet with headers")
+            logger.info("✓ Connected to Google Sheets")
 
         except Exception as e:
-            print(f"❌ Failed to connect to Google Sheets: {e}")
-            self.enabled = False
+            logger.error(f"Failed to connect to Google Sheets: {e}")
             raise
 
-    def _generate_trade_id(self) -> str:
-        """
-        สร้าง trade ID แบบ TRD-YYYYMMDD-NNN
+    def _get_or_create_worksheet(self, title: str, headers: List[str],
+                                   rows: int = 1000) -> gspread.Worksheet:
+        """Get existing worksheet or create new one with headers"""
+        try:
+            ws = self.sheet.worksheet(title)
+            logger.info(f"✓ Found existing worksheet: {title}")
+            return ws
+        except gspread.exceptions.WorksheetNotFound:
+            ws = self.sheet.add_worksheet(
+                title=title,
+                rows=rows,
+                cols=len(headers)
+            )
+            ws.append_row(headers)
+            logger.info(f"✓ Created worksheet: {title}")
+            return ws
 
-        Returns:
-            Trade ID string
-        """
-        self.trade_counter += 1
-        date_str = datetime.now().strftime('%Y%m%d')
-        return f"TRD-{date_str}-{self.trade_counter:03d}"
+    # ========================================================================
+    # TRADE LOG METHODS
+    # ========================================================================
 
-    def log_trade(self, decision: Dict, world_state: Dict) -> bool:
+    def log_plan_open(self, plan_id: str, orders: List[Dict],
+                      decision: Dict, world_state: Dict,
+                      llm_log: Dict, candle_time=None) -> bool:
         """
-        Log trade decision ลง Google Sheets
+        Log แผนใหม่ (ทุก order ในแผน)
 
         Args:
-            decision: Decision dict from G3
-            world_state: World state from G1
+            plan_id: PLAN-YYYYMMDD-NNN
+            orders: list of order dicts (1-3 orders)
+            decision: Claude decision dict
+            world_state: G1 output
+            llm_log: LLM usage log
+            candle_time: Optional datetime for backtest
 
         Returns:
-            True if logged successfully
+            True if success
         """
         if not self.enabled:
             return False
 
         try:
-            # Generate trade ID
-            trade_id = self._generate_trade_id()
+            rows = []
+            for order in orders:
+                row = self._build_trade_row(
+                    plan_id, order, decision, world_state, llm_log, candle_time
+                )
+                rows.append(row)
 
-            # Extract values
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            condition = decision.get('condition', '')
-            pattern = decision.get('pattern', '')
-            action = decision.get('action', 'SKIP')
-            entry_price = decision.get('entry', 0)
-            sl_price = decision.get('sl', 0)
-            tp1_price = decision.get('tp1', 0)
-            lot_size = decision.get('lot_size', 0)
-            confidence = decision.get('confidence', 0)
-            rsi = world_state.get('rsi', 0)
-            h1_trend = world_state.get('h1_trend', '')
-            session = world_state.get('session', '')
-
-            # Result (initially PENDING)
-            result = 'PENDING'
-            pnl_usd = 0
-            close_reason = ''
-
-            # Build row
-            row = [
-                trade_id,
-                timestamp,
-                condition,
-                pattern,
-                action,
-                entry_price,
-                sl_price,
-                tp1_price,
-                lot_size,
-                confidence,
-                rsi,
-                h1_trend,
-                session,
-                result,
-                pnl_usd,
-                close_reason
-            ]
-
-            # Append to sheet
-            self.worksheet.append_row(row)
-
-            print(f"✓ Logged to Sheets: {trade_id} | {action} {condition}")
+            # Append all rows at once
+            self.trade_log_ws.append_rows(rows)
+            logger.info(f"✓ Logged plan {plan_id} ({len(orders)} orders)")
             return True
 
         except Exception as e:
-            print(f"❌ Failed to log to Sheets: {e}")
+            logger.error(f"Failed to log plan: {e}")
             return False
 
-    def update_trade_result(self, trade_id: str, result: str, pnl_usd: float, close_reason: str) -> bool:
+    def _build_trade_row(self, plan_id: str, order: Dict,
+                         decision: Dict, world_state: Dict,
+                         llm_log: Dict, candle_time=None) -> List:
+        """Build single trade row according to TRADE_LOG_COLUMNS"""
+        timestamp_open = (candle_time if candle_time else datetime.now()).isoformat()
+
+        return [
+            order['trade_id'],                                  # A: trade_id
+            plan_id,                                            # B: plan_id
+            order['order_num'],                                 # C: order_num
+            timestamp_open,                                     # D: timestamp_open
+            world_state.get('selected_tf', 'M5'),              # E: timeframe
+            world_state.get('chart_type', 'unclear'),          # F: chart_type
+            decision.get('technique', world_state.get('technique_candidate', 'skip')),  # G: technique
+            order['action'],                                    # H: action
+            order['entry'],                                     # I: entry_price
+            order['sl'],                                        # J: sl_price
+            order['tp'],                                        # K: tp_price
+            order['lot'],                                       # L: lot_size
+            order.get('lot_total', order['lot']),              # M: lot_total_plan
+            decision.get('rr_ratio', 0),                       # N: rr_ratio
+            decision.get('confidence', 0),                     # O: confidence
+            world_state.get('metadata', {}).get('rsi_14', 50), # P: rsi_14
+            world_state.get('session', 'Unknown'),             # Q: session
+            decision.get('reason', ''),                        # R: ai_reason
+            llm_log.get('total_tokens', 0),                    # S: llm_tokens
+            llm_log.get('cost_usd', 0),                        # T: llm_cost_usd
+            'PENDING',                                          # U: result
+            0,                                                  # V: pnl_usd
+            '',                                                 # W: close_reason
+            0,                                                  # X: close_price
+            '',                                                 # Y: timestamp_close
+            order['sl'],                                        # Z: trailing_sl (initial = SL)
+            '',                                                 # AA: human_action
+            ''                                                  # AB: human_agree
+        ]
+
+    def update_order_close(self, trade_id: str, result: str,
+                           close_price: float, close_reason: str,
+                           pnl_usd: float, timestamp_close: str) -> bool:
         """
-        Update trade result เมื่อ position ปิด
+        Update order เมื่อปิด (PENDING → WIN/LOSS)
 
         Args:
-            trade_id: Trade ID to update
+            trade_id: TRD-YYYYMMDD-NNN
             result: 'WIN' | 'LOSS'
-            pnl_usd: P&L in USD
-            close_reason: 'TP1' | 'TP2' | 'TP3' | 'SL'
+            close_price: ราคาปิด
+            close_reason: 'TP_HIT' | 'SL_HIT' | 'MANUAL'
+            pnl_usd: P&L (USD)
+            timestamp_close: ISO timestamp
 
         Returns:
-            True if updated successfully
+            True if success
         """
         if not self.enabled:
             return False
 
         try:
-            # Find row with matching trade_id
-            cell = self.worksheet.find(trade_id)
-
-            if cell:
-                row_num = cell.row
-
-                # Update columns N, O, P (result, pnl_usd, close_reason)
-                self.worksheet.update_cell(row_num, 14, result)      # Column N
-                self.worksheet.update_cell(row_num, 15, pnl_usd)     # Column O
-                self.worksheet.update_cell(row_num, 16, close_reason) # Column P
-
-                print(f"✓ Updated Sheets: {trade_id} → {result} ${pnl_usd:,.2f} ({close_reason})")
-                return True
-            else:
-                print(f"⚠️  Trade ID not found: {trade_id}")
+            # Find row by trade_id
+            cell = self.trade_log_ws.find(trade_id)
+            if not cell:
+                logger.warning(f"Trade ID not found: {trade_id}")
                 return False
 
+            row_num = cell.row
+
+            # Update columns U, V, W, X, Y
+            updates = [
+                {'range': f'U{row_num}', 'values': [[result]]},
+                {'range': f'V{row_num}', 'values': [[pnl_usd]]},
+                {'range': f'W{row_num}', 'values': [[close_reason]]},
+                {'range': f'X{row_num}', 'values': [[close_price]]},
+                {'range': f'Y{row_num}', 'values': [[timestamp_close]]}
+            ]
+
+            self.trade_log_ws.batch_update(updates)
+            logger.info(f"✓ Updated {trade_id}: {result}")
+            return True
+
         except Exception as e:
-            print(f"❌ Failed to update Sheets: {e}")
+            logger.error(f"Failed to update order close: {e}")
             return False
 
+    def update_trailing_sl(self, trade_id: str, new_sl: float) -> bool:
+        """Update Trailing SL (column Z)"""
+        if not self.enabled:
+            return False
 
-def log_trade_to_sheets(decision: Dict, world_state: Dict) -> bool:
-    """
-    Helper function to log trade
+        try:
+            cell = self.trade_log_ws.find(trade_id)
+            if not cell:
+                return False
 
-    Args:
-        decision: Decision dict from G3
-        world_state: World state from G1
+            self.trade_log_ws.update_cell(cell.row, 26, new_sl)  # Col Z = 26
+            logger.info(f"✓ Updated trailing SL for {trade_id}: {new_sl}")
+            return True
 
-    Returns:
-        True if logged successfully
-    """
-    logger = SheetsLogger()
-    return logger.log_trade(decision, world_state)
+        except Exception as e:
+            logger.error(f"Failed to update trailing SL: {e}")
+            return False
+
+    def update_human_action(self, trade_id: str, human_action: str) -> bool:
+        """Update human action (columns AA, AB)"""
+        if not self.enabled:
+            return False
+
+        try:
+            cell = self.trade_log_ws.find(trade_id)
+            if not cell:
+                return False
+
+            row_num = cell.row
+            # Get AI action from column H
+            ai_action = self.trade_log_ws.cell(row_num, 8).value
+            agree = 'TRUE' if ai_action == human_action else 'FALSE'
+
+            updates = [
+                {'range': f'AA{row_num}', 'values': [[human_action]]},
+                {'range': f'AB{row_num}', 'values': [[agree]]}
+            ]
+
+            self.trade_log_ws.batch_update(updates)
+            logger.info(f"✓ Updated human action for {trade_id}: {human_action}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update human action: {e}")
+            return False
+
+    # ========================================================================
+    # PORTFOLIO STATE METHODS
+    # ========================================================================
+
+    def update_portfolio_state(self, portfolio_state: Dict) -> bool:
+        """
+        Update Portfolio State sheet (Sheet 2)
+
+        Args:
+            portfolio_state: {
+                'active_plan_id': str,
+                'open_plans_count': int,
+                'total_risk_pct': float,
+                'open_orders_count': int,
+                'total_open_lot': float,
+                'realized_pnl_usd': float,
+                'unrealized_pnl_usd': float,
+                'consecutive_loss': int,
+                'total_loss_pct': float,
+                'trading_blocked': bool,
+                'block_reason': str,
+                'last_updated': str,
+                'last_technical_price': float,
+                'last_plan_chart_type': str
+            }
+
+        Returns:
+            True if success
+        """
+        if not self.enabled:
+            return False
+
+        try:
+            # Update row 2 (row 1 = headers) - 14 fields total
+            values = [[
+                portfolio_state.get('active_plan_id', ''),                    # A
+                portfolio_state.get('open_plans_count', 0),                   # B
+                portfolio_state.get('total_risk_pct', 0.0),                   # C
+                portfolio_state.get('open_orders_count', 0),                  # D
+                portfolio_state.get('total_open_lot', 0.0),                   # E
+                portfolio_state.get('realized_pnl_usd', 0.0),                 # F
+                portfolio_state.get('unrealized_pnl_usd', 0.0),               # G
+                portfolio_state.get('consecutive_loss', 0),                   # H
+                portfolio_state.get('total_loss_pct', 0.0),                   # I
+                portfolio_state.get('trading_blocked', False),                # J
+                portfolio_state.get('block_reason', ''),                      # K
+                datetime.now().isoformat(),                                   # L (last_updated)
+                portfolio_state.get('last_technical_price', 0.0),             # M
+                portfolio_state.get('last_plan_chart_type', '')               # N
+            ]]
+
+            self.portfolio_ws.update('A2:N2', values)
+            logger.info("✓ Updated Portfolio State (14 fields)")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update portfolio state: {e}")
+            return False
+
+    def get_portfolio_state(self) -> Dict:
+        """
+        Read Portfolio State from sheet (14 fields)
+
+        Returns:
+            portfolio_state dict
+        """
+        if not self.enabled:
+            return self._default_portfolio_state()
+
+        try:
+            values = self.portfolio_ws.row_values(2)  # Row 2 = data
+            if len(values) < 14:
+                logger.warning(f"Portfolio state has {len(values)} columns, expected 14 - using defaults for missing")
+                # Pad with empty values if schema not fully migrated
+                values = values + [''] * (14 - len(values))
+
+            return {
+                'active_plan_id': values[0] if values[0] else 'ไม่มีแผนที่เปิดอยู่',        # A
+                'open_plans_count': int(values[1]) if values[1] else 0,                      # B
+                'total_risk_pct': float(values[2]) if values[2] else 0.0,                    # C
+                'open_orders_count': int(values[3]) if values[3] else 0,                     # D
+                'total_open_lot': float(values[4]) if values[4] else 0.0,                    # E
+                'realized_pnl_usd': float(values[5]) if values[5] else 0.0,                  # F
+                'unrealized_pnl_usd': float(values[6]) if values[6] else 0.0,                # G
+                'consecutive_loss': int(values[7]) if values[7] else 0,                      # H
+                'total_loss_pct': float(values[8]) if values[8] else 0.0,                    # I
+                'trading_blocked': str(values[9]).upper() == 'TRUE' if values[9] else False, # J
+                'block_reason': values[10] if values[10] else '',                            # K
+                'last_updated': values[11] if values[11] else '',                            # L
+                'last_technical_price': float(values[12]) if values[12] else 0.0,            # M
+                'last_plan_chart_type': values[13] if values[13] else ''                     # N
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to read portfolio state: {e}")
+            return self._default_portfolio_state()
+
+    def _default_portfolio_state(self) -> Dict:
+        """Return default portfolio state (14 fields)"""
+        return {
+            'active_plan_id': 'ไม่มีแผนที่เปิดอยู่',
+            'open_plans_count': 0,
+            'total_risk_pct': 0.0,
+            'open_orders_count': 0,
+            'total_open_lot': 0.0,
+            'realized_pnl_usd': 0.0,
+            'unrealized_pnl_usd': 0.0,
+            'consecutive_loss': 0,
+            'total_loss_pct': 0.0,
+            'trading_blocked': False,
+            'block_reason': '',
+            'last_updated': '',
+            'last_technical_price': 0.0,
+            'last_plan_chart_type': ''
+        }
+
+    def get_pending_trades(self) -> List[Dict]:
+        """
+        ดึง trades ที่ result = PENDING จาก Trade Log
+        สำหรับ load positions เข้า position_monitor ตอน backtest startup
+
+        Returns:
+            List of pending order dicts with required fields
+        """
+        if not self.enabled:
+            return []
+
+        try:
+            all_rows = self.trade_log_ws.get_all_records()
+            pending = [r for r in all_rows if r.get('result') == 'PENDING']
+
+            logger.info(f"Found {len(pending)} PENDING trades in Sheets")
+
+            # Convert to order format for position_monitor
+            orders = []
+            for row in pending:
+                order = {
+                    'trade_id': row.get('trade_id', ''),
+                    'plan_id': row.get('plan_id', ''),
+                    'order_num': row.get('order_num', 1),
+                    'action': row.get('action', ''),
+                    'entry': float(row.get('entry_price', 0)),
+                    'entry_price': float(row.get('entry_price', 0)),
+                    'sl': float(row.get('sl_price', 0)),
+                    'sl_price': float(row.get('sl_price', 0)),
+                    'tp': float(row.get('tp_price', 0)),
+                    'tp_price': float(row.get('tp_price', 0)),
+                    'lot': float(row.get('lot_size', 0.01)),
+                    'lot_size': float(row.get('lot_size', 0.01)),
+                    'result': 'PENDING',
+                    'trailing_sl': float(row.get('trailing_sl', row.get('sl_price', 0)))
+                }
+                orders.append(order)
+                logger.info(f"  Loaded: {order['trade_id']} | {order['action']} @ {order['entry']}")
+
+            return orders
+
+        except Exception as e:
+            logger.error(f"Failed to load pending trades: {e}")
+            return []
+
+    def clear_sheets(self, confirm: bool = False):
+        """
+        Clear all trades and reset portfolio state
+
+        Args:
+            confirm: Must be True to actually clear (safety)
+
+        Returns:
+            Dict with status
+        """
+        if not self.enabled:
+            return {'success': False, 'message': 'Sheets logging disabled'}
+
+        if not confirm:
+            return {
+                'success': False,
+                'message': 'Must set confirm=True to clear sheets'
+            }
+
+        try:
+            # Count current trades
+            all_rows = self.trade_log_ws.get_all_values()
+            trade_count = len(all_rows) - 1  # Exclude header
+
+            logger.info(f"Clearing {trade_count} trades from Trade Log...")
+
+            # Delete all rows except header
+            if trade_count > 0:
+                self.trade_log_ws.delete_rows(2, len(all_rows))
+                logger.info(f"✓ Deleted {trade_count} trades")
+
+            # Reset portfolio state
+            initial_state = [
+                'ไม่มีแผนที่เปิดอยู่',  # active_plan_id
+                '0',                      # open_plans_count
+                '0.00',                   # total_risk_pct
+                '0',                      # open_orders_count
+                '0.00',                   # total_open_lot
+                '0.00',                   # realized_pnl_usd
+                '0.00',                   # unrealized_pnl_usd
+                '0',                      # consecutive_loss
+                '0.00',                   # total_loss_pct
+                'FALSE',                  # trading_blocked
+                '',                       # block_reason
+                '',                       # last_updated
+                '0.00',                   # last_technical_price
+                ''                        # last_plan_chart_type
+            ]
+
+            self.portfolio_ws.update('A2:N2', [initial_state])
+            logger.info("✓ Portfolio state reset")
+
+            return {
+                'success': True,
+                'message': f'Cleared {trade_count} trades and reset portfolio',
+                'trades_cleared': trade_count
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to clear sheets: {e}")
+            return {
+                'success': False,
+                'message': f'Error: {e}'
+            }
 
 
-# Example usage and testing
-if __name__ == "__main__":
-    print("="*70)
-    print("G4b GOOGLE SHEETS LOGGER TEST")
-    print("="*70)
-
-    # Check configuration
-    enabled = os.getenv('SHEETS_ENABLED', 'false').lower() == 'true'
-    sheets_id = os.getenv('GOOGLE_SHEETS_ID', '')
-    creds_path = os.getenv('GOOGLE_CREDENTIALS_JSON', './credentials.json')
-
-    print(f"\n📋 Configuration:")
-    print(f"   SHEETS_ENABLED: {enabled}")
-    print(f"   GOOGLE_SHEETS_ID: {sheets_id if sheets_id else '✗ Not set'}")
-    print(f"   Credentials: {'✓ Found' if os.path.exists(creds_path) else '✗ Not found'}")
-
-    if not enabled:
-        print(f"\n⚠️  Sheets logging disabled (SHEETS_ENABLED=false)")
-        print(f"   Set SHEETS_ENABLED=true in .env to test")
-        exit(0)
-
-    if not os.path.exists(creds_path):
-        print(f"\n❌ Google credentials not found!")
-        print(f"   Expected at: {creds_path}")
-        print(f"\n💡 Steps to create credentials:")
-        print(f"   1. Go to: https://console.cloud.google.com")
-        print(f"   2. Create a Service Account")
-        print(f"   3. Download JSON key → save as credentials.json")
-        print(f"   4. Share your Google Sheet with service account email")
-        exit(1)
-
-    # Test data
-    test_decision = {
-        'action': 'BUY',
-        'condition': 'A3',
-        'pattern': 'B3',
-        'entry': 4720.0,
-        'sl': 4710.0,
-        'tp1': 4750.0,
-        'tp2': 4760.0,
-        'tp3': 4770.0,
-        'lot_size': 0.5,
-        'confidence': 0.82
-    }
-
-    test_world_state = {
-        'rsi': 36.5,
-        'h1_trend': 'bullish',
-        'session': 'London'
-    }
-
-    print(f"\n📝 Testing log_trade()...")
-
-    try:
-        logger = SheetsLogger()
-        success = logger.log_trade(test_decision, test_world_state)
-
-        if success:
-            print(f"\n✅ Successfully logged test trade to Google Sheets!")
-            print(f"   Check your sheet: https://docs.google.com/spreadsheets/d/{sheets_id}")
-        else:
-            print(f"\n✗ Failed to log trade")
-
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-
-    print("\n" + "="*70)
+# Alias for backward compatibility
+G4SheetsLogger = SheetsLogger

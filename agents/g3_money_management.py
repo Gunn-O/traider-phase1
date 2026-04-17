@@ -1,129 +1,193 @@
 """
-G3b — Money Management Agent
+G3b — Money Management Agent (v2.1)
 
 หน้าที่:
-- คำนวณ lot size จาก risk per trade
-- สูตร: lot = (account_balance × risk_pct) / (sl_distance × point_value)
-- จำกัด max/min lot ตาม risk profile
+- คำนวณ lot size ตามสูตรใหม่
+- สูตร: lot = เสียได้ (USD) / SL (pip)
+- เสียได้ = balance × 10% per plan
+- แนะนำจำนวน order (1-3)
+
+Reference: TRAIDER_MASTER_PLAN_v2.1.md Section 2
 """
 
-from typing import Dict, Optional
+import logging
+from typing import Dict
+
+from config import calc_lot, RISK_CONFIG
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 
-def calculate_lot_size(decision: Dict, account_balance: float,
-                      risk_profile: Optional[Dict] = None) -> float:
+# ============================================================================
+# LOT CALCULATION (ใช้จาก config.py)
+# ============================================================================
+
+def calculate_lot_for_decision(decision: Dict, balance: float,
+                                winrate_test: bool = False) -> Dict:
     """
-    คำนวณ lot size จาก risk per trade
+    คำนวณ lot สำหรับ decision
 
     Args:
-        decision: Decision dict from G3a (with entry and sl)
-        account_balance: Current account balance (USD)
-        risk_profile: Risk profile dict:
-            - risk_per_trade_pct: Risk % per trade (default: 1.5)
-            - min_lot: Minimum lot size (default: 0.01)
-            - max_lot: Maximum lot size (default: 1.00)
+        decision: {
+            'action': 'BUY' | 'SELL',
+            'entry': float,
+            'sl': float,
+            'tp': float
+        }
+        balance: Account balance (USD)
+        winrate_test: ถ้า True ใช้ 0.01 lot เสมอ
 
     Returns:
-        Calculated lot size (rounded to 2 decimals)
-
-    Formula:
-        lot = (account_balance × risk_pct) / (sl_distance × pip_value_per_lot)
-
-        For XAUUSD:
-        - 1 lot = 100 oz
-        - 1 point = $0.01 move per oz
-        - Pip value per lot = sl_distance_points × $0.1 per point per 0.01 lot
+        {
+            'lot_total': float,
+            'lot_per_order': float,
+            'suggested_orders': int (1-3),
+            'max_loss_usd': float
+        }
     """
-    risk_profile = risk_profile or {}
-    risk_pct = risk_profile.get('risk_per_trade_pct', 1.5) / 100  # Convert to decimal
-    min_lot = risk_profile.get('min_lot', 0.01)
-    max_lot = risk_profile.get('max_lot', 1.00)
+    if decision.get('action') == 'SKIP':
+        return {
+            'lot_total': 0,
+            'lot_per_order': 0,
+            'suggested_orders': 0,
+            'max_loss_usd': 0
+        }
 
-    # Extract values
+    # คำนวณ SL distance (pip)
     entry = decision.get('entry', 0)
     sl = decision.get('sl', 0)
 
     if entry <= 0 or sl <= 0:
-        return min_lot
+        logger.warning("Invalid entry or SL")
+        return {'lot_total': 0.01, 'lot_per_order': 0.01,
+                'suggested_orders': 1, 'max_loss_usd': 0}
 
-    # Calculate SL distance in points
     sl_distance = abs(entry - sl)
+    sl_pip = int(sl_distance * 100)  # 1 pip = 0.01 USD
 
-    if sl_distance == 0:
-        return min_lot
+    # เรียก calc_lot จาก config.py
+    result = calc_lot(balance, sl_pip, winrate_test)
 
-    # Risk amount in USD
-    risk_amount = account_balance * risk_pct
+    logger.info(f"Lot calculation: balance=${balance:.2f}, sl={sl_pip}pip → "
+                f"lot_total={result['lot_total']}, orders={result['suggested_orders']}")
 
-    # For XAUUSD: point value ≈ $0.10 per 0.01 lot per point
-    # So for 1 lot: point value = $10 per point
-    # pip_value_per_lot = sl_distance × 10 (for 1 lot)
-    pip_value_per_lot = sl_distance * 10
-
-    # Calculate lot
-    if pip_value_per_lot > 0:
-        raw_lot = risk_amount / pip_value_per_lot
-    else:
-        raw_lot = min_lot
-
-    # Round to 2 decimals
-    lot = round(raw_lot, 2)
-
-    # Apply limits
-    lot = max(min_lot, min(lot, max_lot))
-
-    return lot
+    return result
 
 
-# Example usage
+def validate_lot_limits(lot_total: float) -> bool:
+    """
+    ตรวจสอบว่า lot อยู่ในขอบเขตที่อนุญาต
+
+    Args:
+        lot_total: Lot ทั้งหมด
+
+    Returns:
+        True ถ้าผ่านเกณฑ์
+    """
+    if lot_total < 0.01:
+        logger.warning(f"Lot too small: {lot_total} < 0.01")
+        return False
+
+    if lot_total > 10.0:
+        logger.warning(f"Lot too large: {lot_total} > 10.0")
+        return False
+
+    return True
+
+
+def create_order_plan(decision: Dict, lot_info: Dict, world_state: Dict = None) -> Dict:
+    """
+    สร้างแผน order (1 แผน = 1 order เท่านั้น)
+
+    Args:
+        decision: Decision dict from G3a
+        lot_info: output จาก calculate_lot_for_decision()
+        world_state: Not used (kept for compatibility)
+
+    Returns:
+        {
+            'plan_id': str,  # สร้างจาก main.py
+            'lot_total': float,
+            'total_orders': 1,
+            'orders': [
+                {'order_num': 1, 'lot': lot_total, 'entry': ..., ...}
+            ]
+        }
+    """
+    action = decision['action']
+    entry = decision['entry']
+    sl = decision['sl']
+    tp = decision['tp']
+    lot_total = lot_info['lot_total']
+
+    # 1 plan = 1 order เสมอ
+    order = {
+        'order_num': 1,
+        'order_type': 'MARKET',
+        'action': action,
+        'entry': entry,
+        'sl': sl,
+        'tp': tp,
+        'lot': lot_total,  # ใช้ lot เต็มจำนวน
+        'rr_ratio': decision.get('rr_ratio', 0)
+    }
+
+    logger.info(f"Order 1 (MARKET): {action} @ {entry:.2f}, sl={sl:.2f}, tp={tp:.2f}, lot={lot_total}, R:R={order['rr_ratio']:.2f}")
+
+    return {
+        'lot_total': lot_total,
+        'total_orders': 1,
+        'max_loss_usd': lot_info['max_loss_usd'],
+        'orders': [order]
+    }
+
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+
 if __name__ == "__main__":
     print("="*70)
-    print("G3b MONEY MANAGEMENT TEST")
+    print("G3b MONEY MANAGEMENT v2.1 TEST")
     print("="*70)
 
     # Test cases
     test_decision = {
+        'action': 'BUY',
         'entry': 3050.00,
-        'sl': 3030.00,  # 20 points SL
-        'tp1': 3090.00
+        'sl': 3041.00,  # 900 pip SL
+        'tp': 3080.00
     }
 
-    test_balance = 10000  # $10,000
-    test_risk_profile = {
-        'risk_per_trade_pct': 1.5,  # 1.5% risk
-        'min_lot': 0.01,
-        'max_lot': 1.00
-    }
-
+    test_balance = 300  # $300
     print(f"\n📊 Test Scenario:")
-    print(f"   Account Balance: ${test_balance:,.2f}")
-    print(f"   Risk per Trade: {test_risk_profile['risk_per_trade_pct']}%")
+    print(f"   Balance: ${test_balance:.2f}")
     print(f"   Entry: ${test_decision['entry']:.2f}")
     print(f"   SL: ${test_decision['sl']:.2f}")
-    print(f"   SL Distance: {abs(test_decision['entry'] - test_decision['sl']):.2f} points")
+    sl_usd = abs(test_decision['entry'] - test_decision['sl'])
+    print(f"   SL Distance: {sl_usd:.2f} USD = {int(sl_usd*100)} pip")
 
-    lot_size = calculate_lot_size(test_decision, test_balance, test_risk_profile)
+    # Normal mode
+    print("\n--- Normal Mode ---")
+    lot_info = calculate_lot_for_decision(test_decision, test_balance, winrate_test=False)
+    print(f"   Lot Total: {lot_info['lot_total']}")
+    print(f"   Lot per Order: {lot_info['lot_per_order']}")
+    print(f"   Suggested Orders: {lot_info['suggested_orders']}")
+    print(f"   Max Loss: ${lot_info['max_loss_usd']:.2f}")
 
-    print(f"\n✓ Calculated Lot Size: {lot_size}")
+    # Winrate test mode
+    print("\n--- Winrate Test Mode ---")
+    lot_info_test = calculate_lot_for_decision(test_decision, test_balance, winrate_test=True)
+    print(f"   Lot Total: {lot_info_test['lot_total']}")
+    print(f"   Lot per Order: {lot_info_test['lot_per_order']}")
+    print(f"   Suggested Orders: {lot_info_test['suggested_orders']}")
 
-    # Calculate actual risk
-    sl_distance = abs(test_decision['entry'] - test_decision['sl'])
-    actual_risk_usd = lot_size * sl_distance * 10  # $10 per point per lot
-    actual_risk_pct = (actual_risk_usd / test_balance) * 100
-
-    print(f"   Actual Risk: ${actual_risk_usd:.2f} ({actual_risk_pct:.2f}%)")
-
-    # Test edge cases
-    print(f"\n📝 Edge Cases:")
-
-    # Small SL
-    small_sl_decision = {'entry': 3050.00, 'sl': 3045.00}
-    lot = calculate_lot_size(small_sl_decision, test_balance, test_risk_profile)
-    print(f"   Small SL (5pts): lot = {lot}")
-
-    # Large SL
-    large_sl_decision = {'entry': 3050.00, 'sl': 2950.00}
-    lot = calculate_lot_size(large_sl_decision, test_balance, test_risk_profile)
-    print(f"   Large SL (100pts): lot = {lot}")
+    # Create order plan
+    print("\n--- Order Plan ---")
+    plan = create_order_plan(test_decision, lot_info)
+    print(f"   Orders count: {len(plan['orders'])}")
+    for order in plan['orders']:
+        print(f"   Order {order['order_num']}: {order['lot']} lot")
 
     print("\n" + "="*70)
