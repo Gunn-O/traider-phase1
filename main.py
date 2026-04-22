@@ -437,8 +437,8 @@ class TraiderMainLoop:
         if should_run_daily(self.last_daily_date, current_date):
             logger.info("\n[Reflector] Running daily reflection...")
             history = self.sheets_logger.get_recent_trades(days=1) if self.sheets_logger.enabled else []
-            reflection_result = self.reflector.reflect(history, current_date)
-            self.reflection_summary = reflection_result['reflection']
+            reflection_result = self.reflector.update(trade_history=history, force=False)
+            self.reflection_summary = reflection_result['reflection_summary']
             logger.info(f"✓ Daily reflection: {self.reflection_summary}")
             self.last_daily_date = current_date
 

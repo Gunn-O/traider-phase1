@@ -237,6 +237,23 @@ Setup_Range คือ:
   ไม้รวย → ขนาดแท่งพ่อ (Open-Close)
 ```
 
+### 🔵 SL Constraints (บังคับ)
+
+**ก่อนตั้ง SL ต้องตรวจ:**
+```
+sl_distance_pip = |Entry - SL| × 100
+sl_max_pip = grounding["sl_max_distance_pip"]  ← Python ส่งมา
+```
+
+**ถ้า SL1 > sl_max_pip:**
+```
+→ ลอง SL2 (อยู่ในไส้) แทน
+→ ถ้า SL2 ยังเกิน → SKIP
+→ ห้ามตั้ง SL เกิน sl_max_pip ทุกกรณี
+```
+
+**เหตุผล:** SL กว้างเกินทำให้ lot เล็กมากจนไม่คุ้มค่าเสี่ยง
+
 ---
 
 ### Branch A: เทรนขึ้น → สัญญาณ BUY
