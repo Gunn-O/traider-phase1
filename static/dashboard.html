@@ -1123,11 +1123,11 @@
                 historyRecords: [],
                 historySource: 'memory',
                 agentCosts: {
-                    analyst: 0,
-                    risk_manager: 0,
-                    weekly: 0,
-                    monthly: 0,
-                    reflector: 0
+                    analyst: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    risk_manager: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    weekly: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    monthly: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    reflector: { total_cost: 0, calls: 0, model: 'Python', avg_cost: 0 }
                 },
 
                 // Computed
@@ -1507,12 +1507,13 @@
                 },
 
                 getAgentCost(agent) {
-                    return this.agentCosts[agent] || 0;
+                    const agentData = this.agentCosts[agent];
+                    return agentData ? agentData.total_cost : 0;
                 },
 
                 getAgentCount(agent) {
-                    const logs = this.state.agent_logs[agent] || [];
-                    return logs.length;
+                    const agentData = this.agentCosts[agent];
+                    return agentData ? agentData.calls : 0;
                 }
             };
         }
