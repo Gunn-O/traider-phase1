@@ -53,10 +53,6 @@ def build_grounding(world_state: dict, balance: float) -> dict:
     entry_must_be = technical_price if technical_price > 0 else current_price
     entry_tolerance_pip = 100  # Buffer ±100 pip
 
-    # SL boundaries (5-20% ของ Range)
-    sl_min_distance_pip = range_55 * 100 * 0.05  # 5% Range
-    sl_max_distance_pip = range_55 * 100 * 0.20  # 20% Range
-
     # R:R minimum
     rr_minimum = 1.0
 
@@ -65,14 +61,6 @@ def build_grounding(world_state: dict, balance: float) -> dict:
         "technical_price": entry_must_be,
         "range_55_usd": range_55,
         "range_55_pip": world_state["range"]["pip"],
-
-        # SL boundaries
-        "sl_min_distance_pip": sl_min_distance_pip,
-        "sl_max_distance_pip": sl_max_distance_pip,
-        "sl_max_note": (
-            f"SL ต้องไม่เกิน {sl_max_distance_pip:.0f} pip "
-            f"(20% ของ Range55={world_state['range']['pip']:.0f} pip)"
-        ),
 
         # Entry constraints
         "entry_must_be": entry_must_be,
@@ -87,6 +75,17 @@ def build_grounding(world_state: dict, balance: float) -> dict:
         # V4.3: Beauty score (Twin Candle Entry)
         "beauty_score": beauty_score,
         "beauty_warning": beauty_score < 80,  # Warning ถ้า < 80
+
+        # SL reference (info only - ไม่ใช่ constraint)
+        # Claude ตัดสินใจ SL เองตาม strategy
+        "sl_reference": {
+            "10pct_range_pip": range_55 * 100 * 0.10,
+            "20pct_range_pip": range_55 * 100 * 0.20,
+            "note": (
+                "ถ้า SL1 > 20% Range → ลอง SL2 | "
+                "ถ้า SL2 ยังเกิน → SKIP"
+            )
+        },
     }
 
 
@@ -96,8 +95,8 @@ def build_grounding(world_state: dict, balance: float) -> dict:
 
 def verify_analyst_decision(decision: dict, grounding: dict) -> list:
     """
-    ตรวจ output จาก Agent A
-    Returns: list of errors (ว่างถ้าผ่าน)
+    ตรวจ structural errors เท่านั้น
+    ไม่ตรวจ SL width — Claude ตัดสินตาม strategy เอง
 
     Args:
         decision: Decision dict from Claude
@@ -117,10 +116,10 @@ def verify_analyst_decision(decision: dict, grounding: dict) -> list:
     tp = decision.get("tp", 0)
 
     # 1. ตรวจ entry ใกล้ technical_price
-    if grounding["entry_must_be"] > 0:
+    if grounding.get("entry_must_be", 0) > 0:
         diff = abs(entry - grounding["entry_must_be"])
         diff_pip = diff * 100
-        if diff_pip > grounding["entry_tolerance_pip"]:
+        if diff_pip > grounding.get("entry_tolerance_pip", 100):
             errors.append(
                 f"Entry {entry:.2f} ห่างจาก technical_price "
                 f"{grounding['entry_must_be']:.2f} เกิน "
@@ -128,42 +127,37 @@ def verify_analyst_decision(decision: dict, grounding: dict) -> list:
                 f"(diff={diff_pip:.0f}pip)"
             )
 
-    # 2. ตรวจ R:R จริง
+    # 2. ตรวจทิศทาง SL/TP และ R:R เท่านั้น
     if entry and sl and tp:
         if action == "BUY":
             if sl >= entry:
                 errors.append(f"BUY: SL {sl:.2f} ≥ Entry {entry:.2f}")
             if tp <= entry:
                 errors.append(f"BUY: TP {tp:.2f} ≤ Entry {entry:.2f}")
-            rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0
+            risk = entry - sl
+            reward = tp - entry
         else:  # SELL
             if sl <= entry:
                 errors.append(f"SELL: SL {sl:.2f} ≤ Entry {entry:.2f}")
             if tp >= entry:
                 errors.append(f"SELL: TP {tp:.2f} ≥ Entry {entry:.2f}")
-            rr = (entry - tp) / (sl - entry) if (sl - entry) > 0 else 0
+            risk = sl - entry
+            reward = entry - tp
 
-        if rr < grounding["rr_minimum"]:
-            errors.append(
-                f"R:R จริง = {rr:.2f} < {grounding['rr_minimum']} "
-                f"(Entry={entry:.2f}, SL={sl:.2f}, TP={tp:.2f})"
-            )
+        # ตรวจ R:R
+        if risk > 0:
+            rr = reward / risk
+            if rr < grounding.get("rr_minimum", 1.0):
+                errors.append(
+                    f"R:R = {rr:.2f} < {grounding['rr_minimum']:.1f}"
+                )
+        else:
+            errors.append("Risk = 0 (SL = Entry)")
 
-    # 3. ตรวจ SL distance
-    if entry and sl:
-        sl_distance = abs(entry - sl)
-        sl_pip = sl_distance * 100
-
-        if sl_pip < grounding["sl_min_distance_pip"]:
-            errors.append(
-                f"SL แคบเกิน: {sl_pip:.0f}pip < "
-                f"{grounding['sl_min_distance_pip']:.0f}pip (5% Range)"
-            )
-        elif sl_pip > grounding["sl_max_distance_pip"]:
-            errors.append(
-                f"SL กว้างเกิน: {sl_pip:.0f}pip > "
-                f"{grounding['sl_max_distance_pip']:.0f}pip (20% Range)"
-            )
+    # ❌ ลบออก: SL width check
+    # เหตุผล: Claude ตัดสินตาม strategy เอง
+    #   ถ้าไส้ยาวเกิน → Claude เลือก SL2 หรือ SKIP
+    #   Python ไม่ควร override strategy logic
 
     return errors
 
@@ -453,8 +447,11 @@ Session: {session}
 === Grounding Data (Python คำนวณให้แล้ว) ===
 Technical Price (จุดเทคนิค): {grounding['technical_price']:.2f}
 Entry Tolerance: ±{grounding['entry_tolerance_pip']:.0f} pip
-SL Max: {grounding['sl_max_distance_pip']:.0f} pip ← ห้ามเกินนี้ทุกกรณี
-  ({grounding.get('sl_max_note', 'SL limit enforced')})
+Range 55: {grounding['range_55_pip']:.0f} pip
+SL Reference (guideline):
+  - 10% Range = {grounding['sl_reference']['10pct_range_pip']:.0f} pip
+  - 20% Range = {grounding['sl_reference']['20pct_range_pip']:.0f} pip
+  - Note: {grounding['sl_reference']['note']}
 R:R Minimum: {grounding['rr_minimum']:.1f}
 
 === แท่งคู่ ===

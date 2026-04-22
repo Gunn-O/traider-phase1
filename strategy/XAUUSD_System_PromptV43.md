@@ -237,39 +237,48 @@ Setup_Range คือ:
   ไม้รวย → ขนาดแท่งพ่อ (Open-Close)
 ```
 
-### ⚠️ SL Constraints (บังคับ — ตรวจก่อนส่ง output เสมอ)
+### ⚠️ SL Guidelines (ตัดสินใจเองตาม strategy)
 
-Python จะส่ง grounding มาให้ในทุก request:
+Python จะส่ง sl_reference มาให้ในทุก request เป็น guideline:
 ```
-sl_max_distance_pip = grounding["sl_max_distance_pip"]
-```
-
-**กฎ:**
-```
-sl_distance_pip = |Entry - SL| × 100
-
-ถ้า SL1 > sl_max_distance_pip:
-  → ลอง SL2 (อยู่ในไส้) แทน
-  → ถ้า SL2 ยังเกิน sl_max_distance_pip → SKIP
-  → ห้ามตั้ง SL เกิน sl_max_distance_pip ทุกกรณี
+sl_reference = grounding["sl_reference"]
+  10pct_range_pip = 546  # 10% ของ Range55
+  20pct_range_pip = 1093 # 20% ของ Range55
 ```
 
-**เหตุผล:** SL กว้างเกินทำให้ lot เล็กมากจนไม่คุ้มค่าเสี่ยง
+**หลักการตัดสินใจ SL:**
+```
+1. SL1 = ปลายไส้ + 10% Range (ตามปกติ)
+   sl_distance_pip = |Entry - SL1| × 100
+
+2. ถ้า SL1 > 20% Range (~1093 pip ในตัวอย่าง):
+   → ไส้ยาวเกิน → ลอง SL2 (อยู่ในไส้) แทน
+   
+3. ถ้า SL2 ยัง > 20% Range หรือ R:R < 1.0:
+   → SKIP — setup นี้ไส้ยาวเกินไป ไม่เหมาะเล่น
+   → skip_reason: "ไส้ยาวเกิน SL2 ยัง > 20%R55 - R:R ไม่คุ้ม"
+
+4. Python ไม่ได้ cap SL — Claude ตัดสินใจเองตามนี้
+```
+
+**เหตุผล:** ไส้ยาวเกิน → SL กว้าง → lot เล็ก → ไม่คุ้มค่าเสี่ยง
 
 **ตัวอย่าง:**
 ```
-grounding["sl_max_distance_pip"] = 1093  # 20% of Range55
+Range55 = 5465 pip
+sl_reference["20pct_range_pip"] = 1093 pip (guideline)
 
 BUY @ 4805.30
-SL1 = 4778.18  # เลยไส้ 10 pip
+SL1 = 4778.18  # ปลายไส้ + 10%R55
 → sl_distance = |4805.30 - 4778.18| × 100 = 2712 pip
-→ 2712 > 1093 → SL1 เกิน! ❌
+→ 2712 > 1093 (guideline) → ไส้ยาวเกิน → ลอง SL2
 
 SL2 = 4794.30  # อยู่ในไส้
-→ sl_distance = |4805.30 - 4794.30| × 100 = 1100 pip
-→ 1100 > 1093 → SL2 ยังเกิน! ❌
-
-→ action = SKIP (ไม่มี SL option ที่อยู่ใน limit)
+→ sl_distance = 1100 pip
+→ 1100 > 1093 → ยังกว้างเกิน
+→ R:R = (TP - Entry) / (Entry - SL2) < 1.0
+→ action = SKIP
+→ skip_reason: "ไส้ยาวเกิน SL2=1100pip > 20%R55 - R:R ไม่คุ้ม"
 ```
 
 ---
