@@ -442,7 +442,7 @@ class TraiderMainLoop:
         # Reflector — รันทุกวัน (Python only, $0)
         if should_run_daily(self.last_daily_date, current_date):
             logger.info("\n[Reflector] Running daily reflection...")
-            history = self.sheets_logger.get_recent_trades(days=1) if self.sheets_logger.enabled else []
+            history = self.sheets_logger.get_recent_trades(limit=50) if self.sheets_logger.enabled else []
             reflection_result = self.reflector.update(trade_history=history, force=False)
             self.reflection_summary = reflection_result['reflection_summary']
             logger.info(f"✓ Daily reflection: {self.reflection_summary}")
@@ -451,7 +451,7 @@ class TraiderMainLoop:
         # Weekly Strategist (Agent C) — รันทุก 7 วัน
         if should_run_weekly(self.last_weekly_date, current_date):
             logger.info("\n[Agent C] Running Weekly Strategist...")
-            history = self.sheets_logger.get_recent_trades(days=7) if self.sheets_logger.enabled else []
+            history = self.sheets_logger.get_recent_trades(limit=100) if self.sheets_logger.enabled else []
             stats = aggregate_weekly_stats(history)
 
             if not stats.get("insufficient_data"):
@@ -466,7 +466,7 @@ class TraiderMainLoop:
         # Monthly Evolver (Agent D) — รันทุก 30 วัน
         if should_run_monthly(self.last_monthly_date, current_date):
             logger.info("\n[Agent D] Running Monthly Evolver...")
-            history = self.sheets_logger.get_recent_trades(days=30) if self.sheets_logger.enabled else []
+            history = self.sheets_logger.get_recent_trades(limit=200) if self.sheets_logger.enabled else []
             stats = aggregate_monthly_stats(history)
 
             if not stats.get("insufficient_data"):
