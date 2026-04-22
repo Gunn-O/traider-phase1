@@ -585,7 +585,8 @@ if __name__ == "__main__":
     grounding = build_grounding(mock_world_state, balance=500)
     print(f"\n✓ Grounding built:")
     print(f"  Technical Price: {grounding['technical_price']:.2f}")
-    print(f"  SL Range: {grounding['sl_min_distance_pip']:.0f}-{grounding['sl_max_distance_pip']:.0f} pip")
+    print(f"  SL Reference: 10%={grounding['sl_reference']['10pct_range_pip']:.0f}pip, "
+          f"20%={grounding['sl_reference']['20pct_range_pip']:.0f}pip")
 
     print("\n✓ Agent A initialized — ready to analyze")
     print("="*70)

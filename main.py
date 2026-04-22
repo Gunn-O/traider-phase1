@@ -562,7 +562,8 @@ class TraiderMainLoop:
         # Build grounding (Python คำนวณค่าสำคัญก่อนส่ง Claude)
         grounding = build_grounding(world_state, self.balance)
         logger.info(f"  Grounding: technical_price={grounding['technical_price']:.2f}, "
-                    f"SL range={grounding['sl_min_distance_pip']:.0f}-{grounding['sl_max_distance_pip']:.0f}pip")
+                    f"SL ref=10%:{grounding['sl_reference']['10pct_range_pip']:.0f}pip, "
+                    f"20%:{grounding['sl_reference']['20pct_range_pip']:.0f}pip")
 
         # Call Agent A
         analyst_result = self.analyst.decide(
