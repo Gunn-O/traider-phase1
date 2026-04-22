@@ -340,9 +340,10 @@ class TraiderMainLoop:
         logger.info("✓ Position Monitor initialized")
 
         # Set references for API server
-        from api_server import set_sheets_logger, set_position_monitor
+        from api_server import set_sheets_logger, set_position_monitor, set_connector
         set_sheets_logger(self.sheets_logger)
         set_position_monitor(self.position_monitor)
+        set_connector(self.connector)
 
         # Reflector: Daily reflection (Python only - $0)
         self.reflector = Reflector(sheets_logger=self.sheets_logger)

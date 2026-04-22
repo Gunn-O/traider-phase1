@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Global references (set by main.py)
 sheets_logger = None
 position_monitor = None
+connector = None
 
 bot_state = {
     "status": "stopped",           # stopped / running / error
@@ -464,29 +465,52 @@ async def get_agent_costs():
 
 
 @app.get("/api/candles")
-async def get_candles(tf: str = "M5", count: int = 100):
+async def get_candles(tf: str = "M5", limit: int = 100):
     """
     Get latest OHLC candles for chart
 
     Args:
         tf: Timeframe (M1/M5/M15/M30/H1/H4)
-        count: Number of candles (default: 100)
+        limit: Number of candles (default: 100)
 
     Returns:
-        {
-            "candles": [...],
-            "tf": "M5",
-            "symbol": "XAUUSDm"
-        }
+        List of candle dicts: [{"time": unix_ts, "open": float, ...}, ...]
     """
-    # TODO: Integration with data connector
-    # For now, return empty or mock data
-    return {
-        "candles": [],
-        "tf": tf,
-        "symbol": bot_state.get("symbol", "XAUUSDm"),
-        "message": "Candles endpoint — requires connector integration"
-    }
+    global connector
+
+    if not connector:
+        logger.warning("Connector not initialized yet")
+        # Return mock data for testing
+        return [
+            {"time": 1700000000, "open": 2000.0, "high": 2010.0, "low": 1995.0, "close": 2005.0},
+            {"time": 1700000300, "open": 2005.0, "high": 2015.0, "low": 2000.0, "close": 2012.0},
+            {"time": 1700000600, "open": 2012.0, "high": 2020.0, "low": 2008.0, "close": 2018.0},
+            {"time": 1700000900, "open": 2018.0, "high": 2025.0, "low": 2015.0, "close": 2022.0},
+        ]
+
+    try:
+        # Fetch candles from connector
+        candles = connector.get_candles(timeframe=tf, count=limit)
+
+        if not candles:
+            return []
+
+        # Transform to lightweight-charts format (unix timestamp)
+        result = []
+        for c in candles:
+            result.append({
+                "time": c["time"],  # Already unix timestamp
+                "open": c["open"],
+                "high": c["high"],
+                "low": c["low"],
+                "close": c["close"]
+            })
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to fetch candles: {e}")
+        return []
 
 
 @app.get("/api/health")
@@ -613,6 +637,18 @@ def set_position_monitor(monitor_instance):
     """
     global position_monitor
     position_monitor = monitor_instance
+
+
+def set_connector(connector_instance):
+    """
+    Set Connector instance (MT5Connector or TVConnector) for /api/candles
+
+    Usage:
+        from api_server import set_connector
+        set_connector(self.connector)
+    """
+    global connector
+    connector = connector_instance
 
 
 def add_agent_log(agent: str, log_entry: Dict):

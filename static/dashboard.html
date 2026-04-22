@@ -1149,7 +1149,10 @@
                     this.fetchHistory();
 
                     // Initialize chart after a short delay
-                    setTimeout(() => this.initChart(), 500);
+                    setTimeout(() => {
+                        this.initChart();
+                        this.fetchCandles();
+                    }, 500);
                 },
 
                 initChart() {
@@ -1294,6 +1297,32 @@
                 async updateDataSource() {
                     // In future: POST to /api/data-source with selectedDataSource
                     console.log('Data source changed to:', this.selectedDataSource);
+                },
+
+                async fetchCandles() {
+                    try {
+                        const response = await fetch('/api/candles?limit=100');
+                        const candles = await response.json();
+
+                        if (!this.candleSeries || candles.length === 0) {
+                            console.log('Chart not ready or no candle data');
+                            return;
+                        }
+
+                        // Transform and set data
+                        const chartData = candles.map(c => ({
+                            time: c.time,
+                            open: c.open,
+                            high: c.high,
+                            low: c.low,
+                            close: c.close
+                        }));
+
+                        this.candleSeries.setData(chartData);
+                        console.log(`✅ Loaded ${chartData.length} candles to chart`);
+                    } catch (error) {
+                        console.error('Failed to fetch candles:', error);
+                    }
                 },
 
                 async startBot() {
