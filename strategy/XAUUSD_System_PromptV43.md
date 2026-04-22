@@ -237,22 +237,40 @@ Setup_Range คือ:
   ไม้รวย → ขนาดแท่งพ่อ (Open-Close)
 ```
 
-### 🔵 SL Constraints (บังคับ)
+### ⚠️ SL Constraints (บังคับ — ตรวจก่อนส่ง output เสมอ)
 
-**ก่อนตั้ง SL ต้องตรวจ:**
+Python จะส่ง grounding มาให้ในทุก request:
+```
+sl_max_distance_pip = grounding["sl_max_distance_pip"]
+```
+
+**กฎ:**
 ```
 sl_distance_pip = |Entry - SL| × 100
-sl_max_pip = grounding["sl_max_distance_pip"]  ← Python ส่งมา
-```
 
-**ถ้า SL1 > sl_max_pip:**
-```
-→ ลอง SL2 (อยู่ในไส้) แทน
-→ ถ้า SL2 ยังเกิน → SKIP
-→ ห้ามตั้ง SL เกิน sl_max_pip ทุกกรณี
+ถ้า SL1 > sl_max_distance_pip:
+  → ลอง SL2 (อยู่ในไส้) แทน
+  → ถ้า SL2 ยังเกิน sl_max_distance_pip → SKIP
+  → ห้ามตั้ง SL เกิน sl_max_distance_pip ทุกกรณี
 ```
 
 **เหตุผล:** SL กว้างเกินทำให้ lot เล็กมากจนไม่คุ้มค่าเสี่ยง
+
+**ตัวอย่าง:**
+```
+grounding["sl_max_distance_pip"] = 1093  # 20% of Range55
+
+BUY @ 4805.30
+SL1 = 4778.18  # เลยไส้ 10 pip
+→ sl_distance = |4805.30 - 4778.18| × 100 = 2712 pip
+→ 2712 > 1093 → SL1 เกิน! ❌
+
+SL2 = 4794.30  # อยู่ในไส้
+→ sl_distance = |4805.30 - 4794.30| × 100 = 1100 pip
+→ 1100 > 1093 → SL2 ยังเกิน! ❌
+
+→ action = SKIP (ไม่มี SL option ที่อยู่ใน limit)
+```
 
 ---
 

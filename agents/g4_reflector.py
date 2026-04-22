@@ -413,6 +413,27 @@ class Reflector:
         self.cached_reflection = result
 
         logger.info(f"✓ Reflection updated: {reflection_summary}")
+
+        # Push agent log to dashboard (Python-only, $0 cost)
+        try:
+            from api_server import add_agent_log
+            add_agent_log("reflector", {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "REFLECT",
+                "reason": reflection_summary[:80],
+                "cost_usd": 0.0,  # Python-only
+                "tokens": {
+                    "input": 0,
+                    "output": 0,
+                    "cache_read": 0,
+                    "cache_write": 0,
+                },
+                "latency_sec": 0.0,
+                "model": "Python",
+            })
+        except Exception as e:
+            logger.debug(f"Failed to push agent log: {e}")
+
         return result
 
     def _fetch_trade_history(self) -> List[Dict]:

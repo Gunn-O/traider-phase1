@@ -308,6 +308,26 @@ Human ต้อง approve ก่อนทุกครั้ง
             # Save proposals (for human review)
             self._save_proposals(analysis)
 
+            # Push agent log to dashboard
+            try:
+                from api_server import add_agent_log
+                add_agent_log("monthly", {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "EVOLVE",
+                    "reason": f"{len(analysis.get('proposals', []))} proposals"[:80],
+                    "cost_usd": llm_log.get("cost_usd", 0),
+                    "tokens": {
+                        "input": llm_log.get("input_tokens", 0),
+                        "output": llm_log.get("output_tokens", 0),
+                        "cache_read": llm_log.get("cache_read_tokens", 0),
+                        "cache_write": llm_log.get("cache_creation_tokens", 0),
+                    },
+                    "latency_sec": round(elapsed_ms / 1000, 2),
+                    "model": "claude-sonnet-4-20250514",
+                })
+            except Exception as e:
+                logger.debug(f"Failed to push agent log: {e}")
+
             return {
                 'success': True,
                 'proposals': analysis.get("proposals", []),

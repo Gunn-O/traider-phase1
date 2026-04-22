@@ -454,6 +454,33 @@ class SheetsLogger:
             logger.error(f"Failed to load pending trades: {e}")
             return []
 
+    def get_recent_trades(self, limit: int = 30) -> List[Dict]:
+        """
+        Get recent trade history from Google Sheets
+
+        Args:
+            limit: Number of trades to return (default: 30)
+
+        Returns:
+            List of trade dicts (newest first)
+        """
+        if not self.enabled:
+            return []
+
+        try:
+            # Get all records from Trade Log
+            records = self.trade_log_ws.get_all_records()
+
+            # Reverse to get newest first
+            records.reverse()
+
+            # Return limited number
+            return records[:limit]
+
+        except Exception as e:
+            logger.error(f"Failed to get recent trades: {e}")
+            return []
+
     def clear_sheets(self, confirm: bool = False):
         """
         Clear all trades and reset portfolio state

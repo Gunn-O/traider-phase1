@@ -292,7 +292,7 @@ class TraiderMainLoop:
             logger.warning("⚠️ Using legacy DataConnector")
 
         # Update bot_state with data source
-        update_bot_state({"data_source": data_source})
+        update_bot_state({"data_source_actual": data_source})
         logger.info("✓ Data connector ready")
 
         # Initialize agents (v4.3 — 4-Agent Architecture + Reflector)
@@ -338,6 +338,11 @@ class TraiderMainLoop:
         self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override)
         self.position_monitor = PositionMonitor(sheets_logger=self.sheets_logger)
         logger.info("✓ Position Monitor initialized")
+
+        # Set references for API server
+        from api_server import set_sheets_logger, set_position_monitor
+        set_sheets_logger(self.sheets_logger)
+        set_position_monitor(self.position_monitor)
 
         # Reflector: Daily reflection (Python only - $0)
         self.reflector = Reflector(sheets_logger=self.sheets_logger)
@@ -515,6 +520,21 @@ class TraiderMainLoop:
         # Step 2: G1 Pattern Detection
         logger.info("\n[STEP 2] G1 Pattern Detection (MTF)...")
         world_state = self.g1.scan_all_tf(candles_by_tf)
+
+        # Update latest_candle for dashboard chart
+        if current_candle and candle_time:
+            try:
+                update_bot_state({
+                    "latest_candle": {
+                        "time": int(candle_time.timestamp()),
+                        "open": current_candle.get("open", 0),
+                        "high": current_candle.get("high", 0),
+                        "low": current_candle.get("low", 0),
+                        "close": current_candle.get("close", 0),
+                    }
+                })
+            except Exception as e:
+                logger.debug(f"Failed to update latest_candle: {e}")
 
         if world_state.get('chart_type') == 'unclear':
             logger.info("❌ SKIP: Chart unclear")

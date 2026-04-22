@@ -286,6 +286,26 @@ class G4WeeklyStrategist:
             # LLM log
             llm_log = self._build_llm_log(response, elapsed_ms)
 
+            # Push agent log to dashboard
+            try:
+                from api_server import add_agent_log
+                add_agent_log("weekly", {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "ANALYZE",
+                    "reason": analysis.get("overall_assessment", "neutral")[:80],
+                    "cost_usd": llm_log.get("cost_usd", 0),
+                    "tokens": {
+                        "input": llm_log.get("input_tokens", 0),
+                        "output": llm_log.get("output_tokens", 0),
+                        "cache_read": llm_log.get("cache_read_tokens", 0),
+                        "cache_write": llm_log.get("cache_creation_tokens", 0),
+                    },
+                    "latency_sec": round(elapsed_ms / 1000, 2),
+                    "model": "claude-sonnet-4-20250514",
+                })
+            except Exception as e:
+                logger.debug(f"Failed to push agent log: {e}")
+
             return {
                 'success': True,
                 'performance_context': analysis.get("performance_context", ""),

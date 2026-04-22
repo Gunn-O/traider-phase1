@@ -69,6 +69,10 @@ def build_grounding(world_state: dict, balance: float) -> dict:
         # SL boundaries
         "sl_min_distance_pip": sl_min_distance_pip,
         "sl_max_distance_pip": sl_max_distance_pip,
+        "sl_max_note": (
+            f"SL ต้องไม่เกิน {sl_max_distance_pip:.0f} pip "
+            f"(20% ของ Range55={world_state['range']['pip']:.0f} pip)"
+        ),
 
         # Entry constraints
         "entry_must_be": entry_must_be,
@@ -321,6 +325,26 @@ class G3AnalystAgent:
                     "skip_reason": f"Verify failed: {verify_errors[0][:60]}"
                 }
 
+            # Push agent log to dashboard
+            try:
+                from api_server import add_agent_log
+                add_agent_log("analyst", {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": decision.get("action", "SKIP"),
+                    "reason": decision.get("reason", decision.get("skip_reason", ""))[:80],
+                    "cost_usd": llm_log.get("cost_usd", 0),
+                    "tokens": {
+                        "input": llm_log.get("input_tokens", 0),
+                        "output": llm_log.get("output_tokens", 0),
+                        "cache_read": llm_log.get("cache_read_tokens", 0),
+                        "cache_write": llm_log.get("cache_creation_tokens", 0),
+                    },
+                    "latency_sec": round(elapsed_ms / 1000, 2),
+                    "model": "claude-sonnet-4-20250514",
+                })
+            except Exception as e:
+                logger.debug(f"Failed to push agent log: {e}")
+
             return {
                 'success': True,
                 'decision': decision,
@@ -429,7 +453,8 @@ Session: {session}
 === Grounding Data (Python คำนวณให้แล้ว) ===
 Technical Price (จุดเทคนิค): {grounding['technical_price']:.2f}
 Entry Tolerance: ±{grounding['entry_tolerance_pip']:.0f} pip
-SL Range: {grounding['sl_min_distance_pip']:.0f}-{grounding['sl_max_distance_pip']:.0f} pip
+SL Max: {grounding['sl_max_distance_pip']:.0f} pip ← ห้ามเกินนี้ทุกกรณี
+  ({grounding.get('sl_max_note', 'SL limit enforced')})
 R:R Minimum: {grounding['rr_minimum']:.1f}
 
 === แท่งคู่ ===

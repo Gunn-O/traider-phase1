@@ -31,12 +31,17 @@ logger = logging.getLogger(__name__)
 # SHARED STATE (in-memory)
 # ============================================================================
 
+# Global references (set by main.py)
+sheets_logger = None
+position_monitor = None
+
 bot_state = {
     "status": "stopped",           # stopped / running / error
     "mode": "paper",               # paper / micro / live
     "symbol": "XAUUSDm",           # Trading symbol (XAUUSDm=Cent, XAUUSD=Real)
     "trading_tf": "M5",            # Selected timeframe
-    "data_source": "TradingView",  # V4.3: MT5 / TradingView
+    "data_source_mode": "auto",    # V4.3: auto / mt5 / tv (user selected)
+    "data_source_actual": "TradingView",  # V4.3: MT5 / TradingView (after connect)
     "current_price": 0.0,
     "active_plan_id": "",
     "open_orders": [],             # List of order dicts
@@ -48,6 +53,14 @@ bot_state = {
     "last_decision": {},           # Claude decision ล่าสุด
     "last_reflection": "No history yet",  # Reflector summary
     "proposals": [],               # V4.3: Monthly Evolver proposals
+    "agent_logs": {                # V4.3: Agent activity logs
+        "analyst": [],
+        "risk_manager": [],
+        "weekly": [],
+        "monthly": [],
+        "reflector": [],
+    },
+    "latest_candle": {},           # V4.3: Latest OHLC for chart
     "logs": [],                    # List of log strings (max 50)
     "balance": 0.0,
     "last_updated": datetime.now().isoformat()
@@ -114,6 +127,7 @@ class StartRequest(BaseModel):
     tf: str = "M5"           # Timeframe to trade
     symbol: str = "XAUUSDm"  # Symbol to trade (XAUUSDm=Cent, XAUUSD=Real)
     mode: str = "paper"      # Trading mode (paper/micro/live)
+    data_source: str = "auto"  # Data source (auto/mt5/tv)
 
 
 class StopRequest(BaseModel):
@@ -173,6 +187,11 @@ async def start_bot(request: StartRequest):
     if request.mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of {valid_modes}")
 
+    # Validate Data Source
+    valid_data_sources = ["auto", "mt5", "tv"]
+    if request.data_source not in valid_data_sources:
+        raise HTTPException(status_code=400, detail=f"Invalid data_source. Must be one of {valid_data_sources}")
+
     # Auto-set symbol based on mode (paper always uses XAUUSDm for price data)
     if request.mode == "paper":
         actual_symbol = "XAUUSDm"
@@ -186,6 +205,8 @@ async def start_bot(request: StartRequest):
     bot_state["mode"] = request.mode
     bot_state["symbol"] = actual_symbol
     bot_state["trading_tf"] = request.tf
+    bot_state["data_source_mode"] = request.data_source
+    # data_source_actual will be updated by main.py after connector initialization
 
     mode_labels = {
         "paper": "Paper Trade (Simulate)",
@@ -282,19 +303,48 @@ async def emergency_stop():
 async def get_history(limit: int = 30):
     """
     Get trade history (last N trades)
+    Fetches from Google Sheets if available, otherwise fallback to in-memory
 
     Args:
         limit: Number of trades to return (default: 30)
 
     Returns:
-        List of trade dicts
+        {
+            "trades": [...],
+            "source": "google_sheets" | "in_memory",
+            "count": int
+        }
     """
-    # TODO: In real implementation, fetch from Sheets or database
-    # For now, return mock data
+    # Try Google Sheets first
+    try:
+        if sheets_logger and sheets_logger.enabled:
+            trades = sheets_logger.get_recent_trades(limit=limit)
+            return {
+                "trades": trades,
+                "source": "google_sheets",
+                "count": len(trades)
+            }
+    except Exception as e:
+        logger.warning(f"Sheets unavailable: {e}")
+
+    # Fallback: in-memory (PositionMonitor)
+    try:
+        if position_monitor:
+            trades = position_monitor.get_closed_trades()[-limit:]
+            return {
+                "trades": trades,
+                "source": "in_memory",
+                "count": len(trades)
+            }
+    except Exception as e:
+        logger.warning(f"PositionMonitor unavailable: {e}")
+
+    # No data available
     return {
         "trades": [],
+        "source": "none",
         "count": 0,
-        "message": "Trade history not yet implemented — check Google Sheets"
+        "message": "No trade history available"
     }
 
 
@@ -337,6 +387,106 @@ async def clear_proposals():
     await manager.broadcast({"event": "proposals_cleared", "count": count})
 
     return {"status": "cleared", "count": count}
+
+
+@app.get("/api/agent-logs")
+async def get_agent_logs():
+    """
+    Get all agent logs
+
+    Returns:
+        {
+            "analyst": [...],
+            "risk_manager": [...],
+            "weekly": [...],
+            "monthly": [...],
+            "reflector": [...]
+        }
+    """
+    return bot_state.get("agent_logs", {
+        "analyst": [],
+        "risk_manager": [],
+        "weekly": [],
+        "monthly": [],
+        "reflector": [],
+    })
+
+
+@app.get("/api/agent-logs/{agent}")
+async def get_agent_log(agent: str):
+    """
+    Get logs for specific agent
+
+    Args:
+        agent: analyst | risk_manager | weekly | monthly | reflector
+
+    Returns:
+        List of log entries for that agent
+    """
+    valid_agents = ["analyst", "risk_manager", "weekly", "monthly", "reflector"]
+    if agent not in valid_agents:
+        raise HTTPException(status_code=400, detail=f"Invalid agent. Must be one of {valid_agents}")
+
+    return {
+        "agent": agent,
+        "logs": bot_state.get("agent_logs", {}).get(agent, []),
+        "count": len(bot_state.get("agent_logs", {}).get(agent, []))
+    }
+
+
+@app.get("/api/agent-costs")
+async def get_agent_costs():
+    """
+    Get cost summary for all agents
+
+    Returns:
+        {
+            "analyst": {"total_cost": 0.412, "calls": 21, "model": "Sonnet"},
+            ...
+        }
+    """
+    agent_logs = bot_state.get("agent_logs", {})
+
+    summary = {}
+    for agent_name, logs in agent_logs.items():
+        total_cost = sum(log.get("cost_usd", 0) for log in logs)
+        calls = len(logs)
+        model = logs[0].get("model", "Unknown") if logs else "Unknown"
+
+        summary[agent_name] = {
+            "total_cost": round(total_cost, 3),
+            "calls": calls,
+            "model": model,
+            "avg_cost": round(total_cost / calls, 4) if calls > 0 else 0,
+        }
+
+    return summary
+
+
+@app.get("/api/candles")
+async def get_candles(tf: str = "M5", count: int = 100):
+    """
+    Get latest OHLC candles for chart
+
+    Args:
+        tf: Timeframe (M1/M5/M15/M30/H1/H4)
+        count: Number of candles (default: 100)
+
+    Returns:
+        {
+            "candles": [...],
+            "tf": "M5",
+            "symbol": "XAUUSDm"
+        }
+    """
+    # TODO: Integration with data connector
+    # For now, return empty or mock data
+    return {
+        "candles": [],
+        "tf": tf,
+        "symbol": bot_state.get("symbol", "XAUUSDm"),
+        "message": "Candles endpoint — requires connector integration"
+    }
 
 
 @app.get("/api/health")
@@ -439,6 +589,63 @@ def get_bot_status() -> str:
         "stopped" | "running" | "error"
     """
     return bot_state["status"]
+
+
+def set_sheets_logger(logger_instance):
+    """
+    Set SheetsLogger instance for /api/history endpoint
+
+    Usage:
+        from api_server import set_sheets_logger
+        set_sheets_logger(sheets_logger)
+    """
+    global sheets_logger
+    sheets_logger = logger_instance
+
+
+def set_position_monitor(monitor_instance):
+    """
+    Set PositionMonitor instance for /api/history fallback
+
+    Usage:
+        from api_server import set_position_monitor
+        set_position_monitor(position_monitor)
+    """
+    global position_monitor
+    position_monitor = monitor_instance
+
+
+def add_agent_log(agent: str, log_entry: Dict):
+    """
+    Add log entry for specific agent
+
+    Usage:
+        from api_server import add_agent_log
+        add_agent_log("analyst", {
+            "timestamp": "2026-04-21 08:32:15",
+            "action": "BUY",
+            "reason": "uptrend+twin_candle",
+            "cost_usd": 0.0197,
+            "tokens": {...},
+            "latency_sec": 2.3,
+            "model": "claude-sonnet-4-20250514"
+        })
+
+    Args:
+        agent: analyst | risk_manager | weekly | monthly | reflector
+        log_entry: Log dict
+    """
+    valid_agents = ["analyst", "risk_manager", "weekly", "monthly", "reflector"]
+    if agent not in valid_agents:
+        logger.warning(f"Invalid agent: {agent}")
+        return
+
+    if "agent_logs" not in bot_state:
+        bot_state["agent_logs"] = {a: [] for a in valid_agents}
+
+    bot_state["agent_logs"][agent].append(log_entry)
+    # Keep last 50 entries per agent
+    bot_state["agent_logs"][agent] = bot_state["agent_logs"][agent][-50:]
 
 
 # ============================================================================
