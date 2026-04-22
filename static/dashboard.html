@@ -11,6 +11,9 @@
     <!-- Alpine.js CDN -->
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
+    <!-- lightweight-charts CDN -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+
     <style>
         [x-cloak] { display: none !important; }
 
@@ -282,6 +285,100 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+
+        /* Chart Container */
+        #price-chart {
+            height: 400px;
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+
+        /* Agent Tabs */
+        .agent-tabs {
+            display: flex;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+
+        .agent-tab {
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .agent-tab:hover {
+            color: var(--text-primary);
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        .agent-tab.active {
+            color: var(--accent-primary);
+            border-bottom-color: var(--accent-primary);
+        }
+
+        .agent-tab svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        /* Agent Log Timeline */
+        .timeline-entry {
+            display: flex;
+            gap: 1rem;
+            padding: 0.75rem;
+            border-left: 2px solid var(--border);
+            margin-left: 1rem;
+            transition: all 0.2s;
+        }
+
+        .timeline-entry:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+            border-left-color: var(--accent-primary);
+        }
+
+        .timeline-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--accent-primary);
+            margin-top: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        /* Source Badge */
+        .source-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .source-badge.mt5 {
+            background-color: rgba(0, 255, 136, 0.2);
+            color: var(--color-win);
+        }
+
+        .source-badge.tv {
+            background-color: rgba(100, 149, 237, 0.2);
+            color: #6495ED;
+        }
+
+        .source-badge.auto {
+            background-color: rgba(255, 170, 0, 0.2);
+            color: var(--color-pending);
+        }
     </style>
 </head>
 <body x-data="dashboard()" x-init="init()" x-cloak>
@@ -308,13 +405,19 @@
                 </div>
 
                 <div class="text-xs font-semibold text-muted px-6 mt-6 mb-2 uppercase tracking-wider">Trading</div>
+                <div class="nav-item" :class="{'active': currentPage === 'chart'}" @click="currentPage = 'chart'">
+                    📈 Price Chart
+                </div>
                 <div class="nav-item" :class="{'active': currentPage === 'history'}" @click="currentPage = 'history'">
-                    📜 History
+                    📜 Trade History
                 </div>
 
                 <div class="text-xs font-semibold text-muted px-6 mt-6 mb-2 uppercase tracking-wider">System</div>
+                <div class="nav-item" :class="{'active': currentPage === 'agents'}" @click="currentPage = 'agents'">
+                    🤖 Agent Activity
+                </div>
                 <div class="nav-item" :class="{'active': currentPage === 'log'}" @click="currentPage = 'log'">
-                    📝 Agent Log
+                    📝 System Log
                 </div>
                 <div class="nav-item" :class="{'active': currentPage === 'proposals'}" @click="currentPage = 'proposals'">
                     💡 Proposals
@@ -390,6 +493,16 @@
                             </select>
                         </div>
 
+                        <!-- Data Source Selector -->
+                        <div>
+                            <div class="text-xs text-muted uppercase mb-1">Data Source</div>
+                            <select x-model="selectedDataSource" @change="updateDataSource()" :disabled="state.status === 'running'" class="text-sm">
+                                <option value="auto">Auto Detect</option>
+                                <option value="mt5">MetaTrader 5</option>
+                                <option value="tv">TradingView</option>
+                            </select>
+                        </div>
+
                         <!-- Control Buttons -->
                         <div class="flex space-x-2 ml-4">
                             <button @click="startBot()" :disabled="state.status === 'running'" class="btn btn-start">
@@ -405,6 +518,21 @@
                     </div>
 
                     <div class="flex items-center space-x-6">
+                        <!-- Data Source Badge -->
+                        <div>
+                            <div class="text-xs text-muted uppercase mb-1">Source</div>
+                            <span class="source-badge"
+                                  :class="{
+                                      'mt5': state.data_source_actual === 'MT5',
+                                      'tv': state.data_source_actual === 'TradingView',
+                                      'auto': state.data_source_mode === 'auto'
+                                  }">
+                                <span x-show="state.data_source_actual === 'MT5'">📊 MT5</span>
+                                <span x-show="state.data_source_actual === 'TradingView'">📺 TV</span>
+                                <span x-show="!state.data_source_actual && state.data_source_mode === 'auto'">❓ Auto</span>
+                            </span>
+                        </div>
+
                         <!-- Status -->
                         <div>
                             <div class="text-xs text-muted uppercase">Status</div>
@@ -639,36 +767,187 @@
                 </div>
             </div>
 
-            <!-- HISTORY PAGE -->
+            <!-- PRICE CHART PAGE -->
+            <div x-show="currentPage === 'chart'" class="mx-6 mb-6">
+                <div class="card">
+                    <h2 class="text-xl font-bold mb-4 text-accent">📈 XAUUSD Price Chart</h2>
+
+                    <!-- Chart Container -->
+                    <div id="price-chart"></div>
+
+                    <p class="text-xs text-muted mt-4">Real-time M5 OHLC data with order lines (Entry/SL/TP)</p>
+                </div>
+            </div>
+
+            <!-- AGENT ACTIVITY PAGE -->
+            <div x-show="currentPage === 'agents'" class="mx-6 mb-6">
+                <div class="card">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-xl font-bold text-accent">🤖 Agent Activity</h2>
+                        <button @click="fetchAgentLogs()" class="text-xs text-muted hover:text-accent uppercase">Refresh</button>
+                    </div>
+
+                    <!-- Agent Cost Summary -->
+                    <div class="grid grid-cols-5 gap-4 mb-6">
+                        <template x-for="agent in ['analyst', 'risk_manager', 'weekly', 'monthly', 'reflector']" :key="agent">
+                            <div class="metric-card">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <div x-html="getAgentIcon(agent)"></div>
+                                    <div class="text-xs uppercase font-bold" x-text="agent.replace('_', ' ')"></div>
+                                </div>
+                                <div class="text-lg font-bold mono text-accent" x-text="'$' + getAgentCost(agent).toFixed(4)"></div>
+                                <div class="text-xs text-muted" x-text="getAgentCount(agent) + ' calls'"></div>
+                            </div>
+                        </template>
+                    </div>
+
+                    <!-- Agent Tabs -->
+                    <div class="agent-tabs">
+                        <div class="agent-tab" :class="{'active': selectedAgent === 'analyst'}" @click="selectedAgent = 'analyst'">
+                            <div x-html="getAgentIcon('analyst')"></div>
+                            <span>Analyst</span>
+                        </div>
+                        <div class="agent-tab" :class="{'active': selectedAgent === 'risk_manager'}" @click="selectedAgent = 'risk_manager'">
+                            <div x-html="getAgentIcon('risk_manager')"></div>
+                            <span>Risk Manager</span>
+                        </div>
+                        <div class="agent-tab" :class="{'active': selectedAgent === 'weekly'}" @click="selectedAgent = 'weekly'">
+                            <div x-html="getAgentIcon('weekly')"></div>
+                            <span>Weekly</span>
+                        </div>
+                        <div class="agent-tab" :class="{'active': selectedAgent === 'monthly'}" @click="selectedAgent = 'monthly'">
+                            <div x-html="getAgentIcon('monthly')"></div>
+                            <span>Monthly</span>
+                        </div>
+                        <div class="agent-tab" :class="{'active': selectedAgent === 'reflector'}" @click="selectedAgent = 'reflector'">
+                            <div x-html="getAgentIcon('reflector')"></div>
+                            <span>Reflector</span>
+                        </div>
+                    </div>
+
+                    <!-- Agent Log Timeline -->
+                    <div class="space-y-0">
+                        <template x-if="getAgentLogs(selectedAgent).length === 0">
+                            <div class="text-center py-12">
+                                <div class="text-4xl mb-2" x-text="getAgentEmoji(selectedAgent)"></div>
+                                <div class="text-muted">No activity yet</div>
+                            </div>
+                        </template>
+
+                        <template x-if="getAgentLogs(selectedAgent).length > 0">
+                            <div>
+                                <template x-for="(log, index) in getAgentLogs(selectedAgent)" :key="index">
+                                    <div class="timeline-entry">
+                                        <div class="timeline-dot"></div>
+                                        <div class="flex-1">
+                                            <div class="flex items-center justify-between mb-1">
+                                                <span class="badge text-xs"
+                                                      :class="{
+                                                          'badge-buy': log.action === 'BUY',
+                                                          'badge-sell': log.action === 'SELL',
+                                                          'badge-skip': log.action === 'SKIP' || log.action === 'ANALYZE' || log.action === 'EVOLVE' || log.action === 'REFLECT'
+                                                      }"
+                                                      x-text="log.action"></span>
+                                                <span class="text-xs text-muted mono" x-text="log.timestamp"></span>
+                                            </div>
+                                            <div class="text-sm mb-2" x-text="log.reason"></div>
+                                            <div class="grid grid-cols-4 gap-2 text-xs">
+                                                <div>
+                                                    <span class="text-muted">Cost:</span>
+                                                    <span class="mono font-bold text-accent" x-text="'$' + (log.cost_usd || 0).toFixed(4)"></span>
+                                                </div>
+                                                <div>
+                                                    <span class="text-muted">Tokens:</span>
+                                                    <span class="mono" x-text="((log.tokens?.input || 0) + (log.tokens?.output || 0))"></span>
+                                                </div>
+                                                <div>
+                                                    <span class="text-muted">Latency:</span>
+                                                    <span class="mono" x-text="(log.latency_sec || 0) + 's'"></span>
+                                                </div>
+                                                <div>
+                                                    <span class="text-muted">Model:</span>
+                                                    <span class="text-xs" x-text="log.model?.replace('claude-sonnet-4-20250514', 'Sonnet 4')"></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TRADE HISTORY PAGE -->
             <div x-show="currentPage === 'history'" class="mx-6 mb-6">
                 <div class="card">
-                    <h2 class="text-xl font-bold mb-4 text-accent">📜 Trade History</h2>
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-xl font-bold text-accent">📜 Trade History</h2>
+                        <div class="flex items-center gap-2">
+                            <span class="source-badge" :class="historySource === 'sheets' ? 'mt5' : 'auto'">
+                                <span x-show="historySource === 'sheets'">📊 Sheets</span>
+                                <span x-show="historySource === 'memory'">💾 Memory</span>
+                            </span>
+                            <button @click="fetchHistory()" class="text-xs text-muted hover:text-accent uppercase">Refresh</button>
+                        </div>
+                    </div>
 
-                    <p class="text-sm text-muted mb-4">Trade history is stored in Google Sheets. Check the sheet for full trade records.</p>
+                    <template x-if="!historyRecords || historyRecords.length === 0">
+                        <div class="text-center py-12">
+                            <div class="text-6xl mb-4">📜</div>
+                            <div class="text-muted">No trade history yet</div>
+                            <div class="text-xs text-muted mt-2">Trades will appear here once logged</div>
+                        </div>
+                    </template>
 
-                    <!-- Placeholder Table -->
-                    <table class="table-dark">
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Lot</th>
-                                <th>Entry</th>
-                                <th>SL</th>
-                                <th>TP</th>
-                                <th>Result</th>
-                                <th>P&L</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td colspan="8" class="text-center text-muted italic py-8">
-                                    No trade history available in dashboard yet.<br>
-                                    <a href="https://docs.google.com/spreadsheets" target="_blank" class="text-accent hover:underline">View Google Sheets →</a>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
+                    <template x-if="historyRecords && historyRecords.length > 0">
+                        <table class="table-dark">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Action</th>
+                                    <th>Lot</th>
+                                    <th>Entry</th>
+                                    <th>SL</th>
+                                    <th>TP</th>
+                                    <th>Result</th>
+                                    <th>P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="(trade, index) in historyRecords" :key="index">
+                                    <tr>
+                                        <td class="mono text-xs" x-text="trade.timestamp_open || trade.time"></td>
+                                        <td>
+                                            <span class="badge"
+                                                  :class="trade.action === 'BUY' ? 'badge-buy' : 'badge-sell'"
+                                                  x-text="trade.action"></span>
+                                        </td>
+                                        <td class="mono" x-text="trade.lot"></td>
+                                        <td class="mono" x-text="trade.entry"></td>
+                                        <td class="mono text-loss" x-text="trade.sl"></td>
+                                        <td class="mono text-win" x-text="trade.tp"></td>
+                                        <td>
+                                            <span class="badge text-xs"
+                                                  :class="{
+                                                      'badge-buy': trade.result === 'WIN',
+                                                      'badge-sell': trade.result === 'LOSS',
+                                                      'badge-skip': trade.result === 'PENDING'
+                                                  }"
+                                                  x-text="trade.result"></span>
+                                        </td>
+                                        <td class="mono font-bold"
+                                            :class="{
+                                                'text-win': parseFloat(trade.pnl) > 0,
+                                                'text-loss': parseFloat(trade.pnl) < 0,
+                                                'text-pending': parseFloat(trade.pnl) === 0
+                                            }"
+                                            x-text="trade.pnl ? '$' + parseFloat(trade.pnl).toFixed(2) : '-'"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
                 </div>
             </div>
 
@@ -804,7 +1083,9 @@
                     mode: 'paper',
                     symbol: 'XAUUSDm',
                     trading_tf: 'M5',
-                    data_source: 'TradingView',  // V4.3: MT5 / TradingView
+                    data_source: 'TradingView',  // V4.3: MT5 / TradingView (deprecated)
+                    data_source_mode: 'auto',    // auto/mt5/tv (user selected)
+                    data_source_actual: 'TradingView',  // MT5/TradingView (after connect)
                     current_price: 0,
                     active_plan_id: '',
                     open_orders: [],
@@ -818,15 +1099,36 @@
                     proposals: [],  // V4.3: Monthly Evolver proposals
                     logs: [],
                     balance: 0,
-                    last_updated: new Date().toISOString()
+                    last_updated: new Date().toISOString(),
+                    agent_logs: {
+                        analyst: [],
+                        risk_manager: [],
+                        weekly: [],
+                        monthly: [],
+                        reflector: []
+                    },
+                    latest_candle: {}
                 },
 
                 selectedMode: 'paper',
                 selectedSymbol: 'XAUUSDm',
                 selectedTF: 'M5',
+                selectedDataSource: 'auto',
+                selectedAgent: 'analyst',
                 currentPage: 'dashboard',
                 currentTime: '',
                 ws: null,
+                chart: null,
+                candleSeries: null,
+                historyRecords: [],
+                historySource: 'memory',
+                agentCosts: {
+                    analyst: 0,
+                    risk_manager: 0,
+                    weekly: 0,
+                    monthly: 0,
+                    reflector: 0
+                },
 
                 // Computed
                 get winRate() {
@@ -842,6 +1144,55 @@
                     setInterval(() => this.updateTime(), 1000);
                     this.connectWebSocket();
                     this.fetchStatus();
+                    this.fetchAgentLogs();
+                    this.fetchAgentCosts();
+                    this.fetchHistory();
+
+                    // Initialize chart after a short delay
+                    setTimeout(() => this.initChart(), 500);
+                },
+
+                initChart() {
+                    const container = document.getElementById('price-chart');
+                    if (!container || !window.LightweightCharts) {
+                        console.error('Chart container or LightweightCharts not found');
+                        return;
+                    }
+
+                    this.chart = LightweightCharts.createChart(container, {
+                        width: container.clientWidth,
+                        height: 400,
+                        layout: {
+                            background: { color: '#0a0a0a' },
+                            textColor: '#888888',
+                        },
+                        grid: {
+                            vertLines: { color: '#1a1a1a' },
+                            horzLines: { color: '#1a1a1a' },
+                        },
+                        timeScale: {
+                            timeVisible: true,
+                            secondsVisible: false,
+                        },
+                    });
+
+                    this.candleSeries = this.chart.addCandlestickSeries({
+                        upColor: '#00ff88',
+                        downColor: '#ff4444',
+                        borderUpColor: '#00ff88',
+                        borderDownColor: '#ff4444',
+                        wickUpColor: '#00ff88',
+                        wickDownColor: '#ff4444',
+                    });
+
+                    // Handle window resize
+                    window.addEventListener('resize', () => {
+                        if (this.chart && container) {
+                            this.chart.resize(container.clientWidth, 400);
+                        }
+                    });
+
+                    console.log('✅ Chart initialized');
                 },
 
                 updateTime() {
@@ -869,6 +1220,17 @@
                     this.ws.onmessage = (event) => {
                         const data = JSON.parse(event.data);
                         this.state = { ...this.state, ...data };
+
+                        // Update chart if latest_candle is available
+                        if (data.latest_candle && this.candleSeries && data.latest_candle.time) {
+                            this.candleSeries.update({
+                                time: data.latest_candle.time,
+                                open: data.latest_candle.open,
+                                high: data.latest_candle.high,
+                                low: data.latest_candle.low,
+                                close: data.latest_candle.close
+                            });
+                        }
                     };
 
                     this.ws.onerror = (error) => {
@@ -890,9 +1252,48 @@
                         this.selectedMode = data.mode || 'paper';
                         this.selectedSymbol = data.symbol || 'XAUUSDm';
                         this.selectedTF = data.trading_tf;
+                        this.selectedDataSource = data.data_source_mode || 'auto';
                     } catch (error) {
                         console.error('Failed to fetch status:', error);
                     }
+                },
+
+                async fetchAgentLogs() {
+                    try {
+                        const response = await fetch('/api/agent-logs');
+                        const data = await response.json();
+                        this.state.agent_logs = data;
+                    } catch (error) {
+                        console.error('Failed to fetch agent logs:', error);
+                    }
+                },
+
+                async fetchAgentCosts() {
+                    try {
+                        const response = await fetch('/api/agent-costs');
+                        const data = await response.json();
+                        this.agentCosts = data;
+                    } catch (error) {
+                        console.error('Failed to fetch agent costs:', error);
+                    }
+                },
+
+                async fetchHistory() {
+                    try {
+                        const response = await fetch('/api/history');
+                        const data = await response.json();
+                        this.historyRecords = data.trades || [];
+                        this.historySource = data.source || 'none';
+                    } catch (error) {
+                        console.error('Failed to fetch history:', error);
+                        this.historyRecords = [];
+                        this.historySource = 'none';
+                    }
+                },
+
+                async updateDataSource() {
+                    // In future: POST to /api/data-source with selectedDataSource
+                    console.log('Data source changed to:', this.selectedDataSource);
                 },
 
                 async startBot() {
@@ -1047,6 +1448,42 @@
                     }
 
                     return pnl;
+                },
+
+                // Agent helpers
+                getAgentIcon(agent) {
+                    const icons = {
+                        analyst: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>',
+                        risk_manager: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
+                        weekly: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>',
+                        monthly: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>',
+                        reflector: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>'
+                    };
+                    return icons[agent] || icons.analyst;
+                },
+
+                getAgentEmoji(agent) {
+                    const emoji = {
+                        analyst: '🧠',
+                        risk_manager: '🛡️',
+                        weekly: '📅',
+                        monthly: '🗓️',
+                        reflector: '💭'
+                    };
+                    return emoji[agent] || '🤖';
+                },
+
+                getAgentLogs(agent) {
+                    return this.state.agent_logs[agent] || [];
+                },
+
+                getAgentCost(agent) {
+                    return this.agentCosts[agent] || 0;
+                },
+
+                getAgentCount(agent) {
+                    const logs = this.state.agent_logs[agent] || [];
+                    return logs.length;
                 }
             };
         }
