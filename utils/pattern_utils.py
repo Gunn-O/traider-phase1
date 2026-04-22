@@ -14,7 +14,8 @@ from config import (
     SCREEN_Y,
     TARGET_SLOPE_DEG,
     MIN_TWIN_CANDLE_BODY,
-    MAX_TWIN_CANDLE_GAP
+    MAX_TWIN_CANDLE_GAP,
+    FRACTAL_N
 )
 
 
@@ -91,14 +92,20 @@ def slope_quality(angle: float) -> float:
 # SWING POINTS DETECTION
 # ============================================================================
 
-def find_swing_points(candles: List[dict], window: int = 3) -> Dict:
+def find_swing_points(candles: List[dict], timeframe: str = 'M5') -> Dict:
     """
-    หา swing highs และ swing lows จาก 55 แท่ง
-    window: จำนวนแท่งรอบข้างที่ต้องสูง/ต่ำกว่า
+    หา swing highs และ swing lows ด้วย Fractal N-bar Pivot method
+
+    Fractal N-bar Pivot:
+    - Swing High: High[i] > High[i-N..i-1] AND High[i] > High[i+1..i+N]
+    - Swing Low: Low[i] < Low[i-N..i-1] AND Low[i] < Low[i+1..i+N]
+
+    N ขึ้นกับ timeframe (อ่านจาก FRACTAL_N):
+    - M1: 2, M5: 3, M15: 3, M30: 3, H1: 5, H4: 5
 
     Args:
-        candles: list of candle dicts
-        window: window size (default: 3)
+        candles: list of candle dicts (55 แท่ง, newest last)
+        timeframe: 'M1', 'M5', 'M15', 'M30', 'H1', 'H4'
 
     Returns:
         {
@@ -106,20 +113,114 @@ def find_swing_points(candles: List[dict], window: int = 3) -> Dict:
             'lows': [(index, price), ...]
         }
     """
+    # Get N from config (default M5 = 3)
+    N = FRACTAL_N.get(timeframe, 3)
+
     highs, lows = [], []
 
-    for i in range(window, len(candles) - window):
-        # Swing high: สูงกว่าทุกแท่งในระยะ window
-        if all(candles[i]['high'] >= candles[j]['high']
-               for j in range(i-window, i+window+1) if j != i):
+    for i in range(N, len(candles) - N):
+        # Swing high: High[i] ต้องสูงกว่า N แท่งรอบข้าง (strict >)
+        is_swing_high = True
+
+        # Check left side (i-N to i-1)
+        for j in range(i - N, i):
+            if candles[i]['high'] <= candles[j]['high']:
+                is_swing_high = False
+                break
+
+        # Check right side (i+1 to i+N)
+        if is_swing_high:
+            for j in range(i + 1, i + N + 1):
+                if candles[i]['high'] <= candles[j]['high']:
+                    is_swing_high = False
+                    break
+
+        if is_swing_high:
             highs.append((i, candles[i]['high']))
 
-        # Swing low: ต่ำกว่าทุกแท่งในระยะ window
-        if all(candles[i]['low'] <= candles[j]['low']
-               for j in range(i-window, i+window+1) if j != i):
+        # Swing low: Low[i] ต้องต่ำกว่า N แท่งรอบข้าง (strict <)
+        is_swing_low = True
+
+        # Check left side (i-N to i-1)
+        for j in range(i - N, i):
+            if candles[i]['low'] >= candles[j]['low']:
+                is_swing_low = False
+                break
+
+        # Check right side (i+1 to i+N)
+        if is_swing_low:
+            for j in range(i + 1, i + N + 1):
+                if candles[i]['low'] >= candles[j]['low']:
+                    is_swing_low = False
+                    break
+
+        if is_swing_low:
             lows.append((i, candles[i]['low']))
 
     return {'highs': highs, 'lows': lows}
+
+
+def merge_close_swings(swing_points: Dict, threshold_usd: float = 0.10) -> Dict:
+    """
+    รวม swing points ที่ใกล้กันเกินไป (< 10 pip = 0.10 USD)
+    เลือกจุดที่แข็งกว่า:
+    - Swing High: เลือกราคาสูงกว่า
+    - Swing Low: เลือกราคาต่ำกว่า
+
+    Args:
+        swing_points: {'highs': [(idx, price), ...], 'lows': [(idx, price), ...]}
+        threshold_usd: ระยะห่างขั้นต่ำ (default: 0.10 USD = 10 pip)
+
+    Returns:
+        {'highs': [...], 'lows': [...]} — merged
+    """
+    def merge_list(points: List[Tuple[int, float]], pick_max: bool) -> List[Tuple[int, float]]:
+        """
+        Merge points ที่ห่างกัน < threshold
+        pick_max: True = เลือกราคาสูงกว่า (swing high), False = เลือกราคาต่ำกว่า (swing low)
+        """
+        if not points:
+            return []
+
+        # Sort by index
+        sorted_points = sorted(points, key=lambda x: x[0])
+        merged = []
+        cluster = [sorted_points[0]]
+
+        for i in range(1, len(sorted_points)):
+            prev_price = cluster[-1][1]
+            curr_point = sorted_points[i]
+            curr_price = curr_point[1]
+
+            # ถ้าห่างกัน < threshold → รวมเข้า cluster
+            if abs(curr_price - prev_price) < threshold_usd:
+                cluster.append(curr_point)
+            else:
+                # Cluster เต็มแล้ว → เลือก 1 จุด แล้วเริ่ม cluster ใหม่
+                if pick_max:
+                    best = max(cluster, key=lambda x: x[1])  # เลือกราคาสูงสุด
+                else:
+                    best = min(cluster, key=lambda x: x[1])  # เลือกราคาต่ำสุด
+                merged.append(best)
+                cluster = [curr_point]
+
+        # Cluster สุดท้าย
+        if cluster:
+            if pick_max:
+                best = max(cluster, key=lambda x: x[1])
+            else:
+                best = min(cluster, key=lambda x: x[1])
+            merged.append(best)
+
+        return merged
+
+    # Merge highs (เลือกราคาสูงกว่า)
+    merged_highs = merge_list(swing_points.get('highs', []), pick_max=True)
+
+    # Merge lows (เลือกราคาต่ำกว่า)
+    merged_lows = merge_list(swing_points.get('lows', []), pick_max=False)
+
+    return {'highs': merged_highs, 'lows': merged_lows}
 
 
 def check_hh_hl(swing_points: Dict, min_count: int = 3) -> Dict:

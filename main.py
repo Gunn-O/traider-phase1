@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Tra(i)der Phase I v2.1 — Main Trading Loop
+Tra(i)der Phase I v4.3 — Main Trading Loop
 
-Pipeline: G1 → G2 → G3a → G3b → G3c → G4
+Pipeline: G1 → G2 → G3a (Analyst) → G3b (Risk Manager) → G3c (Guardian) → G4
+Agents: A (Analyst), B (Risk Manager), C (Weekly), D (Monthly), Reflector (Daily)
+
+V4.3 Updates:
+- Twin Candle dual-role system (Swing + Entry with beauty scoring)
+- Agent A uses System Prompt V4.3
+- Reflector: Daily Python-only reflection ($0)
+- Beauty score tracking throughout pipeline
 
 Usage:
     python main.py --winrate-test  # Winrate test mode (0.01 lot)
@@ -10,7 +17,7 @@ Usage:
     python main.py --backtest --start 2026-01-01 --end 2026-03-31
     python main.py --backtest --start 2026-04-04 --end 2026-04-10 --log-sheets  # Backtest with Sheets logging
 
-Reference: TRAIDER_MASTER_PLAN_v2.1.md
+Reference: XAUUSD_AI_Trading_System_v2.1.md, XAUUSD_System_PromptV43.md
 """
 
 import os
@@ -22,18 +29,36 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 from dotenv import load_dotenv
 
-# Import agents
+# Import agents (v4.3 — 4-Agent Architecture with Reflector)
 from agents.g1_pattern_detector import G1PatternDetector
 from agents.g2_prefilter import G2Prefilter
-from agents.g3_claude_decision import G3ClaudeDecisionAgent
-from agents.g3_money_management import calculate_lot_for_decision, create_order_plan
-from agents.g3_risk_gate import guardian_check
+from agents.g3_analyst import G3AnalystAgent, build_grounding, verify_analyst_decision
+from agents.g3_risk_manager import G3RiskManagerAgent, build_risk_context, verify_risk_decision
+from agents.g4_weekly_strategist import G4WeeklyStrategist, aggregate_weekly_stats, should_run_weekly
+from agents.g4_monthly_evolver import G4MonthlyEvolver, aggregate_monthly_stats, should_run_monthly
+from agents.g4_reflector import Reflector, should_run_daily
+from agents.g3_risk_gate import guardian_check  # Legacy guardian (still used)
 from agents.g4_sheets_logger import SheetsLogger
 from agents.g4_position_monitor import PositionMonitor, generate_plan_id, generate_trade_id
+from agents.paper_broker import PaperBroker
 
 # Import utils
 from utils.data_connector import create_connector
 from config import TIMEFRAMES, CANDLES_LOOKBACK, RISK_CONFIG
+
+# Import bot_state from api_server (shared state)
+try:
+    from api_server import bot_state, update_bot_state, add_log
+except ImportError:
+    # Fallback if api_server not available (for command-line mode)
+    bot_state = {
+        "status": "stopped",
+        "symbol": "XAUUSDm",
+        "trading_tf": "M5",
+        "balance": 0.0
+    }
+    def update_bot_state(updates): pass
+    def add_log(msg): pass
 
 # Load environment
 load_dotenv()
@@ -183,11 +208,35 @@ def print_session_summary(stats: dict, balance: float):
 
 
 # ============================================================================
+# BROKER FACTORY
+# ============================================================================
+
+def create_broker(mode: str, symbol: str):
+    """
+    Create broker instance based on trading mode
+
+    Args:
+        mode: Trading mode ('paper', 'micro', 'live')
+        symbol: Trading symbol (e.g., 'XAUUSDm', 'XAUUSD')
+
+    Returns:
+        PaperBroker instance if mode='paper', None otherwise
+    """
+    if mode == 'paper':
+        logger.info(f"📄 Creating PaperBroker (mode={mode}, symbol={symbol})")
+        return PaperBroker(symbol=symbol)
+    else:
+        # For 'micro' and 'live' modes, return None (use MT5 directly)
+        logger.info(f"💹 Using MT5 direct trading (mode={mode}, symbol={symbol})")
+        return None
+
+
+# ============================================================================
 # MAIN TRAIDER CLASS
 # ============================================================================
 
 class TraiderMainLoop:
-    """Main trading loop for Tra(i)der Phase I v2.1"""
+    """Main trading loop for Tra(i)der Phase I v4.3 (4-Agent Architecture + Reflector)"""
 
     def __init__(self, args):
         """
@@ -199,11 +248,19 @@ class TraiderMainLoop:
         self.args = args
         self.mode = 'winrate_test' if args.winrate_test else 'simulate'
         self.is_backtest = args.backtest if hasattr(args, 'backtest') else False
-        self.symbol = os.getenv('BACKTEST_SYMBOL', 'XAUUSD')
+
+        # Use symbol from bot_state (from dashboard) or fallback to env var
+        self.symbol = bot_state.get("symbol", os.getenv('BACKTEST_SYMBOL', 'XAUUSDm'))
         self.balance = float(os.getenv('ACCOUNT_BALANCE', '300'))
 
+        # Get trading mode from bot_state (from dashboard)
+        self.trading_mode = bot_state.get("mode", "paper")
+
+        # Update bot_state with balance
+        update_bot_state({"balance": self.balance})
+
         logger.info("="*70)
-        logger.info("🤖 Tra(i)der Phase I v2.1 — AI Trading System")
+        logger.info("🤖 Tra(i)der Phase I v4.3 — AI Trading System (4-Agent + Reflector)")
         logger.info("="*70)
         logger.info(f"Mode: {self.mode}")
         logger.info(f"Symbol: {self.symbol}")
@@ -212,34 +269,65 @@ class TraiderMainLoop:
             logger.info(f"Backtest mode: Sheets logging {'ENABLED' if args.log_sheets else 'DISABLED'}")
         logger.info("="*70)
 
-        # Initialize data connector
+        # Initialize data connector (V4.3: auto-detect MT5 or TradingView)
         logger.info(f"📡 Initializing data connector...")
-        self.connector = create_connector('simulate')  # Phase I = simulate only
-        self.connector.connect()
-        logger.info("✓ Data connector connected")
+        self.connector = create_connector(
+            mode="auto",
+            symbol=self.symbol
+        )
 
-        # Initialize agents
-        logger.info("🤖 Initializing agents...")
+        # Determine data source for logging
+        from agents.paper_broker import PaperBroker
+        from utils.data_connector import MT5Connector, TVConnector
+
+        if isinstance(self.connector, MT5Connector):
+            data_source = "MT5"
+            logger.info("📊 Data source: MT5 Terminal")
+        elif isinstance(self.connector, TVConnector):
+            data_source = "TradingView"
+            logger.info("📺 Data source: TradingView (OANDA)")
+        else:
+            # Legacy DataConnector (should not happen in V4.3)
+            data_source = "Legacy"
+            logger.warning("⚠️ Using legacy DataConnector")
+
+        # Update bot_state with data source
+        update_bot_state({"data_source": data_source})
+        logger.info("✓ Data connector ready")
+
+        # Initialize agents (v4.3 — 4-Agent Architecture + Reflector)
+        logger.info("🤖 Initializing agents (V4.3: 4-Agent + Reflector)...")
         self.g1 = G1PatternDetector(config={'verbose': True})
         self.g2 = G2Prefilter(config={'verbose': True})
 
-        # G3a: Decision engine (Claude or Python)
-        decision_engine = getattr(args, 'decision_engine', 'python')
-        if decision_engine == 'claude':
-            from agents.g3_claude_decision import G3ClaudeDecisionAgent
-            self.g3a = G3ClaudeDecisionAgent(
-                strategy_md_path='strategy/XAUUSD_AI_Trading_System_v2.1.md',
-                api_key=os.getenv('ANTHROPIC_API_KEY'),
-                config={'verbose': True}
-            )
-            logger.info("🤖 Decision engine: Claude API")
-        else:  # python
-            from agents.g3_python_decision import G3PythonDecision
-            self.g3a = G3PythonDecision(config={'verbose': True})
-            logger.info("🐍 Decision engine: Pure Python (rules-based)")
+        # Agent A: Analyst (V4.3)
+        self.analyst = G3AnalystAgent(
+            system_prompt_path='strategy/XAUUSD_System_PromptV43.md',
+            api_key=os.getenv('ANTHROPIC_API_KEY'),
+            config={'verbose': True}
+        )
+        logger.info("✓ Agent A (Analyst) initialized — using System Prompt V4.3")
 
-        # g3b = calculate_lot_for_decision (function)
-        # g3c = guardian_check (function)
+        # Agent B: Risk Manager (replaces g3_money_management.py)
+        self.risk_manager = G3RiskManagerAgent(
+            api_key=os.getenv('ANTHROPIC_API_KEY'),
+            config={'verbose': True}
+        )
+        logger.info("✓ Agent B (Risk Manager) initialized — using Haiku")
+
+        # Agent C: Weekly Strategist (new)
+        self.weekly_strategist = G4WeeklyStrategist(
+            api_key=os.getenv('ANTHROPIC_API_KEY'),
+            config={'verbose': True}
+        )
+        logger.info("✓ Agent C (Weekly Strategist) initialized")
+
+        # Agent D: Monthly Evolver (new)
+        self.monthly_evolver = G4MonthlyEvolver(
+            api_key=os.getenv('ANTHROPIC_API_KEY'),
+            config={'verbose': True}
+        )
+        logger.info("✓ Agent D (Monthly Evolver) initialized")
 
         # Initialize G4
         # Enable sheets if: (1) simulate mode OR (2) backtest with --log-sheets flag
@@ -249,6 +337,21 @@ class TraiderMainLoop:
 
         self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override)
         self.position_monitor = PositionMonitor(sheets_logger=self.sheets_logger)
+        logger.info("✓ Position Monitor initialized")
+
+        # Reflector: Daily reflection (Python only - $0)
+        self.reflector = Reflector(sheets_logger=self.sheets_logger)
+        logger.info("✓ Reflector initialized (Python only — $0 cost)")
+
+        # Initialize Broker (Paper/Micro/Live)
+        self.broker = create_broker(self.trading_mode, self.symbol)
+
+        # Weekly/Monthly/Daily state tracking
+        self.last_weekly_date = None
+        self.last_monthly_date = None
+        self.last_daily_date = None  # V4.3: For Reflector
+        self.weekly_stats = {}
+        self.reflection_summary = "No history yet — trade normally"
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -327,6 +430,47 @@ class TraiderMainLoop:
         logger.info(f"Portfolio state: active_plan={portfolio_state.get('active_plan_id', '')}, "
                     f"last_tech_price={portfolio_state.get('last_technical_price', 0):.2f}")
 
+        # Step 0b: Daily/Weekly/Monthly triggers
+        current_date = candle_time.date() if candle_time else datetime.now().date()
+
+        # Reflector — รันทุกวัน (Python only, $0)
+        if should_run_daily(self.last_daily_date, current_date):
+            logger.info("\n[Reflector] Running daily reflection...")
+            history = self.sheets_logger.get_recent_trades(days=1) if self.sheets_logger.enabled else []
+            reflection_result = self.reflector.reflect(history, current_date)
+            self.reflection_summary = reflection_result['reflection']
+            logger.info(f"✓ Daily reflection: {self.reflection_summary}")
+            self.last_daily_date = current_date
+
+        # Weekly Strategist (Agent C) — รันทุก 7 วัน
+        if should_run_weekly(self.last_weekly_date, current_date):
+            logger.info("\n[Agent C] Running Weekly Strategist...")
+            history = self.sheets_logger.get_recent_trades(days=7) if self.sheets_logger.enabled else []
+            stats = aggregate_weekly_stats(history)
+
+            if not stats.get("insufficient_data"):
+                weekly_result = self.weekly_strategist.analyze(stats)
+                self.weekly_stats = stats
+                self.reflection_summary = weekly_result["performance_context"]
+                logger.info(f"✓ Weekly analysis: {weekly_result['overall_assessment']}")
+                logger.info(f"  Reflection: {self.reflection_summary}")
+
+            self.last_weekly_date = current_date
+
+        # Monthly Evolver (Agent D) — รันทุก 30 วัน
+        if should_run_monthly(self.last_monthly_date, current_date):
+            logger.info("\n[Agent D] Running Monthly Evolver...")
+            history = self.sheets_logger.get_recent_trades(days=30) if self.sheets_logger.enabled else []
+            stats = aggregate_monthly_stats(history)
+
+            if not stats.get("insufficient_data"):
+                monthly_result = self.monthly_evolver.analyze(stats)
+                logger.info(f"✓ Monthly analysis: {len(monthly_result['proposals'])} proposals")
+                if monthly_result['proposals']:
+                    logger.info(f"  ⚠️ Proposals saved — human review required")
+
+            self.last_monthly_date = current_date
+
         # Step 1: Fetch data
         if candles_by_tf is None:
             logger.info("\n[STEP 1] Fetching market data...")
@@ -391,16 +535,30 @@ class TraiderMainLoop:
 
         logger.info("✓ G2: Pre-filter PASSED")
 
-        # Step 4: G3a Claude Decision
-        logger.info("\n[STEP 4] G3a Claude Decision...")
-        decision_result = self.g3a.decide(world_state, self.balance, portfolio_state)
+        # Step 3a: Agent A — Analyst (with Grounding + Post-verify)
+        logger.info("\n[STEP 3a] Agent A — Analyst...")
 
-        if not decision_result['success']:
-            logger.error("❌ G3a failed")
+        # Build grounding (Python คำนวณค่าสำคัญก่อนส่ง Claude)
+        grounding = build_grounding(world_state, self.balance)
+        logger.info(f"  Grounding: technical_price={grounding['technical_price']:.2f}, "
+                    f"SL range={grounding['sl_min_distance_pip']:.0f}-{grounding['sl_max_distance_pip']:.0f}pip")
+
+        # Call Agent A
+        analyst_result = self.analyst.decide(
+            world_state=world_state,
+            balance=self.balance,
+            portfolio_state=portfolio_state,
+            reflection_summary=self.reflection_summary,
+            grounding=grounding
+        )
+
+        if not analyst_result['success']:
+            logger.error("❌ Agent A failed")
             return
 
-        decision = decision_result['decision']
-        llm_log = decision_result['llm_log']
+        decision = analyst_result['decision']
+        llm_log = analyst_result['llm_log']
+        verify_errors = analyst_result['verify_errors']
 
         # Update session stats
         update_session_stats(
@@ -412,49 +570,102 @@ class TraiderMainLoop:
 
         # Log token usage
         logger.info(
-            f"💰 Token Usage: {llm_log.get('total_tokens', 0):,} tokens | "
+            f"💰 Agent A: {llm_log.get('total_tokens', 0):,} tokens | "
             f"Cost: ${llm_log.get('cost_usd', 0):.4f} | "
             f"Cache: {'✅ HIT' if llm_log.get('cache_hit') else '❌ MISS'} | "
-            f"Session total: ${self.session_stats['total_cost_usd']:.4f}"
+            f"Session: ${self.session_stats['total_cost_usd']:.4f}"
         )
 
-        # Warning if cost is abnormally high (cache not working)
-        # Normal cost with cache: ~$0.0192/call (user prompt + cached strategy + output)
-        # If cost > $0.030, cache likely not working
+        # Warning if cost is abnormally high
         if llm_log.get('cost_usd', 0) > 0.030:
             logger.warning(
                 f"⚠️  Cost สูงผิดปกติ: ${llm_log['cost_usd']:.4f}/call "
                 f"(target ≤ $0.020) — cache อาจไม่ทำงาน"
             )
 
+        # Log verify errors (if any)
+        if verify_errors:
+            logger.warning(f"⚠️  Agent A verify errors: {verify_errors}")
+
         if decision.get('action') == 'SKIP':
-            logger.info(f"❌ SKIP: {decision.get('skip_reason', 'Claude decided to skip')}")
+            logger.info(f"❌ SKIP: {decision.get('skip_reason', 'Agent A decided to skip')}")
             return
 
-        logger.info(f"✓ G3a: {decision['action']} @ {decision['entry']:.2f} "
+        logger.info(f"✓ Agent A: {decision['action']} @ {decision['entry']:.2f} "
                     f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f})")
 
-        # Step 5: G3b Money Management
-        logger.info("\n[STEP 5] G3b Money Management...")
-        lot_info = calculate_lot_for_decision(
-            decision, self.balance, winrate_test=self.args.winrate_test
+        # Step 3b: Agent B — Risk Manager
+        logger.info("\n[STEP 3b] Agent B — Risk Manager...")
+
+        # Build risk context (Python คำนวณก่อนส่ง Haiku)
+        risk_context = build_risk_context(
+            decision=decision,
+            balance=self.balance,
+            portfolio_state=portfolio_state,
+            weekly_stats=self.weekly_stats
         )
 
-        logger.info(f"✓ G3b: Lot={lot_info['lot_total']}, Orders={lot_info['suggested_orders']}")
+        logger.info(f"  Risk Context: base_lot={risk_context['base_lot']:.2f}, "
+                    f"consecutive_loss={risk_context['consecutive_loss']}, "
+                    f"weekly_wr={risk_context['weekly_winrate']:.1%}")
 
-        # Step 6: G3c Guardian Check
-        logger.info("\n[STEP 6] G3c Guardian Risk Gate...")
+        # Call Agent B
+        risk_result = self.risk_manager.approve(
+            decision=decision,
+            risk_context=risk_context
+        )
+
+        if not risk_result['approved']:
+            logger.warning(f"❌ Agent B REJECTED: {risk_result['reason']}")
+            return
+
+        lot = risk_result['lot']
+        adjusted = risk_result.get('adjusted', False)
+
+        logger.info(f"✓ Agent B: Approved lot={lot:.2f} "
+                    f"{'(adjusted)' if adjusted else ''}")
+
+        # Step 3c: Guardian Check (legacy — final safety check)
+        logger.info("\n[STEP 3c] Guardian Risk Gate...")
+
+        # Create lot_info for guardian (compatibility)
+        lot_info = {
+            'lot_total': lot,
+            'suggested_orders': 1
+        }
+
         guardian_result = guardian_check(decision, lot_info, portfolio_state)
 
         if not guardian_result['approved']:
-            logger.warning(f"❌ BLOCK: {guardian_result['block_reason']} (by {guardian_result['blocked_by']})")
+            logger.warning(f"❌ Guardian BLOCK: {guardian_result['block_reason']} (by {guardian_result['blocked_by']})")
             return
 
-        logger.info("✓ G3c: Guardian APPROVED")
+        logger.info("✓ Guardian: APPROVED")
 
-        # Step 7: G4 Log Plan + Orders
-        logger.info("\n[STEP 7] G4 Logging Plan...")
-        plan = create_order_plan(decision, lot_info, world_state)
+        # Step 4: Create Order Plan
+        logger.info("\n[STEP 4] Creating Order Plan...")
+
+        # Create order (1 order per plan)
+        order = {
+            'order_num': 1,
+            'order_type': 'MARKET',
+            'action': decision['action'],
+            'entry': decision['entry'],
+            'sl': decision['sl'],
+            'tp': decision['tp'],
+            'lot': lot,
+            'rr_ratio': decision.get('rr_ratio', 0)
+        }
+
+        plan = {
+            'lot_total': lot,
+            'total_orders': 1,
+            'max_loss_usd': risk_context['max_loss_usd'],
+            'orders': [order]
+        }
+
+        logger.info(f"✓ Order created: {order['action']} @ {order['entry']:.2f}, "
+                    f"lot={lot:.2f}, R:R={order['rr_ratio']:.2f}")
 
         # Determine mode for plan/trade ID prefix
         id_mode = 'backtest' if self.is_backtest else 'simulate'
@@ -472,8 +683,31 @@ class TraiderMainLoop:
             order['lot_size'] = order['lot']
             orders_with_ids.append(order)
 
+        # Prepare decision for Sheets (add 'technique' field from 'setup')
+        decision_for_sheets = decision.copy()
+        decision_for_sheets['technique'] = decision.get('setup', 'none')  # Agent A uses 'setup', Sheets uses 'technique'
+
         # Log to Sheets
-        self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision, world_state, llm_log, candle_time=candle_time)
+        self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision_for_sheets, world_state, llm_log, candle_time=candle_time)
+
+        # Execute trades via broker (if paper mode)
+        if self.broker is not None:
+            logger.info(f"\n[Broker] Executing {len(orders_with_ids)} orders via PaperBroker...")
+            for order in orders_with_ids:
+                ticket = self.broker.open_position(
+                    action=order['action'],
+                    lot=order['lot'],
+                    sl=order['sl'],
+                    tp=order['tp'],
+                    plan_id=plan_id,
+                    candle_time=candle_time,
+                    trade_id=order['trade_id']
+                )
+                if ticket:
+                    order['broker_ticket'] = ticket  # Store ticket for tracking
+                    logger.info(f"✓ Order {order['trade_id']} opened as ticket #{ticket}")
+                else:
+                    logger.error(f"✗ Failed to open order {order['trade_id']}")
 
         # Add to position monitor
         self.position_monitor.add_orders(orders_with_ids)
@@ -483,7 +717,7 @@ class TraiderMainLoop:
         portfolio_state['open_plans_count'] = 1  # Currently single plan only
         portfolio_state['total_risk_pct'] = RISK_CONFIG['risk_per_plan_pct']  # 0.10 (10%)
         portfolio_state['open_orders_count'] = len(orders_with_ids)
-        portfolio_state['total_open_lot'] = lot_info['lot_total']
+        portfolio_state['total_open_lot'] = lot  # From Agent B
 
         # Update last technical price (for duplicate prevention)
         # Always save (0.0 if no twin_candle, disables duplicate prevention for non-twin techniques)
@@ -576,6 +810,100 @@ class TraiderMainLoop:
 
         logger.info(f"\n[Position Monitor] Checking {len(open_orders)} open orders...")
 
+        # Paper Mode: Use PaperBroker (real-time prices)
+        if self.broker is not None:
+            # Get candle_time for broker update
+            if current_candle and 'timestamp' in current_candle:
+                candle_time = current_candle['timestamp']
+                if isinstance(candle_time, str):
+                    from dateutil import parser
+                    candle_time = parser.parse(candle_time)
+            else:
+                candle_time = datetime.now()
+
+            # Update broker positions (check SL/TP with real prices)
+            newly_closed = self.broker.update_positions(candle_time)
+
+            # Sync closed positions to PositionMonitor
+            if newly_closed:
+                logger.info(f"📄 PaperBroker closed {len(newly_closed)} positions")
+                for broker_pos in newly_closed:
+                    trade_id = broker_pos['trade_id']
+
+                    # Find matching order in PositionMonitor
+                    for order in open_orders:
+                        if order['trade_id'] == trade_id:
+                            # Update order state
+                            order['result'] = broker_pos['result']
+                            order['close_price'] = broker_pos['close_price']
+                            order['close_reason'] = broker_pos['close_reason']
+                            order['pnl_usd'] = broker_pos['pnl']
+                            order['timestamp_close'] = broker_pos['close_time']
+
+                            # Update Sheets
+                            if self.sheets_logger:
+                                try:
+                                    self.sheets_logger.update_order_close(
+                                        trade_id=trade_id,
+                                        result=broker_pos['result'],
+                                        close_price=broker_pos['close_price'],
+                                        close_reason=broker_pos['close_reason'],
+                                        pnl_usd=broker_pos['pnl'],
+                                        timestamp_close=broker_pos['close_time']
+                                    )
+                                    logger.info(f"✓ [{trade_id}] Sheets updated: {broker_pos['result']}")
+                                except Exception as e:
+                                    logger.error(f"✗ [{trade_id}] Failed to update Sheets: {e}")
+
+                            break
+
+                # Update portfolio state after closes
+                if self.sheets_logger:
+                    try:
+                        # Get closed plan IDs
+                        closed_plan_ids = {pos['plan_id'] for pos in newly_closed}
+
+                        for plan_id in closed_plan_ids:
+                            # Check if all orders in plan are closed
+                            plan_orders = [o for o in self.position_monitor.open_orders
+                                           if o.get('plan_id') == plan_id]
+                            all_closed = all(o.get('result') in ['WIN', 'LOSS'] for o in plan_orders)
+
+                            if all_closed:
+                                plan_pnl = sum(o.get('pnl_usd', 0) for o in plan_orders)
+                                plan_result = 'WIN' if plan_pnl > 0 else 'LOSS'
+
+                                logger.info(f"[{plan_id}] Plan fully closed: {plan_result} (P&L: ${plan_pnl:.2f})")
+
+                                # Update portfolio state
+                                portfolio_state = self.sheets_logger.get_portfolio_state()
+
+                                if portfolio_state.get('active_plan_id') == plan_id:
+                                    portfolio_state['active_plan_id'] = ''
+                                    portfolio_state['open_plans_count'] = 0
+                                    portfolio_state['total_risk_pct'] = 0.0
+                                    portfolio_state['open_orders_count'] = 0
+                                    portfolio_state['total_open_lot'] = 0.0
+                                    logger.info(f"[{plan_id}] Cleared active plan from portfolio state")
+
+                                # Update consecutive loss
+                                if plan_result == 'LOSS':
+                                    portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
+                                else:
+                                    portfolio_state['consecutive_loss'] = 0
+
+                                # Update realized P&L
+                                portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + plan_pnl
+
+                                self.sheets_logger.update_portfolio_state(portfolio_state)
+                                logger.info(f"[{plan_id}] Portfolio state updated (consecutive_loss={portfolio_state['consecutive_loss']})")
+
+                    except Exception as e:
+                        logger.error(f"Failed to update portfolio state after closes: {e}")
+
+            return
+
+        # Backtest/Simulate Mode: Use candle-based monitoring
         # Get current candle
         if current_candle is None:
             latest = self.connector.get_latest_candles(self.symbol, timeframe='M5', count=1)
@@ -694,7 +1022,7 @@ class TraiderMainLoop:
 
         # Fetch all M5 candles for backtest period
         logger.info("\n📊 Fetching historical M5 candles...")
-        logger.info("Using TradingView data (XAUUSD/OANDA spot prices)")
+        logger.info(f"Using TradingView data ({self.symbol}/OANDA spot prices)")
 
         try:
             # Fetch M5 candles for date range using start_date/end_date parameters

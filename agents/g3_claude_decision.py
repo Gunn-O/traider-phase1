@@ -444,7 +444,7 @@ def format_tf_selection_reason(tf_results: Dict, selected_tf: str) -> str:
 
 def call_claude_decision(world_state: Dict, balance: float,
                           portfolio_state: Dict, strategy_content: str,
-                          api_key: str) -> Dict:
+                          api_key: str, reflection_summary: str = None) -> Dict:
     """
     เรียก Claude API เพื่อตัดสินใจ
 
@@ -491,12 +491,16 @@ m_log': dict (tokens, cost, latency),
         },
         {
             "type": "text",
-            "text": """กฎที่ต้องปฏิบัติเสมอ:
+            "text": f"""กฎที่ต้องปฏิบัติเสมอ:
 - ตัดสินใจตาม Strategy ข้างต้นเท่านั้น ห้ามใช้ทฤษฎีอื่น
 - RSI และ indicators เป็นข้อมูลประกอบเท่านั้น ไม่ใช้ตัดสิน BUY/SELL
 - R:R ต้องได้ ≥ 1.0 เสมอ ถ้าไม่ได้ → SKIP
 - ถ้าไม่แน่ใจ → SKIP ดีกว่าเข้าผิด
-- ตอบเป็น JSON เท่านั้น ห้ามมีข้อความนอก JSON"""
+- ตอบเป็น JSON เท่านั้น ห้ามมีข้อความนอก JSON
+
+=== PERFORMANCE REFLECTION ===
+{reflection_summary or 'No history yet — trade normally'}
+=============================="""
         }
     ]
 
@@ -828,7 +832,7 @@ class G3ClaudeDecisionAgent:
         logger.info(f"G3ClaudeDecisionAgent initialized | Strategy: {len(self.strategy_content)} chars")
 
     def decide(self, world_state: Dict, balance: float,
-               portfolio_state: Dict) -> Dict:
+               portfolio_state: Dict, reflection_summary: str = None) -> Dict:
         """
         ตัดสินใจ BUY/SELL/SKIP
 
@@ -836,6 +840,7 @@ class G3ClaudeDecisionAgent:
             world_state: output จาก G1
             balance: Account balance (USD)
             portfolio_state: Portfolio state dict
+            reflection_summary: Performance reflection (≤200 chars, optional)
 
         Returns:
             {
@@ -848,7 +853,7 @@ class G3ClaudeDecisionAgent:
         # Call Claude API
         result = call_claude_decision(
             world_state, balance, portfolio_state,
-            self.strategy_content, self.api_key
+            self.strategy_content, self.api_key, reflection_summary
         )
 
         if not result['success']:

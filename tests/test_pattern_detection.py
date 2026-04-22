@@ -126,9 +126,9 @@ def test_calc_slope_angle():
 
 
 def test_find_swing_points():
-    """Test swing point detection"""
+    """Test swing point detection (Fractal N-bar Pivot)"""
     candles = create_mock_candles(55, 'uptrend')
-    swing_points = find_swing_points(candles, window=3)
+    swing_points = find_swing_points(candles, timeframe='M5')  # N=3 for M5
 
     # Should return correct structure
     assert 'highs' in swing_points
@@ -142,7 +142,7 @@ def test_find_swing_points():
 def test_check_hh_hl_uptrend():
     """Test Higher High + Higher Low detection"""
     candles = create_mock_candles(55, 'uptrend')
-    swing_points = find_swing_points(candles, window=3)
+    swing_points = find_swing_points(candles, timeframe='M5')  # N=3 for M5
     result = check_hh_hl(swing_points)
 
     # Check correct return structure
@@ -159,7 +159,7 @@ def test_check_hh_hl_uptrend():
 def test_check_lh_ll_downtrend():
     """Test Lower High + Lower Low detection"""
     candles = create_mock_candles(55, 'downtrend')
-    swing_points = find_swing_points(candles, window=3)
+    swing_points = find_swing_points(candles, timeframe='M5')  # N=3 for M5
     result = check_lh_ll(swing_points)
 
     # Check correct return structure

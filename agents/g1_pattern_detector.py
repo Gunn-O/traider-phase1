@@ -22,6 +22,7 @@ from utils.pattern_utils import (
     slope_quality,
     is_good_slope,
     find_swing_points,
+    merge_close_swings,
     check_hh_hl,
     check_lh_ll,
     calc_candle_body,
@@ -61,7 +62,7 @@ TECHNIQUE_PRIORITY = {
 # CHART TYPE DETECTION
 # ============================================================================
 
-def detect_uptrend(candles: List[dict], range_data: dict) -> dict:
+def detect_uptrend(candles: List[dict], range_data: dict, timeframe: str = 'M5') -> dict:
     """
     ตรวจ Uptrend: Higher High + Higher Low ต่อเนื่อง
 
@@ -73,7 +74,8 @@ def detect_uptrend(candles: List[dict], range_data: dict) -> dict:
             'hh_hl': dict
         }
     """
-    swings = find_swing_points(candles)
+    swings = find_swing_points(candles, timeframe)
+    swings = merge_close_swings(swings)  # Merge pivots within 10 pip
     hh_hl = check_hh_hl(swings, min_count=2)  # Relax จาก 3 → 2
 
     # Relax: ถ้ามี HH/HL >= 2 ก็ให้ผ่านไปคำนวณ quality (แม้ไม่ consecutive)
@@ -104,11 +106,12 @@ def detect_uptrend(candles: List[dict], range_data: dict) -> dict:
     }
 
 
-def detect_downtrend(candles: List[dict], range_data: dict) -> dict:
+def detect_downtrend(candles: List[dict], range_data: dict, timeframe: str = 'M5') -> dict:
     """
     ตรวจ Downtrend: Lower High + Lower Low ต่อเนื่อง (กลับทาง uptrend)
     """
-    swings = find_swing_points(candles)
+    swings = find_swing_points(candles, timeframe)
+    swings = merge_close_swings(swings)  # Merge pivots within 10 pip
     lh_ll = check_lh_ll(swings, min_count=2)  # Relax จาก 3 → 2
 
     # Relax: ถ้ามี LH/LL >= 2 ก็ให้ผ่านไปคำนวณ quality (แม้ไม่ consecutive)
@@ -240,13 +243,14 @@ def find_impulse_leg(candles: List[dict], range_usd: float) -> dict:
     return {'found': False}
 
 
-def detect_mountain(candles: List[dict], range_data: dict) -> dict:
+def detect_mountain(candles: List[dict], range_data: dict, timeframe: str = 'M5') -> dict:
     """
     ตรวจภูเขา: ขึ้น-ยอด-ลง ใน 55 แท่ง
     เงื่อนไข: ความสูง > 50% Range, ลงกลับฐานภายใน 55 แท่ง
     """
     R = range_data['range']
-    swings = find_swing_points(candles)
+    swings = find_swing_points(candles, timeframe)
+    swings = merge_close_swings(swings)  # Merge pivots within 10 pip
 
     if not swings['highs'] or len(swings['lows']) < 2:
         return {'detected': False, 'quality': 0.0}
@@ -419,15 +423,28 @@ def check_mother_candle(mother: dict, last_father: dict,
 # TWIN CANDLE & BREAKOUT BOX DETECTION
 # ============================================================================
 
-def detect_twin_candle(candles: List[dict], range_data: dict) -> dict:
+def detect_twin_candle(candles: List[dict], range_data: dict, swings: dict = None) -> dict:
     """
     หาแท่งคู่ทั่วไป (สำหรับทุก chart type)
     ตรวจ 15 แท่งล่าสุด หา twin candle ที่ตรงเงื่อนไข
+
+    Validation (ถ้ามี swings):
+    - แท่งคู่ต้องอยู่ใกล้ swing point (swing low สำหรับ BUY setup, swing high สำหรับ SELL setup)
+    - "ใกล้" = ห่างกันไม่เกิน 0.20 USD (20 pip)
+
+    Args:
+        candles: list of 55 candles
+        range_data: {'range': float, ...}
+        swings: {'highs': [(idx, price), ...], 'lows': [...]} (optional)
+
+    Returns:
+        {'found': bool, 'candle1_idx': int, 'candle2_idx': int, 'technical_price': float, 'body_pct': float}
     """
     range_usd = range_data['range']
 
     # ตรวจ 15 แท่งล่าสุด (เพียงพอสำหรับ setup)
     search_candles = candles[-15:] if len(candles) > 15 else candles
+    search_offset = len(candles) - len(search_candles)
 
     for i in range(len(search_candles) - 1):
         c1 = search_candles[i]
@@ -439,10 +456,22 @@ def detect_twin_candle(candles: List[dict], range_data: dict) -> dict:
             body1 = calc_candle_body(c1)
             body2 = calc_candle_body(c2)
 
+            # Validate กับ swing points (ถ้ามี)
+            if swings is not None:
+                # ตรวจว่า tech_price ใกล้ swing low หรือ swing high
+                near_swing_low = any(abs(tech_price - swing_price) <= 0.20
+                                     for _, swing_price in swings.get('lows', []))
+                near_swing_high = any(abs(tech_price - swing_price) <= 0.20
+                                      for _, swing_price in swings.get('highs', []))
+
+                # แท่งคู่ต้องอยู่ใกล้ swing point อย่างน้อย 1 จุด
+                if not (near_swing_low or near_swing_high):
+                    continue  # ไม่ผ่าน validation → ลองแท่งถัดไป
+
             return {
                 'found': True,
-                'candle1_idx': len(candles) - len(search_candles) + i,
-                'candle2_idx': len(candles) - len(search_candles) + i + 1,
+                'candle1_idx': search_offset + i,
+                'candle2_idx': search_offset + i + 1,
                 'technical_price': tech_price,
                 'body_pct': round(min(body1, body2) / range_usd, 3)
             }
@@ -486,10 +515,22 @@ def find_twin_candle_nearby(candles: List[dict], search_start: int,
 
 
 def detect_breakout_box(candles: List[dict], range_data: dict,
-                        chart_type: str) -> dict:
+                        chart_type: str, swings: dict = None) -> dict:
     """
     หากรอบเล็กๆ ระหว่างเทรน สำหรับ Technique ตามเจ้า
     เงื่อนไข: กรอบบน-ล่าง ≤ 35% ของ Range
+
+    ถ้ามี swings → ใช้ swing highs/lows ใน 15 แท่งล่าสุดเป็นกรอบ (accurate กว่า)
+    ถ้าไม่มี swings → fallback ใช้ max/min ปกติ
+
+    Args:
+        candles: list of 55 candles
+        range_data: {'range': float, ...}
+        chart_type: uptrend/downtrend/mountain
+        swings: {'highs': [(idx, price), ...], 'lows': [...]} (optional)
+
+    Returns:
+        {'found': bool, 'box_high': float, 'box_low': float, 'box_pct': float, 'breakout_direction': str}
     """
     if chart_type not in ['uptrend', 'downtrend', 'mountain']:
         return {'found': False}
@@ -497,28 +538,48 @@ def detect_breakout_box(candles: List[dict], range_data: dict,
     R = range_data['range']
     max_box = R * 0.35
 
-    # มองแท่ง 5-15 แท่งล่าสุด
-    recent = candles[-15:]
-    recent_high = max(c['high'] for c in recent)
-    recent_low = min(c['low'] for c in recent)
-    box_size = recent_high - recent_low
+    # มองแท่ง 15 แท่งล่าสุด
+    recent_start_idx = len(candles) - 15
+
+    # ใช้ swing points ถ้ามี (accurate กว่า)
+    if swings is not None and swings.get('highs') and swings.get('lows'):
+        # Filter swing points ใน 15 แท่งล่าสุด
+        recent_swing_highs = [price for idx, price in swings['highs'] if idx >= recent_start_idx]
+        recent_swing_lows = [price for idx, price in swings['lows'] if idx >= recent_start_idx]
+
+        # ต้องมี swing point อย่างน้อย 1 จุด
+        if recent_swing_highs and recent_swing_lows:
+            box_high = max(recent_swing_highs)
+            box_low = min(recent_swing_lows)
+        else:
+            # Fallback: ใช้ max/min ปกติ
+            recent = candles[-15:]
+            box_high = max(c['high'] for c in recent)
+            box_low = min(c['low'] for c in recent)
+    else:
+        # Fallback: ใช้ max/min ปกติ
+        recent = candles[-15:]
+        box_high = max(c['high'] for c in recent)
+        box_low = min(c['low'] for c in recent)
+
+    box_size = box_high - box_low
 
     if box_size > max_box:
         return {'found': False}
 
     # ตรวจ breakout direction
     last = candles[-1]
-    if last['close'] > recent_high - (box_size * 0.1):
+    if last['close'] > box_high - (box_size * 0.1):
         breakout = 'up'
-    elif last['close'] < recent_low + (box_size * 0.1):
+    elif last['close'] < box_low + (box_size * 0.1):
         breakout = 'down'
     else:
         breakout = None
 
     return {
         'found': True,
-        'box_high': recent_high,
-        'box_low': recent_low,
+        'box_high': box_high,
+        'box_low': box_low,
         'box_pct': round(box_size / R, 2),
         'breakout_direction': breakout
     }
@@ -646,17 +707,18 @@ def build_world_state(candles: List[dict], timeframe: str, range_data: dict) -> 
             'metadata': dict
         }
     """
-    swings = find_swing_points(candles)
+    swings = find_swing_points(candles, timeframe)
+    swings = merge_close_swings(swings)  # Merge pivots within 10 pip
 
     # Detect ทุก chart type
-    uptrend = detect_uptrend(candles, range_data)
-    downtrend = detect_downtrend(candles, range_data)
+    uptrend = detect_uptrend(candles, range_data, timeframe)
+    downtrend = detect_downtrend(candles, range_data, timeframe)
     sideway = detect_sideway(candles, range_data)
-    mountain = detect_mountain(candles, range_data)
+    mountain = detect_mountain(candles, range_data, timeframe)
     father = detect_father_candle(candles, range_data)
 
-    # Detect twin candle (for all chart types)
-    twin = detect_twin_candle(candles, range_data)
+    # Detect twin candle (for all chart types) — validate with swing points
+    twin = detect_twin_candle(candles, range_data, swings)
 
     # เลือก chart_type
     if uptrend['detected']:
@@ -681,7 +743,7 @@ def build_world_state(candles: List[dict], timeframe: str, range_data: dict) -> 
         chart_detail = {}
 
     # Technique candidate
-    technique = determine_technique(chart_type, chart_detail, father, twin, candles, range_data)
+    technique = determine_technique(chart_type, chart_detail, father, twin, candles, range_data, swings)
 
     # Metadata (ไม่ใช้ตัดสิน)
     closes = [c['close'] for c in candles]
@@ -692,6 +754,18 @@ def build_world_state(candles: List[dict], timeframe: str, range_data: dict) -> 
         rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
     else:
         rsi_val = 50.0
+
+    # Calculate slope metadata (for uptrend/downtrend only)
+    slope_norm = 0.0
+    trend_consistent = False
+    if chart_type == 'uptrend':
+        slope_angle = chart_detail.get('slope_angle', 0)
+        slope_norm = slope_quality(slope_angle)  # 0-1 based on distance from 47.5°
+        trend_consistent = chart_detail.get('hh_hl', {}).get('consecutive', False)
+    elif chart_type == 'downtrend':
+        slope_angle = chart_detail.get('slope_angle', 0)
+        slope_norm = slope_quality(slope_angle)
+        trend_consistent = chart_detail.get('lh_ll', {}).get('consecutive', False)
 
     return {
         'timeframe': timeframe,
@@ -713,14 +787,18 @@ def build_world_state(candles: List[dict], timeframe: str, range_data: dict) -> 
         'ohlc_last_10': candles[-10:],
         'metadata': {
             'rsi_14': rsi_val,
-            'candles_checked': len(candles)
+            'candles_checked': len(candles),
+            'slope_norm': round(slope_norm, 2),  # Normalized slope 0-1
+            'swing_count': len(swings.get('highs', [])) + len(swings.get('lows', [])),  # Total swing points
+            'trend_consistent': trend_consistent,  # HH/HL or LH/LL consistent (no counter swings)
+            'range_55': round(range_data['range'], 2)  # Range in USD
         }
     }
 
 
 def determine_technique(chart_type: str, chart_detail: dict,
                         father: dict, twin: dict, candles: List[dict],
-                        range_data: dict) -> str:
+                        range_data: dict, swings: dict = None) -> str:
     """
     กำหนด technique candidate ตาม priority และ setup availability
 
@@ -730,7 +808,7 @@ def determine_technique(chart_type: str, chart_detail: dict,
 
     if chart_type in ['uptrend', 'downtrend']:
         # Priority 1: Breakout box (ตามเจ้า)
-        breakout = detect_breakout_box(candles, range_data, chart_type)
+        breakout = detect_breakout_box(candles, range_data, chart_type, swings)
         if breakout.get('found'):
             return 'breakout_follow'
 

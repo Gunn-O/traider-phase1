@@ -1,24 +1,25 @@
 anthropic>=0.39.0
 
 # Market Data
-yfinance>=0.2.40
 MetaTrader5>=5.0.45
-tvdatafeed
 
 # Google Sheets
 gspread>=6.0.0
 google-auth>=2.0.0
 
 # Core
-schedule>=1.2.0
 requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.24.0
 python-dotenv>=1.0.0
-ta>=0.11.0
 pytz>=2023.3
 
 # Testing
 pytest>=7.0.0
+
+# Web Dashboard
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
 
 git+https://github.com/rongardF/tvdatafeed.git

@@ -21,6 +21,14 @@ from .indicators import (
     analyze_candle_pattern,
     calculate_atr
 )
+from .twin_candle_v43 import (
+    is_swing_candle_pair,
+    is_entry_candle_pair,
+    is_swing_high_v43,
+    is_swing_low_v43,
+    find_technical_price_v43,
+    calculate_mid_price
+)
 
 __all__ = [
     'DataConnector',
@@ -39,5 +47,11 @@ __all__ = [
     'get_rsi_zone',
     'find_nearest_sr_level',
     'analyze_candle_pattern',
-    'calculate_atr'
+    'calculate_atr',
+    'is_swing_candle_pair',
+    'is_entry_candle_pair',
+    'is_swing_high_v43',
+    'is_swing_low_v43',
+    'find_technical_price_v43',
+    'calculate_mid_price'
 ]

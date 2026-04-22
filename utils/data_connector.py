@@ -273,7 +273,7 @@ class DataConnector:
         for attempt in range(max_retries):
             try:
                 # Get data from TradingView
-                # XAUUSD on OANDA exchange
+                # Gold symbols (XAUUSD/XAUUSDm) on OANDA exchange
                 if start_date and end_date:
                     # Date range mode for backtest
                     # Calculate number of bars needed
@@ -290,7 +290,7 @@ class DataConnector:
                         bars_needed = 20000
 
                     df = self.tv_client.get_hist(
-                        symbol='XAUUSD',
+                        symbol=symbol,
                         exchange='OANDA',
                         interval=tv_interval,
                         n_bars=bars_needed
@@ -303,7 +303,7 @@ class DataConnector:
                 else:
                     # Count mode for live/regular use
                     df = self.tv_client.get_hist(
-                        symbol='XAUUSD',
+                        symbol=symbol,
                         exchange='OANDA',
                         interval=tv_interval,
                         n_bars=count
@@ -502,21 +502,569 @@ class DataConnector:
         self.disconnect()
 
 
-# Helper function
-def create_connector(mode: Optional[str] = None) -> DataConnector:
+# ============================================================================
+# NEW: Simplified Connector Architecture (V4.3)
+# ============================================================================
+
+class MT5Connector:
     """
-    Factory function to create DataConnector from environment
+    MT5 Data Connector — ดึง OHLC จาก MT5 Terminal
+    ใช้ได้ทุก mode: backtest/simulate/paper/live
+    """
+
+    def __init__(self, symbol: str = "XAUUSDm"):
+        """
+        Initialize MT5 Connector
+
+        Args:
+            symbol: Trading symbol (e.g., "XAUUSDm", "XAUUSD")
+        """
+        if not MT5_AVAILABLE:
+            raise RuntimeError("MetaTrader5 not available")
+
+        self.symbol = symbol
+        self.connected = False
+
+        # Try to initialize MT5
+        if not mt5.initialize():
+            raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
+
+        self.connected = True
+        logger.info(f"✅ MT5 connected | symbol={symbol}")
+
+    def get_candles(
+        self,
+        timeframe: str,
+        count: int = 80,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> List[Dict]:
+        """
+        Get OHLC candles from MT5
+
+        Args:
+            timeframe: 'M1', 'M5', 'M15', 'M30', 'H1', 'H4'
+            count: Number of candles (for simulate mode)
+            start_date: Start date for backtest mode
+            end_date: End date for backtest mode
+
+        Returns:
+            List of candle dicts
+        """
+        # Map timeframe string to MT5 constant
+        tf_map = {
+            "M1":  mt5.TIMEFRAME_M1,
+            "M5":  mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30,
+            "H1":  mt5.TIMEFRAME_H1,
+            "H4":  mt5.TIMEFRAME_H4,
+        }
+        tf = tf_map.get(timeframe)
+        if tf is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        # Fetch data
+        if start_date and end_date:
+            # Backtest mode: get historical range
+            rates = mt5.copy_rates_range(self.symbol, tf, start_date, end_date)
+        else:
+            # Simulate mode: get N latest candles
+            rates = mt5.copy_rates_from_pos(self.symbol, tf, 0, count)
+
+        if rates is None or len(rates) == 0:
+            raise RuntimeError(
+                f"MT5: no data for {self.symbol} {timeframe} "
+                f"(error: {mt5.last_error()})"
+            )
+
+        # Convert to standard format
+        candles = []
+        for r in rates:
+            candles.append({
+                "time": pd.to_datetime(r["time"], unit='s'),
+                "timestamp": datetime.fromtimestamp(r["time"]),
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+                "volume": int(r.get("tick_volume", 0))
+            })
+
+        return candles
+
+    def is_connected(self) -> bool:
+        """Check if MT5 is connected"""
+        return mt5.terminal_info() is not None
+
+    def get_latest_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict]:
+        """
+        Compatibility wrapper for get_candles()
+        (matches old DataConnector API)
+
+        Args:
+            symbol: Symbol (ignored, uses self.symbol)
+            timeframe: 'M1', 'M5', etc.
+            count: Number of candles
+            start_date: Optional start date
+            end_date: Optional end date
+
+        Returns:
+            List of candle dicts
+        """
+        return self.get_candles(timeframe, count, start_date, end_date)
+
+    def get_all_timeframes_optimized(
+        self,
+        symbol: str,
+        base_tf: str = 'M5',
+        count: int = 55
+    ) -> Dict[str, List[Dict]]:
+        """
+        Fetch M5 and resample to all requested timeframes
+        (matches old DataConnector API)
+
+        Args:
+            symbol: Symbol (ignored, uses self.symbol)
+            base_tf: Base timeframe (default M5)
+            count: Number of candles per TF
+
+        Returns:
+            {
+                'M5': [candles],
+                'M15': [candles],
+                ...
+            }
+        """
+        # Fetch M5 candles (enough to resample)
+        # For M5 → H4, need more candles (48x multiplier)
+        m5_needed = count * 48  # Conservative: enough for H4
+
+        m5_candles = self.get_candles('M5', m5_needed)
+
+        # Resample to all timeframes in TIMEFRAMES
+        result = {}
+        for tf in TIMEFRAMES:
+            if tf == 'M5':
+                result[tf] = m5_candles[-count:] if len(m5_candles) >= count else m5_candles
+            elif tf == 'M1':
+                # Can't downsample M5 to M1
+                result[tf] = []
+            else:
+                # Resample M5 → M15/M30/H1/H4
+                result[tf] = self._resample_m5(m5_candles, tf, count)
+
+        return result
+
+    def _resample_m5(self, m5_candles: List[Dict], target_tf: str, count: int) -> List[Dict]:
+        """Resample M5 candles to higher timeframe"""
+        import pandas as pd
+
+        if not m5_candles:
+            return []
+
+        # Convert to DataFrame
+        df = pd.DataFrame(m5_candles)
+        df.set_index('time', inplace=True)
+
+        # Resample
+        tf_map = {'M15': '15T', 'M30': '30T', 'H1': '1H', 'H4': '4H'}
+        freq = tf_map.get(target_tf)
+        if freq is None:
+            return []
+
+        resampled = df.resample(freq).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+
+        # Convert back to dict
+        candles = []
+        for idx, row in resampled.iterrows():
+            candles.append({
+                'time': idx,
+                'timestamp': idx.to_pydatetime() if hasattr(idx, 'to_pydatetime') else idx,
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': int(row['volume'])
+            })
+
+        return candles[-count:] if len(candles) >= count else candles
+
+    def disconnect(self):
+        """Disconnect from MT5"""
+        if self.connected:
+            mt5.shutdown()
+            self.connected = False
+            logger.info("MT5 disconnected")
+
+    def __repr__(self):
+        return f"MT5Connector(symbol={self.symbol})"
+
+
+class TVConnector:
+    """
+    TradingView Data Connector — Fallback when MT5 unavailable
+    Backtest: Limited to ~60 days (conservative limit)
+    Simulate: Works normally
+    """
+
+    BACKTEST_LIMIT_DAYS = 60  # Conservative limit (API can handle ~70)
+
+    def __init__(self, symbol: str = "XAUUSD"):
+        """
+        Initialize TradingView Connector
+
+        Args:
+            symbol: Trading symbol (XAUUSD for TradingView/OANDA)
+        """
+        if not TVDATAFEED_AVAILABLE:
+            raise RuntimeError("tvdatafeed not available. Install: pip install git+https://github.com/rongardF/tvdatafeed.git")
+
+        self.symbol = symbol
+        self.connected = False
+        self.tv_client = None
+
+        # Get credentials
+        username = os.getenv('TV_USERNAME')
+        password = os.getenv('TV_PASSWORD')
+
+        try:
+            self.tv_client = TvDatafeed(username, password)
+            self.connected = True
+            logger.info(f"📺 TradingView connected | symbol={symbol}/OANDA")
+        except Exception as e:
+            raise RuntimeError(f"TradingView connection failed: {e}")
+
+    def get_candles(
+        self,
+        timeframe: str,
+        count: int = 80,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> List[Dict]:
+        """
+        Get OHLC candles from TradingView
+
+        Args:
+            timeframe: 'M1', 'M5', 'M15', 'M30', 'H1', 'H4'
+            count: Number of candles
+            start_date: Start date for backtest
+            end_date: End date for backtest
+
+        Returns:
+            List of candle dicts
+        """
+        # Map timeframe to TradingView interval
+        tf_minutes = TF_MINUTES.get(timeframe)
+        if tf_minutes is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        tv_interval_map = {
+            1: Interval.in_1_minute,
+            5: Interval.in_5_minute,
+            15: Interval.in_15_minute,
+            30: Interval.in_30_minute,
+            60: Interval.in_1_hour,
+            240: Interval.in_4_hour,
+        }
+        tv_interval = tv_interval_map.get(tf_minutes)
+        if tv_interval is None:
+            raise ValueError(f"TV interval not mapped for {timeframe}")
+
+        # Backtest mode: check range limit
+        if start_date and end_date:
+            days_diff = (end_date - start_date).days
+
+            if days_diff > self.BACKTEST_LIMIT_DAYS:
+                logger.warning(
+                    f"⚠️ TradingView backtest limit: {days_diff} days > "
+                    f"{self.BACKTEST_LIMIT_DAYS} days"
+                )
+                logger.warning(
+                    f"⚠️ Auto-trimming start_date to stay within limit"
+                )
+                # Auto-trim start_date
+                start_date = end_date - timedelta(days=self.BACKTEST_LIMIT_DAYS)
+                logger.info(f"   New start_date: {start_date.date()}")
+
+            # Calculate bars needed
+            bars_per_day = {
+                1: 1440,    # M1: 1440 bars/day
+                5: 288,     # M5: 288 bars/day
+                15: 96,     # M15: 96 bars/day
+                30: 48,     # M30: 48 bars/day
+                60: 24,     # H1: 24 bars/day
+                240: 6,     # H4: 6 bars/day
+            }
+            bars_needed = (days_diff + 1) * bars_per_day.get(tf_minutes, 300)
+            bars_needed = min(bars_needed, 20000)  # API hard limit
+
+        else:
+            # Simulate mode: just get N bars
+            bars_needed = count
+
+        # Fetch from TradingView
+        try:
+            df = self.tv_client.get_hist(
+                symbol=self.symbol,
+                exchange='OANDA',
+                interval=tv_interval,
+                n_bars=bars_needed
+            )
+
+            if df is None or df.empty:
+                raise RuntimeError(f"TV returned no data for {self.symbol}")
+
+            # Filter to exact date range if backtest
+            if start_date and end_date:
+                df = df[(df.index >= start_date) & (df.index <= end_date)]
+
+            # Convert to standard format
+            candles = []
+            for idx, row in df.iterrows():
+                candles.append({
+                    "time": idx,
+                    "timestamp": idx.to_pydatetime() if hasattr(idx, 'to_pydatetime') else idx,
+                    "open": float(row['open']),
+                    "high": float(row['high']),
+                    "low": float(row['low']),
+                    "close": float(row['close']),
+                    "volume": int(row.get('volume', 0))
+                })
+
+            return candles
+
+        except Exception as e:
+            logger.error(f"TradingView fetch failed: {e}")
+            raise RuntimeError(f"TV data fetch error: {e}")
+
+    def is_connected(self) -> bool:
+        """Check if connected"""
+        return self.connected and self.tv_client is not None
+
+    def get_latest_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict]:
+        """
+        Compatibility wrapper for get_candles()
+        (matches old DataConnector API)
+
+        Args:
+            symbol: Symbol (ignored, uses self.symbol)
+            timeframe: 'M1', 'M5', etc.
+            count: Number of candles
+            start_date: Optional start date
+            end_date: Optional end date
+
+        Returns:
+            List of candle dicts
+        """
+        return self.get_candles(timeframe, count, start_date, end_date)
+
+    def get_all_timeframes_optimized(
+        self,
+        symbol: str,
+        base_tf: str = 'M5',
+        count: int = 55
+    ) -> Dict[str, List[Dict]]:
+        """
+        Fetch M5 and resample to all requested timeframes
+        (matches old DataConnector API)
+
+        Args:
+            symbol: Symbol (ignored, uses self.symbol)
+            base_tf: Base timeframe (default M5)
+            count: Number of candles per TF
+
+        Returns:
+            {
+                'M5': [candles],
+                'M15': [candles],
+                ...
+            }
+        """
+        # Fetch M5 candles (enough to resample)
+        m5_needed = count * 48  # Conservative: enough for H4
+
+        m5_candles = self.get_candles('M5', m5_needed)
+
+        # Resample to all timeframes in TIMEFRAMES
+        result = {}
+        for tf in TIMEFRAMES:
+            if tf == 'M5':
+                result[tf] = m5_candles[-count:] if len(m5_candles) >= count else m5_candles
+            elif tf == 'M1':
+                # Can't downsample M5 to M1
+                result[tf] = []
+            else:
+                # Resample M5 → M15/M30/H1/H4
+                result[tf] = self._resample_m5(m5_candles, tf, count)
+
+        return result
+
+    def _resample_m5(self, m5_candles: List[Dict], target_tf: str, count: int) -> List[Dict]:
+        """Resample M5 candles to higher timeframe"""
+        import pandas as pd
+
+        if not m5_candles:
+            return []
+
+        # Convert to DataFrame
+        df = pd.DataFrame(m5_candles)
+        df.set_index('time', inplace=True)
+
+        # Resample
+        tf_map = {'M15': '15T', 'M30': '30T', 'H1': '1H', 'H4': '4H'}
+        freq = tf_map.get(target_tf)
+        if freq is None:
+            return []
+
+        resampled = df.resample(freq).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+
+        # Convert back to dict
+        candles = []
+        for idx, row in resampled.iterrows():
+            candles.append({
+                'time': idx,
+                'timestamp': idx.to_pydatetime() if hasattr(idx, 'to_pydatetime') else idx,
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': int(row['volume'])
+            })
+
+        return candles[-count:] if len(candles) >= count else candles
+
+    def disconnect(self):
+        """Disconnect (no-op for TradingView)"""
+        self.connected = False
+        self.tv_client = None
+        logger.info("TradingView disconnected")
+
+    def __repr__(self):
+        return f"TVConnector(symbol={self.symbol}/OANDA)"
+
+
+# ============================================================================
+# Auto-Detection Factory Function
+# ============================================================================
+
+def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
+    """
+    Auto-detect data source and create appropriate connector
+
+    Priority:
+    1. MT5 (if available and connected)
+    2. TradingView (fallback)
 
     Args:
-        mode: Override mode (optional). If None, read from DATA_MODE env var
+        mode: "auto" | "mt5" | "tv" | "backtest"
+              - "auto": Try MT5 first, fallback to TV
+              - "mt5": Force MT5 (error if not available)
+              - "tv": Force TradingView
+              - "backtest": Same as auto (for backward compatibility)
+        symbol: Trading symbol
+                - MT5: use "XAUUSDm" (cent) or "XAUUSD" (standard)
+                - TV: use "XAUUSD" (OANDA doesn't have XAUUSDm)
 
     Returns:
-        DataConnector instance
-    """
-    if mode is None:
-        mode = os.getenv("DATA_MODE", "backtest")
+        MT5Connector or TVConnector instance
 
-    return DataConnector(mode=mode)
+    Raises:
+        RuntimeError: If forced mode is not available
+    """
+    # Override from environment if not specified
+    if mode == "auto":
+        mode = os.getenv("DATA_MODE", "auto")
+
+    # Normalize backtest mode to auto
+    if mode in ["backtest", "simulate"]:
+        mode = "auto"
+
+    # Force MT5 mode
+    if mode == "mt5":
+        if not MT5_AVAILABLE:
+            raise RuntimeError(
+                "Mode 'mt5' requires MetaTrader5. "
+                "Install: pip install MetaTrader5"
+            )
+        try:
+            connector = MT5Connector(symbol=symbol)
+            logger.info("✅ Using MT5 data source (forced)")
+            return connector
+        except Exception as e:
+            raise RuntimeError(f"MT5 connection failed: {e}")
+
+    # Force TradingView mode
+    if mode == "tv":
+        if not TVDATAFEED_AVAILABLE:
+            raise RuntimeError(
+                "Mode 'tv' requires tvdatafeed. "
+                "Install: pip install git+https://github.com/rongardF/tvdatafeed.git"
+            )
+        # TradingView uses XAUUSD (not XAUUSDm)
+        tv_symbol = "XAUUSD" if "XAUUSD" in symbol else symbol
+        connector = TVConnector(symbol=tv_symbol)
+        logger.info("📺 Using TradingView data source (forced)")
+        return connector
+
+    # Auto-detect mode (default)
+    if mode == "auto":
+        # Try MT5 first
+        if MT5_AVAILABLE:
+            try:
+                connector = MT5Connector(symbol=symbol)
+                logger.info("✅ Using MT5 data source (auto-detected)")
+                return connector
+            except Exception as e:
+                logger.warning(f"⚠️ MT5 not available: {e}")
+                logger.warning("⚠️ Falling back to TradingView...")
+
+        # Fallback to TradingView
+        if TVDATAFEED_AVAILABLE:
+            # TradingView uses XAUUSD (not XAUUSDm)
+            tv_symbol = "XAUUSD" if "XAUUSD" in symbol else symbol
+            connector = TVConnector(symbol=tv_symbol)
+            logger.info("📺 Using TradingView data source (fallback)")
+            return connector
+
+        # Neither available
+        raise RuntimeError(
+            "No data source available. Install one of:\n"
+            "  - MetaTrader5: pip install MetaTrader5\n"
+            "  - tvdatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git"
+        )
+
+    # Invalid mode
+    raise ValueError(
+        f"Invalid mode: {mode}. "
+        f"Must be 'auto', 'mt5', 'tv', or 'backtest'"
+    )
 
 
 # Example usage
@@ -534,7 +1082,7 @@ if __name__ == "__main__":
 
     for tf in timeframes:
         try:
-            candles = connector.get_latest_candles("XAUUSD", timeframe=tf, count=55)
+            candles = connector.get_latest_candles("XAUUSDm", timeframe=tf, count=55)
             print(f"✓ {tf}: {len(candles)} candles")
 
             if candles:
