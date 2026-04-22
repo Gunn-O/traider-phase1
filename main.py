@@ -701,7 +701,8 @@ class TraiderMainLoop:
                     tp=order['tp'],
                     plan_id=plan_id,
                     candle_time=candle_time,
-                    trade_id=order['trade_id']
+                    trade_id=order['trade_id'],
+                    entry_price=order.get('entry')  # For backtest mode
                 )
                 if ticket:
                     order['broker_ticket'] = ticket  # Store ticket for tracking
@@ -822,7 +823,8 @@ class TraiderMainLoop:
                 candle_time = datetime.now()
 
             # Update broker positions (check SL/TP with real prices)
-            newly_closed = self.broker.update_positions(candle_time)
+            current_price = current_candle.get('close') if current_candle else None
+            newly_closed = self.broker.update_positions(candle_time, current_price=current_price)
 
             # Sync closed positions to PositionMonitor
             if newly_closed:

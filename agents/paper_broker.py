@@ -81,6 +81,7 @@ class PaperBroker:
         technique: Optional[str] = None,  # V4.3
         session: Optional[str] = None,    # V4.3
         beauty_score: Optional[int] = None,  # V4.3
+        entry_price: Optional[float] = None,  # For backtest mode
     ) -> Optional[int]:
         """
         เปิด virtual position (V4.3: รองรับ metadata เพิ่มเติม)
@@ -96,13 +97,18 @@ class PaperBroker:
             technique: Technique name (V4.3)
             session: Trading session (V4.3)
             beauty_score: Beauty score 60/80/90/100 (V4.3)
+            entry_price: Entry price (for backtest mode, default: get from MT5)
 
         Returns:
             ticket number หรือ None ถ้าล้มเหลว
         """
         try:
-            bid, ask = self.get_current_price()
-            entry = ask if action == "BUY" else bid
+            # Use provided entry_price or get from MT5
+            if entry_price is not None:
+                entry = entry_price
+            else:
+                bid, ask = self.get_current_price()
+                entry = ask if action == "BUY" else bid
 
             self.ticket_counter += 1
             ticket = self.ticket_counter
@@ -140,21 +146,26 @@ class PaperBroker:
             logger.error(f"PaperBroker open_position error: {e}")
             return None
 
-    def update_positions(self, candle_time: datetime) -> List[dict]:
+    def update_positions(self, candle_time: datetime, current_price: Optional[float] = None) -> List[dict]:
         """
         เช็ค SL/TP hit — เรียกทุก candle close
 
         Args:
             candle_time: Current candle timestamp
+            current_price: Current close price (for backtest mode, default: get from MT5)
 
         Returns:
             list ของ position ที่ปิดในรอบนี้
         """
-        try:
-            bid, ask = self.get_current_price()
-        except Exception as e:
-            logger.error(f"Cannot update positions: {e}")
-            return []
+        # Use provided current_price or get from MT5
+        if current_price is not None:
+            bid = ask = current_price  # In backtest, use same price for bid/ask
+        else:
+            try:
+                bid, ask = self.get_current_price()
+            except Exception as e:
+                logger.error(f"Cannot update positions: {e}")
+                return []
 
         newly_closed = []
 
