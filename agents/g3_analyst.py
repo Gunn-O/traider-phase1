@@ -35,19 +35,72 @@ def build_grounding(world_state: dict, balance: float) -> dict:
     เพื่อป้องกัน hallucination
 
     V4.3: เพิ่ม beauty_score และ beauty_warning
+    V2.1.1: เพิ่ม signal data สำหรับ Reviewer mode (when Signal Engine provides signal)
 
     Args:
-        world_state: Output จาก G1
+        world_state: Output จาก Signal Engine (or G1 for backward compat)
         balance: Account balance
 
     Returns:
         dict with grounding data
     """
     range_55 = world_state["range"]["usd"]
+    current_price = world_state["current_price"]
+
+    # Check if Signal Engine provided a signal
+    signal = world_state.get("signal")
+    has_signal = signal is not None and hasattr(signal, 'entry')
+
+    if has_signal:
+        # Reviewer mode: Signal Engine provided Entry/SL/TP
+        entry_must_be = signal.entry
+        beauty_score = 100  # Signal Engine handles quality internally
+
+        grounding = {
+            # Mode flag
+            "reviewer_mode": True,
+
+            # Signal data from Signal Engine
+            "signal_provided": True,
+            "signal": {
+                "pattern": signal.pattern,
+                "direction": signal.direction,
+                "quality": signal.quality,
+                "entry": signal.entry,
+                "sl": signal.sl,
+                "sl_name": signal.sl_name,
+                "tp_order": signal.tp_order,
+                "tp_ref": signal.tp_ref,
+                "tp_name": signal.tp_name,
+                "rr": signal.rr,
+                "risk_pip": signal.risk_pip,
+                "reward_pip": signal.reward_pip,
+                "lot": signal.lot,
+            },
+
+            # Standard grounding
+            "technical_price": entry_must_be,
+            "range_55_usd": range_55,
+            "range_55_pip": world_state["range"]["pip"],
+            "rr_minimum": 1.0,
+            "balance": balance,
+            "beauty_score": beauty_score,
+            "beauty_warning": False,
+
+            # SL reference (for logging compatibility)
+            "sl_reference": {
+                "10pct_range_pip": range_55 * 100 * 0.10,
+                "20pct_range_pip": range_55 * 100 * 0.20,
+                "note": "Signal Engine calculated SL"
+            },
+        }
+
+        return grounding
+
+    # Fallback: Old G1 mode (backward compatible)
     twin = world_state.get("twin_candle", {})
     technical_price = twin.get("technical_price", 0)
-    current_price = world_state["current_price"]
-    beauty_score = twin.get("beauty_score", 100)  # Default 100 ถ้าไม่มี
+    beauty_score = twin.get("beauty_score", 100)
 
     # Entry constraints
     entry_must_be = technical_price if technical_price > 0 else current_price
@@ -57,6 +110,10 @@ def build_grounding(world_state: dict, balance: float) -> dict:
     rr_minimum = 1.0
 
     return {
+        # Mode flag
+        "reviewer_mode": False,
+        "signal_provided": False,
+
         # ค่าที่ Claude ต้องใช้ — Python หาให้แล้ว
         "technical_price": entry_must_be,
         "range_55_usd": range_55,
@@ -220,10 +277,10 @@ class G3AnalystAgent:
     def __init__(self, system_prompt_path: str = None,
                  api_key: str = None, config: dict = None):
         """
-        Initialize Analyst Agent
+        Initialize Analyst Agent (Reviewer Mode for Signal Engine v4.20)
 
         Args:
-            system_prompt_path: Path to System Prompt V1 MD file
+            system_prompt_path: Path to Reviewer Prompt MD file
             api_key: Anthropic API key (optional, reads from env)
             config: Optional config dict
         """
@@ -234,18 +291,18 @@ class G3AnalystAgent:
         self.config = config or {}
         self.verbose = self.config.get('verbose', False)
 
-        # Load System Prompt V4.3
+        # Load Reviewer Prompt (v4.20+)
         if not system_prompt_path:
-            system_prompt_path = 'strategy/XAUUSD_System_PromptV43.md'
+            system_prompt_path = 'strategy/XAUUSD_System_Prompt_Reviewer.md'
 
         prompt_path = Path(system_prompt_path)
         if not prompt_path.exists():
-            raise FileNotFoundError(f"System Prompt not found: {system_prompt_path}")
+            raise FileNotFoundError(f"Reviewer Prompt not found: {system_prompt_path}")
 
         with open(prompt_path, 'r', encoding='utf-8') as f:
-            self.system_prompt_content = f.read()
+            self.reviewer_content = f.read()
 
-        logger.info(f"✓ System Prompt V1 loaded ({len(self.system_prompt_content)} chars)")
+        logger.info(f"✓ Reviewer Prompt loaded ({len(self.reviewer_content)} chars)")
 
         # Initialize Anthropic client
         self.client = anthropic.Anthropic(api_key=self.api_key)
@@ -259,79 +316,341 @@ class G3AnalystAgent:
         grounding: dict = None
     ) -> dict:
         """
-        วิเคราะห์กราฟและตัดสินใจเทรด
+        Backward compatible wrapper
+        ถ้า world_state มี signal → ใช้ review()
+        ถ้าไม่มี → SKIP
 
         Args:
-            world_state: Output from G1
+            world_state: Output from Signal Engine (or G1 for backward compat)
             balance: Account balance
             portfolio_state: Portfolio state dict
             reflection_summary: Performance reflection (from Agent C)
-            grounding: Optional pre-computed grounding (if None, will compute)
+            grounding: Optional pre-computed grounding
 
         Returns:
             {
                 'success': bool,
                 'decision': dict,
                 'llm_log': dict,
-                'grounding': dict,
+                'grounding': dict (deprecated),
                 'verify_errors': list
             }
         """
-        # Step 1: Build grounding (if not provided)
-        if grounding is None:
-            grounding = build_grounding(world_state, balance)
-
-        # Step 2: Build System Prompt (2 blocks)
-        system_blocks = self._build_system_prompt_blocks(reflection_summary)
-
-        # Step 3: Build User Prompt
-        user_prompt = self._build_user_prompt(world_state, portfolio_state, grounding)
-
-        # Step 4: Call Claude API
-        try:
-            start_time = datetime.now()
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=2048,
-                temperature=0.0,
-                system=system_blocks,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ]
+        # New path: Reviewer mode (when Signal Engine provides signal)
+        if world_state.get("signal"):
+            result = self.review(
+                world_state=world_state,
+                balance=balance,
+                portfolio_state=portfolio_state,
+                reflection_summary=reflection_summary,
             )
-            elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+            review = result["review"]
 
-            # Parse response
-            response_text = response.content[0].text
-            decision = self._parse_claude_response(response_text)
-
-            # LLM log
-            llm_log = self._build_llm_log(response, elapsed_ms)
-
-            # Step 5: Post-verify
-            verify_errors = verify_analyst_decision(decision, grounding)
-
-            if verify_errors:
-                logger.warning(f"Agent A verify failed: {verify_errors}")
-                # Override decision to SKIP
+            # Convert review → decision format (backward compatible)
+            sig = world_state["signal"]
+            if review["decision"] == "APPROVE":
+                decision = {
+                    "action": sig.direction,  # BUY or SELL
+                    "chart_type": world_state.get("chart_type", "unclear"),
+                    "technique": world_state.get("technique_candidate", "none"),
+                    "entry": sig.entry,
+                    "sl": sig.sl,
+                    "tp": sig.tp_order,
+                    "rr_ratio": sig.rr,
+                    "sl_pip": sig.risk_pip,
+                    "tp_pip": sig.reward_pip,
+                    "confidence": review.get("confidence", 0.8),
+                    "reason": review.get("reason", ""),
+                    "skip_reason": "",
+                }
+            else:
                 decision = {
                     "action": "SKIP",
-                    "skip_reason": f"Verify failed: {verify_errors[0][:60]}"
+                    "skip_reason": review.get("reason", "Rejected by reviewer"),
                 }
 
-            # Push agent log to dashboard
+            return {
+                "success": True,
+                "decision": decision,
+                "llm_log": result["llm_log"],
+                "grounding": {},  # Deprecated in reviewer mode
+                "verify_errors": []
+            }
+
+        # Fallback: No signal → SKIP
+        logger.warning("No signal from Signal Engine → SKIP")
+        return {
+            "success": True,
+            "decision": {
+                "action": "SKIP",
+                "skip_reason": "No signal from engine",
+            },
+            "llm_log": {"action": "SKIP", "cost_usd": 0},
+            "grounding": {},
+            "verify_errors": []
+        }
+
+    def review(
+        self,
+        world_state: dict,
+        balance: float,
+        portfolio_state: dict,
+        reflection_summary: str = "",
+    ) -> dict:
+        """
+        Review signal from Signal Engine
+        ไม่คำนวณ Entry/SL/TP — แค่ APPROVE/REJECT
+
+        Args:
+            world_state: Output from Signal Engine
+            balance: Account balance
+            portfolio_state: Portfolio state dict
+            reflection_summary: Performance reflection
+
+        Returns:
+            {
+                "review": {
+                    "decision": "APPROVE"|"REJECT",
+                    "confidence": float,
+                    "reason": str,
+                    "obstacles": str,
+                },
+                "llm_log": dict,
+            }
+        """
+        sig = world_state.get("signal")
+        if not sig:
+            return {
+                "review": {
+                    "decision": "REJECT",
+                    "confidence": 0.0,
+                    "reason": "No signal provided",
+                    "obstacles": "none",
+                },
+                "llm_log": {"action": "SKIP", "cost_usd": 0},
+            }
+
+        ohlc = world_state.get("ohlc_last_10", [])
+
+        # Build OHLC text (last 5 bars)
+        ohlc_text = ""
+        for c in ohlc[-5:]:
+            t = c.get("time", c.get("timestamp", ""))
+            if isinstance(t, datetime):
+                t = t.strftime("%Y-%m-%d %H:%M")
+            ohlc_text += (
+                f"  {t} "
+                f"O={c['open']:.2f} "
+                f"H={c['high']:.2f} "
+                f"L={c['low']:.2f} "
+                f"C={c['close']:.2f}\n"
+            )
+
+        # Build signal format text
+        sig_text = f"""Pattern: {sig.pattern}
+Direction: {sig.direction}
+Quality: {sig.quality}
+Entry: {sig.entry:.2f}
+SL: {sig.sl:.2f} ({sig.sl_name})
+TP: {sig.tp_order:.2f} ({sig.tp_name})
+R:R: {sig.rr:.2f}
+Risk: {sig.risk_pip:.0f} pip
+Reward: {sig.reward_pip:.0f} pip
+Lot: {sig.lot:.2f}"""
+
+        user_prompt = f"""Review signal นี้:
+
+{sig_text}
+
+OHLC ล่าสุด 5 แท่ง:
+{ohlc_text}
+ราคาปัจจุบัน: {world_state.get('current_price', 0):.2f}
+Portfolio: ${balance:.2f}
+Consecutive Loss: {portfolio_state.get('consecutive_loss', 0)}
+
+ตรวจ 3 ข้อ:
+1. Pattern {sig.pattern} ตรงกับ OHLC ไหม?
+2. Entry {sig.entry:.2f} สมเหตุสมผลไหม?
+3. มีอุปสรรคเส้นทาง TP {sig.tp_order:.2f} ไหม?
+
+ตอบ JSON เท่านั้น"""
+
+        # Call Claude API
+        result = self._call_claude_review(user_prompt, reflection_summary)
+
+        if not result["success"]:
+            # API fail → APPROVE อัตโนมัติ
+            logger.warning("Claude API fail → auto APPROVE")
+            return {
+                "review": {
+                    "decision": "APPROVE",
+                    "confidence": 0.5,
+                    "reason": "API unavailable — auto approve",
+                    "obstacles": "none",
+                },
+                "llm_log": result.get("llm_log", {}),
+            }
+
+        review = result["decision"]
+
+        # Validate
+        if review.get("decision") not in ["APPROVE", "REJECT"]:
+            review["decision"] = "APPROVE"
+
+        if not review.get("reason"):
+            review["reason"] = ""
+
+        if not review.get("obstacles"):
+            review["obstacles"] = "none"
+
+        return {
+            "review": review,
+            "llm_log": result["llm_log"],
+        }
+
+    def _call_claude_review(
+        self,
+        user_prompt: str,
+        reflection_summary: str = "",
+    ) -> dict:
+        """
+        Call Claude API for Reviewer mode
+        Uses reviewer system prompt (cached)
+
+        Args:
+            user_prompt: User prompt with signal details
+            reflection_summary: Performance reflection
+
+        Returns:
+            {
+                "success": bool,
+                "decision": dict (if success),
+                "llm_log": dict
+            }
+        """
+        system_blocks = [
+            {
+                "type": "text",
+                "text": self.reviewer_content,
+                "cache_control": {"type": "ephemeral"}
+            },
+            {
+                "type": "text",
+                "text": f"""กฎที่ต้องปฏิบัติเสมอ:
+- ห้าม recalculate Entry/SL/TP
+- APPROVE ถ้าไม่แน่ใจ
+- ตอบ JSON เท่านั้น
+
+=== PERFORMANCE REFLECTION ===
+{reflection_summary}
+=============================="""
+            }
+        ]
+
+        start_time = datetime.now()
+
+        # Retry logic (up to 3 attempts)
+        for attempt in range(3):
+            try:
+                response = self.client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=300,  # Reviewer needs short response
+                    temperature=0.0,
+                    system=system_blocks,
+                    messages=[{
+                        "role": "user",
+                        "content": user_prompt
+                    }]
+                )
+                break
+            except RateLimitError as e:
+                if attempt < 2:
+                    logger.warning(f"Rate limit hit, waiting 60s (attempt {attempt+1}/3)")
+                    import time
+                    time.sleep(60)
+                else:
+                    logger.error("Rate limit exceeded after 3 attempts")
+                    return {
+                        "success": False,
+                        "llm_log": {
+                            "action": "RATE_LIMIT",
+                            "cost_usd": 0
+                        }
+                    }
+            except Exception as e:
+                logger.error(f"Claude API error: {e}")
+                return {
+                    "success": False,
+                    "llm_log": {
+                        "action": "ERROR",
+                        "cost_usd": 0
+                    }
+                }
+
+        try:
+            elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+            raw = response.content[0].text.strip()
+
+            # Remove markdown code blocks if present
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                if len(parts) >= 2:
+                    raw = parts[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+
+            decision = json.loads(raw.strip())
+
+            # Build LLM log
+            usage = response.usage
+            input_tokens = usage.input_tokens
+            output_tokens = usage.output_tokens
+            cache_read_tokens = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cache_creation_tokens = getattr(usage, "cache_creation_input_tokens", 0) or 0
+
+            # Cost calculation (Sonnet 4 pricing)
+            input_cost = (input_tokens / 1_000_000) * 3.00
+            output_cost = (output_tokens / 1_000_000) * 15.00
+            cache_read_cost = (cache_read_tokens / 1_000_000) * 0.30
+            cache_create_cost = (cache_creation_tokens / 1_000_000) * 3.00
+            total_cost = input_cost + output_cost + cache_read_cost + cache_create_cost
+
+            cache_hit = cache_read_tokens > 0
+
+            llm_log = {
+                "timestamp": datetime.now().isoformat(),
+                "model": "claude-sonnet-4-20250514",
+                "mode": "reviewer",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
+                "cache_hit": cache_hit,
+                "cost_usd": round(total_cost, 4),
+                "elapsed_ms": round(elapsed_ms, 1),
+                "action": decision.get("decision"),
+            }
+
+            logger.info(
+                f"🔍 Review: {decision.get('decision')} "
+                f"conf={decision.get('confidence', 0):.2f} "
+                f"cost=${llm_log['cost_usd']:.4f} "
+                f"cache={'✅' if cache_hit else '❌'}"
+            )
+
+            # Push to dashboard
             try:
                 from api_server import add_agent_log
-                add_agent_log("analyst", {
+                add_agent_log("reviewer", {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "action": decision.get("action", "SKIP"),
-                    "reason": decision.get("reason", decision.get("skip_reason", ""))[:80],
-                    "cost_usd": llm_log.get("cost_usd", 0),
+                    "action": decision.get("decision"),
+                    "reason": decision.get("reason", "")[:80],
+                    "cost_usd": llm_log["cost_usd"],
                     "tokens": {
-                        "input": llm_log.get("input_tokens", 0),
-                        "output": llm_log.get("output_tokens", 0),
-                        "cache_read": llm_log.get("cache_read_tokens", 0),
-                        "cache_write": llm_log.get("cache_creation_tokens", 0),
+                        "input": input_tokens,
+                        "output": output_tokens,
+                        "cache_read": cache_read_tokens,
+                        "cache_write": cache_creation_tokens,
                     },
                     "latency_sec": round(elapsed_ms / 1000, 2),
                     "model": "claude-sonnet-4-20250514",
@@ -340,21 +659,20 @@ class G3AnalystAgent:
                 logger.debug(f"Failed to push agent log: {e}")
 
             return {
-                'success': True,
-                'decision': decision,
-                'llm_log': llm_log,
-                'grounding': grounding,
-                'verify_errors': verify_errors
+                "success": True,
+                "decision": decision,
+                "llm_log": llm_log,
             }
 
-        except Exception as e:
-            logger.error(f"Agent A decision failed: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error: {e}")
+            logger.error(f"Raw response: {raw[:200]}")
             return {
-                'success': False,
-                'decision': {'action': 'SKIP', 'skip_reason': f'Agent A error: {str(e)[:60]}'},
-                'llm_log': {'action': 'ERROR', 'error': str(e)},
-                'grounding': grounding,
-                'verify_errors': [str(e)]
+                "success": False,
+                "llm_log": {
+                    "action": "ERROR",
+                    "cost_usd": 0
+                }
             }
 
     def _build_system_prompt_blocks(self, reflection_summary: str) -> list:
@@ -404,8 +722,10 @@ class G3AnalystAgent:
         """
         Build user prompt with grounding data
 
+        V2.1.1: Support Reviewer mode when Signal Engine provides signal
+
         Args:
-            world_state: G1 output
+            world_state: Signal Engine output (or G1 for backward compat)
             portfolio_state: Portfolio state
             grounding: Grounding data
 
@@ -423,13 +743,62 @@ class G3AnalystAgent:
         active_plan = portfolio_state.get('active_plan_id', 'ไม่มีแผนที่เปิดอยู่')
         consecutive_loss = portfolio_state.get('consecutive_loss', 0)
 
-        # Twin candle
-        twin = world_state.get('twin_candle', {})
-        twin_found = twin.get('found', False)
-        technical_price = twin.get('technical_price', 0)
+        # Check if Signal Engine provided a signal (Reviewer mode)
+        reviewer_mode = grounding.get('reviewer_mode', False)
 
-        # Build prompt
-        prompt = f"""วิเคราะห์กราฟ XAUUSD และตัดสินใจเทรด
+        if reviewer_mode:
+            # REVIEWER MODE: Signal Engine provided Entry/SL/TP
+            sig = grounding['signal']
+            prompt = f"""🔍 REVIEWER MODE — ตรวจสอบสัญญาณจาก Signal Engine
+
+=== ข้อมูลกราฟ ===
+Timeframe: {tf}
+Chart Type: {chart_type}
+Quality Score: {quality:.2f}/1.0
+Range 55 แท่ง: {range_data['usd']:.2f} USD ({range_data['pip']} pip)
+ราคาปัจจุบัน: {current_price:.2f}
+Session: {session}
+
+=== สัญญาณจาก Signal Engine ===
+Pattern: {sig['pattern']}
+Direction: {sig['direction']}
+Quality: {sig['quality']}
+Entry: {sig['entry']:.2f}
+SL: {sig['sl']:.2f} ({sig['sl_name']})
+TP (order): {sig['tp_order']:.2f} ({sig['tp_name']})
+TP (ref): {sig['tp_ref']:.2f}
+R:R: {sig['rr']:.2f}
+Risk: {sig['risk_pip']:.0f} pip
+Reward: {sig['reward_pip']:.0f} pip
+Lot: {sig['lot']:.2f}
+
+=== สถานะพอร์ต ===
+Balance: {grounding['balance']:.2f} USD
+Active Plan: {active_plan}
+Consecutive Loss: {consecutive_loss}
+
+=== บทบาทของคุณ (REVIEWER) ===
+Signal Engine ได้คำนวณ Entry/SL/TP/Lot ให้แล้ว ตาม Strategy v2.1
+
+คุณต้อง:
+1. ตรวจสอบว่าสัญญาณนี้สมเหตุสมผลตาม Strategy หรือไม่
+2. ตรวจ R:R ratio (ต้อง ≥ 1.0)
+3. ตรวจ SL width (ไม่ควรเกิน 20% Range)
+4. ตัดสินใจ: APPROVE (ใช้ค่าจาก Signal Engine) หรือ SKIP (ปฏิเสธสัญญาณ)
+
+⚠️ CRITICAL:
+- ถ้า APPROVE → ใช้ entry={sig['entry']:.2f}, sl={sig['sl']:.2f}, tp={sig['tp_order']:.2f} เป๊ะ (ห้ามเปลี่ยน)
+- ถ้า SKIP → ระบุเหตุผลที่ชัดเจน (ตาม Strategy)
+
+{OUTPUT_FORMAT}"""
+
+        else:
+            # ORIGINAL MODE: G1 pattern detection (backward compatible)
+            twin = world_state.get('twin_candle', {})
+            twin_found = twin.get('found', False)
+            technical_price = twin.get('technical_price', 0)
+
+            prompt = f"""วิเคราะห์กราฟ XAUUSD และตัดสินใจเทรด
 
 === ข้อมูลกราฟ ===
 Timeframe: {tf}
@@ -446,12 +815,12 @@ Session: {session}
 
 === Grounding Data (Python คำนวณให้แล้ว) ===
 Technical Price (จุดเทคนิค): {grounding['technical_price']:.2f}
-Entry Tolerance: ±{grounding['entry_tolerance_pip']:.0f} pip
+Entry Tolerance: ±{grounding.get('entry_tolerance_pip', 100):.0f} pip
 Range 55: {grounding['range_55_pip']:.0f} pip
 SL Reference (guideline):
-  - 10% Range = {grounding['sl_reference']['10pct_range_pip']:.0f} pip
-  - 20% Range = {grounding['sl_reference']['20pct_range_pip']:.0f} pip
-  - Note: {grounding['sl_reference']['note']}
+  - 10% Range = {grounding.get('sl_reference', {}).get('10pct_range_pip', 0):.0f} pip
+  - 20% Range = {grounding.get('sl_reference', {}).get('20pct_range_pip', 0):.0f} pip
+  - Note: {grounding.get('sl_reference', {}).get('note', '')}
 R:R Minimum: {grounding['rr_minimum']:.1f}
 
 === แท่งคู่ ===

@@ -1,0 +1,673 @@
+"""
+XAUUSD Signal Finder — v4.20
+ระบบหาจุด Entry / SL / TP สำหรับ XAUUSD M5
+
+Patterns ที่รองรับ:
+  1. เทรนด์ขึ้น  → BUY  (Branch A)
+  2. เทรนด์ลง    → SELL (Branch B)
+  3. ภูเขา     → BUY  (Branch D) รวม รอบ 2
+
+การใช้งาน:
+  from xauusd_signal import find_signal, OHLC
+  bars = [OHLC(time, open, high, low, close), ...]
+  result = find_signal(bars, portfolio=1000)
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Optional
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from swing_v414 import scan_swings
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Data Types
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class OHLC:
+    time:  str
+    open:  float
+    high:  float
+    low:   float
+    close: float
+    bar_num: int = 0  # ถ้าไม่ระบุ จะถูก assign ตาม index
+
+    @property
+    def body_hi(self): return max(self.open, self.close)
+    @property
+    def body_lo(self): return min(self.open, self.close)
+    @property
+    def body_size(self): return (self.body_hi - self.body_lo) * 100  # pip
+
+    def to_tuple(self):
+        """แปลงเป็ tuple สำหรับ swing_v414"""
+        return (self.bar_num, self.time, self.open, self.high, self.low, self.close)
+
+
+@dataclass
+class Signal:
+    pattern:    str           # 'DOWNTREND' | 'MOUNTAIN' | 'MOUNTAIN_R2' | 'UPTREND'
+    direction:  str           # 'BUY' | 'SELL'
+    quality:    str           # '100%✓' | '~60%⚠️'
+    entry:      float
+    sl:         float
+    sl_name:    str           # 'SL1' | 'SL2' | 'SL3' | 'SL3.5'
+    tp_order:   float         # ราคาวาง order จริง
+    tp_ref:     float         # ราคาใช้ตรวจ R:R
+    tp_name:    str           # 'TP1' | 'TP2' | 'TP3'
+    rr:         float
+    risk_pip:   float
+    reward_pip: float
+    lot:        float = 0.0
+    R55:        float = 0.0
+    details:    dict  = field(default_factory=dict)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════
+
+_TP3_REF_BUF  =  0.10   # 10pip
+_TP3_ORD_BUF  =  0.60   # 60pip  (spread buffer)
+_BUF100       =  1.00   # 100pip
+_CROSS_BUF    =  1.00   # ±100pip สำหรับตรวจการข้าม
+
+def _q(pct: float) -> str:
+    return "100%✓" if pct < 30 else "~60%⚠️" if pct < 50 else "✗"
+
+def _bars_to_tuples(bars: list[OHLC]) -> list[tuple]:
+    out = []
+    for i, b in enumerate(bars):
+        bn = b.bar_num if b.bar_num else i + 1
+        out.append((bn, b.time, b.open, b.high, b.low, b.close))
+    return out
+
+def _O(t): return t[2]
+def _H(t): return t[3]
+def _L(t): return t[4]
+def _C(t): return t[5]
+
+
+def _pick_tp(entry: float, tps: list[tuple], sl: float, direction: str) -> tuple:
+    """
+    เลือก TP ที่ R:R ใกล้เคียง 1.0 ที่สุด ใช่ไม่ต่อยกว่า 1.0
+    direction: 'BUY' หรือ 'SELL'
+    tps: list of (tp_ref, tp_order, tp_name)
+    คืน (tp_ref, tp_order, tp_name, rr) ของ TP ที่เลือก
+    """
+    risk = abs(entry - sl) * 100
+    if risk <= 0:
+        return None
+
+    best = None
+    for tp_ref, tp_ord, tp_name in tps:
+        reward = abs(entry - tp_ref) * 100
+        rr = reward / risk
+        if rr >= 1.0:
+            if best is None or rr < best[3]:   # เก็บ 1 ที่สุด
+                best = (tp_ref, tp_ord, tp_name, rr)
+
+    return best  # (tp_ref, tp_order, tp_name, rr) หรือ None
+
+
+def _calc_lot(risk_pip: float, portfolio: float) -> float:
+    """Lot = (portfolio × 10%) ÷ risk_pip"""
+    if risk_pip <= 0:
+        return 0.0
+    return round((portfolio * 0.10) / risk_pip, 2)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SL Calculators
+# ═══════════════════════════════════════════════════════════════════
+
+def _calc_sl_sell(tech: float, frame_tuples: list[tuple],
+                  pre_tuples: list[tuple], R55: float) -> tuple[float, str]:
+    """
+    คำนวณ SL สำหรับ SELL (เทรนด์ลง)
+    tech = body_hi ของ LH
+    คืน (sl_price, sl_name)
+    """
+    p15 = R55 * 0.15 / 100
+    p10 = R55 * 0.10 / 100
+    p5  = R55 * 0.05 / 100
+    buf = _CROSS_BUF
+
+    sl1 = tech + p15
+    max_h_frame = max(_H(b) for b in frame_tuples)
+
+    # ① ไม่ก่อนเส้น → SL2
+    if sl1 <= max_h_frame:
+        sl2 = max_h_frame + p10
+        cross2 = [b for b in pre_tuples if (_L(b) - buf) <= sl2 <= (_H(b) + buf)]
+        if len(cross2) <= 1:
+            return sl2, "SL2"
+        mhc2 = max(_H(b) for b in cross2)
+        return mhc2 + p10, "SL3"
+
+    # ② ก่อนเส้น แต่การข้าย ≥2 แท่ง → SL3.5
+    cross1 = [b for b in pre_tuples if (_L(b) - buf) <= sl1 <= (_H(b) + buf)]
+    if len(cross1) >= 2:
+        mhc1 = max(_H(b) for b in cross1)
+        return mhc1 + p5, "SL3.5"
+
+    return sl1, "SL1"
+
+
+def _calc_sl_buy(tech: float, frame_tuples: list[tuple],
+                 pre_tuples: list[tuple], R55: float) -> tuple[float, str]:
+    """
+    คำนวณ SL สำหรับ BUY (เทรนด์ขึ้น)
+    tech = body_lo ของ HL
+    คืน (sl_price, sl_name)
+    """
+    p15 = R55 * 0.15 / 100
+    p10 = R55 * 0.10 / 100
+    p5  = R55 * 0.05 / 100
+    buf = _CROSS_BUF
+
+    sl1 = tech - p15
+    min_l_frame = min(_L(b) for b in frame_tuples)
+
+    # ① ไม่ก่อนเส้น → SL2
+    if sl1 >= min_l_frame:
+        sl2 = min_l_frame - p10
+        cross2 = [b for b in pre_tuples if (_L(b) - buf) <= sl2 <= (_H(b) + buf)]
+        if len(cross2) <= 1:
+            return sl2, "SL2"
+        mlc2 = min(_L(b) for b in cross2)
+        return mlc2 - p10, "SL3"
+
+    # ② ก่อนเส้น แต่การข้าย ≥2 แท่ง → SL3.5
+    cross1 = [b for b in pre_tuples if (_L(b) - buf) <= sl1 <= (_H(b) + buf)]
+    if len(cross1) >= 2:
+        mlc1 = min(_L(b) for b in cross1)
+        return mlc1 - p5, "SL3.5"
+
+    return sl1, "SL1"
+
+
+def _calc_sl_mountain(base_low: float, base_tuples: list[tuple],
+                      pre_tuples: list[tuple], R55: float) -> tuple[float, str]:
+    """
+    SL สำหรับภูเขา
+    SL1 = เส้นต่ำสุดในโต้งภาก − 15%R55
+    ถ้าการข้าย ≥2 แท่ง → SL2
+    คืน (sl_price, sl_name)
+    """
+    p15 = R55 * 0.15 / 100
+    p10 = R55 * 0.10 / 100
+    buf = _CROSS_BUF
+
+    min_l_base = min(_L(b) for b in base_tuples)
+    sl1 = min_l_base - p15
+    cross1 = [b for b in pre_tuples if (_L(b) - buf) <= sl1 <= (_H(b) + buf)]
+    if len(cross1) >= 2:
+        mlc1 = min(_L(b) for b in cross1)
+        return mlc1 - p10, "SL2"
+
+    return sl1, "SL1"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Pattern Detectors
+# ═══════════════════════════════════════════════════════════════════
+
+def _detect_downtrend(window_t: list[tuple], all_t: list[tuple],
+                      R55: float, H55: float, L55: float,
+                      cur: tuple) -> Optional[Signal]:
+    """
+    ตรวจเทรนด์ลง → SELL
+    """
+    # Pass 1: หา LH ล่าสุด สำหรับ zone_lo
+    hs0, _ = scan_swings(window_t, R55)
+    if len(hs0) < 2:
+        return None
+    lh_zone_lo = hs0[-1]['body_hi'] - _BUF100
+
+    # Pass 2: สแกนพร้อม Right2 exception
+    hs, ls = scan_swings(window_t, R55,
+                         cur_H=_H(cur), lh_zone_lo=lh_zone_lo)
+    if len(hs) < 2 or not ls:
+        return None
+
+    last_lh = hs[-1]
+    last_ll = ls[-1]
+
+    pct_lh = (last_lh['body_hi'] - L55) / (H55 - L55) * 100
+    pct_ll = (last_ll['body_lo'] - L55) / (H55 - L55) * 100
+    if pct_lh >= 50 or pct_ll >= 50:
+        return None
+
+    rb_pct = (last_lh['body_hi'] - last_ll['body_lo']) * 100 / R55 * 100
+    if not (10 <= rb_pct <= 40):
+        return None
+
+    lh_hi   = last_lh['body_hi']
+    zone_lo = lh_hi - _BUF100
+    if _H(cur) < zone_lo:
+        return None
+
+    entry = zone_lo
+
+    # กรอบ LH → LL สำหรับ SL
+    lh_b0 = last_lh['bar_nums'][0]
+    ll_b1 = last_ll['bar_nums'][-1]
+    bmin, bmax = min(lh_b0, ll_b1), max(lh_b0, ll_b1)
+    frame_t = [b for b in all_t if bmin <= b[0] <= bmax] or \
+              [b for b in all_t if b[0] in last_lh['bar_nums']]
+
+    # เส้นก่อนหน้า frame สำหรับตรวจการข้าย
+    fi = next((i for i, b in enumerate(all_t) if b[0] == frame_t[0][0]), 0)
+    pre_t = all_t[max(0, fi - 30):fi]
+
+    sl, sl_name = _calc_sl_sell(lh_hi, frame_t, pre_t, R55)
+    risk = (sl - entry) * 100
+    if risk <= 0:
+        return None
+
+    ll_ref = last_ll['body_lo']
+    dist   = entry - ll_ref
+    tp1    = entry - dist * 0.35
+    tp2    = entry - dist * 0.50
+    tp3r   = ll_ref + _TP3_REF_BUF
+    tp3o   = ll_ref + _TP3_ORD_BUF
+
+    picked = _pick_tp(entry, [(tp1, tp1, 'TP1'), (tp2, tp2, 'TP2'),
+                               (tp3r, tp3o, 'TP3')], sl, 'SELL')
+    if picked is None:
+        # ยัน 2: ลด SL
+        rw3 = (entry - tp3r) * 100
+        sl_adj = entry + rw3 / 100
+        picked = (tp3r, tp3o, 'TP3(adj)', rw3 / rw3)
+        sl = sl_adj
+        risk = rw3
+
+    tp_ref, tp_ord, tp_name, rr = picked
+
+    quality = "100%✓" if ("100%" in _q(pct_lh) and "100%" in _q(pct_ll)) else "~60%⚠️"
+
+    return Signal(
+        pattern   = 'DOWNTREND',
+        direction = 'SELL',
+        quality   = quality,
+        entry     = entry,
+        sl        = sl,
+        sl_name   = sl_name,
+        tp_order  = tp_ord,
+        tp_ref    = tp_ref,
+        tp_name   = tp_name,
+        rr        = rr,
+        risk_pip  = abs(sl - entry) * 100,
+        reward_pip= abs(entry - tp_ref) * 100,
+        R55       = R55,
+        details   = {
+            'lh': last_lh, 'll': last_ll,
+            'pct_lh': pct_lh, 'pct_ll': pct_ll,
+            'rebound': rb_pct,
+            'tp1': tp1, 'tp2': tp2, 'tp3_ref': tp3r,
+        }
+    )
+
+
+def _detect_uptrend(window_t: list[tuple], all_t: list[tuple],
+                    R55: float, H55: float, L55: float,
+                    cur: tuple) -> Optional[Signal]:
+    """
+    ตรวจเทรนด์ขึ้น → BUY  (Mirror จากเทรนด์ลง)
+    """
+    # Pass 1: หา HL ล่าสุด
+    _, ls0 = scan_swings(window_t, R55)
+    if len(ls0) < 2:
+        return None
+    hl_zone_hi = ls0[-1]['body_lo'] + _BUF100
+
+    # Pass 2: ตรพร้อม Right2 exception
+    hs, ls = scan_swings(window_t, R55,
+                         cur_L=_L(cur), hl_zone_hi=hl_zone_hi)
+    if not hs or len(ls) < 2:
+        return None
+
+    last_hl = ls[-1]
+    last_hh = hs[-1]
+
+    pct_hl = (last_hl['body_lo'] - L55) / (H55 - L55) * 100
+    pct_hh = (last_hh['body_hi'] - L55) / (H55 - L55) * 100
+    if pct_hl < 50 or pct_hh < 50:
+        return None
+
+    rb_pct = (last_hh['body_hi'] - last_hl['body_lo']) * 100 / R55 * 100
+    if not (10 <= rb_pct <= 40):
+        return None
+
+    hl_lo   = last_hl['body_lo']
+    zone_hi = hl_lo + _BUF100
+    if _L(cur) > zone_hi:
+        return None
+
+    entry = zone_hi
+
+    hh_b0 = last_hh['bar_nums'][0]
+    hl_b1 = last_hl['bar_nums'][-1]
+    bmin, bmax = min(hh_b0, hl_b1), max(hh_b0, hl_b1)
+    frame_t = [b for b in all_t if bmin <= b[0] <= bmax] or \
+              [b for b in all_t if b[0] in last_hl['bar_nums']]
+
+    fi = next((i for i, b in enumerate(all_t) if b[0] == frame_t[0][0]), 0)
+    pre_t = all_t[max(0, fi - 30):fi]
+
+    sl, sl_name = _calc_sl_buy(hl_lo, frame_t, pre_t, R55)
+    risk = (entry - sl) * 100
+    if risk <= 0:
+        return None
+
+    hh_ref = last_hh['body_hi']
+    dist   = hh_ref - entry
+    tp1    = entry + dist * 0.35
+    tp2    = entry + dist * 0.50
+    tp3r   = hh_ref - _TP3_REF_BUF
+    tp3o   = hh_ref - _TP3_ORD_BUF
+
+    picked = _pick_tp(entry, [(tp1, tp1, 'TP1'), (tp2, tp2, 'TP2'),
+                               (tp3r, tp3o, 'TP3')], sl, 'BUY')
+    if picked is None:
+        rw3 = (tp3r - entry) * 100
+        sl_adj = entry - rw3 / 100
+        picked = (tp3r, tp3o, 'TP3(adj)', 1.0)
+        sl = sl_adj
+        risk = rw3
+
+    tp_ref, tp_ord, tp_name, rr = picked
+    quality = "100%✓" if ("100%" in _q(100 - pct_hl) and "100%" in _q(100 - pct_hh)) else "~60%⚠️"
+
+    return Signal(
+        pattern   = 'UPTREND',
+        direction = 'BUY',
+        quality   = quality,
+        entry     = entry,
+        sl        = sl,
+        sl_name   = sl_name,
+        tp_order  = tp_ord,
+        tp_ref    = tp_ref,
+        tp_name   = tp_name,
+        rr        = rr,
+        risk_pip  = abs(entry - sl) * 100,
+        reward_pip= abs(tp_ref - entry) * 100,
+        R55       = R55,
+        details   = {
+            'hl': last_hl, 'hh': last_hh,
+            'pct_hl': pct_hl, 'pct_hh': pct_hh,
+            'rebound': rb_pct,
+            'tp1': tp1, 'tp2': tp2, 'tp3_ref': tp3r,
+        }
+    )
+
+
+def _detect_mountain(window_t: list[tuple], all_t: list[tuple],
+                     R55: float, cur: tuple,
+                     prev_entry: Optional[float] = None,
+                     prev_entry_bar: Optional[int] = None,
+                     base_lo_r1: Optional[float] = None) -> Optional[Signal]:
+    """
+    ตรวจภูเขา → BUY
+    prev_entry      = entry ของรอบ 1 (ถ้ามี → ตรวจรอบ 2)
+    prev_entry_bar  = bar_num ที่ entry รอบ 1
+    base_lo_r1      = body_lo งาน้ายต่าย รอบ 1 (สำหรับตรวจเงื่อนไขรอบ 2)
+    """
+    hs, ls = scan_swings(window_t, R55)
+    if not hs or not ls:
+        return None
+
+    is_round2 = prev_entry is not None
+
+    if not is_round2:
+        # รอบ 1: ฐาน = LL ต่ำสุด, ยอด = SH ล่าสุดหลังฐาน
+        base_sw = min(ls, key=lambda s: s['body_lo'])
+    else:
+        # รอบ 2: ฐานต่วา = SL ที่เกิดหลังยอดภูเขา (หลัง entry รอบ 1)
+        # ต้อง body_lo ≥ base_lo_r1
+        after_entry = [s for s in ls
+                       if s['bar_nums'][0] > (prev_entry_bar or 0)
+                       and s['body_lo'] >= (base_lo_r1 or 0)]
+        if not after_entry:
+            return None
+        base_sw = min(after_entry, key=lambda s: s['body_lo'])
+
+    peaks_after = [s for s in hs if s['bar_nums'][0] > base_sw['bar_nums'][-1]]
+    if not peaks_after:
+        return None
+    peak_sw = max(peaks_after, key=lambda s: s['bar_nums'][0])
+
+    base_lo = base_sw['body_lo']
+    peak_hi = peak_sw['body_hi']
+    height  = (peak_hi - base_lo) * 100
+
+    if height < R55 * 0.50:
+        return None
+
+    buf = min(height * 0.10, 100)
+    zone_lo = base_lo - buf / 100
+    zone_hi = base_lo + buf / 100
+
+    if not (_L(cur) <= zone_hi and _H(cur) >= zone_lo):
+        return None
+
+    bars_since = cur[0] - peak_sw['bar_nums'][-1]
+
+    entry = min(_H(cur), zone_hi)
+
+    # โต้งภูเขา
+    base_t = [b for b in window_t if b[0] in base_sw['bar_nums']]
+    if not base_t:
+        return None
+
+    fi = next((i for i, b in enumerate(all_t) if b[0] == base_t[0][0]), 0)
+    pre_t = all_t[max(0, fi - 30):fi]
+
+    sl, sl_name = _calc_sl_mountain(base_lo, base_t, pre_t, R55)
+    risk = (entry - sl) * 100
+    if risk <= 0:
+        return None
+
+    if not is_round2:
+        # รอบ 1: TP วัดจากความสูงภูเขา
+        dist = peak_hi - base_lo
+        tp1  = entry + dist / 3
+        tp2  = entry + dist / 2
+        tp3r = peak_hi - _TP3_REF_BUF
+        tp3o = peak_hi - _TP3_ORD_BUF
+        pattern_name = 'MOUNTAIN'
+    else:
+        # รอบ 2: TP วัดจาก body_hi สูงสุดหลัง entry รอบ 1
+        after_r1 = [b for b in all_t if b[0] > (prev_entry_bar or 0)]
+        if not after_r1:
+            return None
+        tp_ref_hi = max(_H(b) for b in after_r1)   # เท่าเส้น
+        # หา body_hi สูงสุด (เงื่อนไขเทียบ)
+        tp_ref_body = max(max(_O(b), _C(b)) for b in after_r1)
+        tp_ref_base = tp_ref_body   # TP_ref = body_hi สูงสุด
+        dist = tp_ref_base - entry
+        tp1  = entry + dist / 3
+        tp2  = entry + dist / 2
+        tp3r = tp_ref_base - R55 * 0.05 / 100
+        tp3o = tp_ref_base - R55 * 0.05 / 100 - _TP3_ORD_BUF + _TP3_REF_BUF
+        pattern_name = 'MOUNTAIN_R2'
+
+    picked = _pick_tp(entry, [(tp1, tp1, 'TP1'), (tp2, tp2, 'TP2'),
+                               (tp3r, tp3o, 'TP3')], sl, 'BUY')
+    if picked is None:
+        rw3 = (tp3r - entry) * 100
+        sl_adj = entry - rw3 / 100
+        picked = (tp3r, tp3o, 'TP3(adj)', 1.0)
+        sl = sl_adj
+        risk = rw3
+
+    tp_ref, tp_ord, tp_name, rr = picked
+
+    return Signal(
+        pattern   = pattern_name,
+        direction = 'BUY',
+        quality   = '✓' if bars_since <= 40 else '⚠️ ช้า',
+        entry     = entry,
+        sl        = sl,
+        sl_name   = sl_name,
+        tp_order  = tp_ord,
+        tp_ref    = tp_ref,
+        tp_name   = tp_name,
+        rr        = rr,
+        risk_pip  = abs(entry - sl) * 100,
+        reward_pip= abs(tp_ref - entry) * 100,
+        R55       = R55,
+        details   = {
+            'base': base_sw, 'peak': peak_sw,
+            'base_lo': base_lo, 'peak_hi': peak_hi,
+            'height': height, 'buf': buf,
+            'zone_lo': zone_lo, 'zone_hi': zone_hi,
+            'bars_since_peak': bars_since,
+            'tp1': tp1, 'tp2': tp2, 'tp3_ref': tp3r,
+        }
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Main Entry Point
+# ═══════════════════════════════════════════════════════════════════
+
+def find_signal(
+    bars:             list[OHLC],
+    portfolio:        float = 1000.0,
+    mountain_state:   Optional[dict] = None,
+) -> Optional[Signal]:
+    """
+    หาสัญญาณ Entry จาก 55 แท่งล่าสุด
+
+    Parameters:
+        bars          : ข้อมูล OHLC เรียงจากเก่า→ใหม่ (ต้องมีอย่างน้อย 55 แท่ง)
+        portfolio     : เงินทุน USD (ใช้คำนวณ Lot)
+        mountain_state: dict สำหรับภูเขารอบ 2
+                        {'prev_entry': float, 'prev_entry_bar': int,
+                         'base_lo_r1': float, 'tp_bar': int}
+                        (ส่งเข้ามาเมื่อ TP รอบ 1 เก็บแล้ว และยังอยู่ใน 40 แท่ง)
+
+    Returns:
+        Signal หรือ None ถ้าไม่มีสัญญาณ
+    """
+    if len(bars) < 55:
+        return None
+
+    # เก็บ 55 แท่งล่าสุด
+    window = bars[-55:]
+    cur_bar = window[-1]
+
+    # Assign bar_num ถ้าไม่มี
+    for i, b in enumerate(bars):
+        if b.bar_num == 0:
+            b.bar_num = i + 1
+
+    window_t = _bars_to_tuples(window)
+    all_t    = _bars_to_tuples(bars)
+    cur_t    = window_t[-1]
+
+    H55 = max(_H(b) for b in window_t)
+    L55 = min(_L(b) for b in window_t)
+    R55 = (H55 - L55) * 100
+
+    if R55 == 0:
+        return None
+
+    # ══ ลำดับ Priority ══════════════════════════════════════════════
+    # 1. ภูเขารอบ 2 (ถ้า state ส่งมา)
+    if mountain_state:
+        mst = mountain_state
+        if (cur_t[0] - mst['tp_bar']) <= 40:
+            sig = _detect_mountain(
+                window_t, all_t, R55, cur_t,
+                prev_entry     = mst['prev_entry'],
+                prev_entry_bar = mst['prev_entry_bar'],
+                base_lo_r1     = mst['base_lo_r1'],
+            )
+            if sig:
+                sig.lot = _calc_lot(sig.risk_pip, portfolio)
+                return sig
+
+    # 2. ภูเขารอบ 1
+    sig = _detect_mountain(window_t, all_t, R55, cur_t)
+    if sig:
+        sig.lot = _calc_lot(sig.risk_pip, portfolio)
+        return sig
+
+    # 3. เทรนด์ลง
+    sig = _detect_downtrend(window_t, all_t, R55, H55, L55, cur_t)
+    if sig:
+        sig.lot = _calc_lot(sig.risk_pip, portfolio)
+        return sig
+
+    # 4. เทรนด์ขึ้น
+    sig = _detect_uptrend(window_t, all_t, R55, H55, L55, cur_t)
+    if sig:
+        sig.lot = _calc_lot(sig.risk_pip, portfolio)
+        return sig
+
+    return None
+
+
+def format_signal(sig: Signal, cur_time: str = "") -> str:
+    """จัดรูปเป็ output สวยงาม"""
+    d = sig.direction
+    arrow = "🟢" if d == "BUY" else "🔴"
+    icon  = "🏔" if "MOUNTAIN" in sig.pattern else arrow
+
+    lines = [
+        f"{'═'*52}",
+        f"{icon} {sig.pattern} → {d}  {sig.quality}  {cur_time}",
+        f"{'═'*52}",
+        f"R55      = {sig.R55:.0f} pip",
+    ]
+
+    det = sig.details
+    if sig.pattern in ('MOUNTAIN', 'MOUNTAIN_R2'):
+        lines += [
+            f"ฐาน      = {det['base']['times'][0]}→{det['base']['times'][-1]}  {det['base_lo']:.3f}",
+            f"ยอด      = {det['peak']['times'][0]}→{det['peak']['times'][-1]}  {det['peak_hi']:.3f}",
+            f"ความสูง  = {det['height']:.0f}pip ({det['height']/sig.R55*100:.1f}%R55)  {det['bars_since_peak']} แท่งจากยอด",
+        ]
+    else:
+        if 'lh' in det:
+            lines += [
+                f"LH       = {det['lh']['times'][0]}→{det['lh']['times'][-1]}  {det['lh']['body_hi']:.3f}  {det['pct_lh']:.1f}%",
+                f"LL       = {det['ll']['times'][0]}→{det['ll']['times'][-1]}  {det['ll']['body_lo']:.3f}  {det['pct_ll']:.1f}%",
+                f"Rebound  = {det['rebound']:.1f}%",
+            ]
+        elif 'hl' in det:
+            lines += [
+                f"HL       = {det['hl']['times'][0]}→{det['hl']['times'][-1]}  {det['hl']['body_lo']:.3f}  {det['pct_hl']:.1f}%",
+                f"HH       = {det['hh']['times'][0]}→{det['hh']['times'][-1]}  {det['hh']['body_hi']:.3f}  {det['pct_hh']:.1f}%",
+                f"Rebound  = {det['rebound']:.1f}%",
+            ]
+
+    lines += [
+        f"{'═'*52}",
+        f"Entry    = {sig.entry:.3f}",
+        f"{sig.sl_name:<8} = {sig.sl:.3f}  ({sig.risk_pip:.0f} pip)",
+        f"{'═'*52}",
+    ]
+
+    for tp_name, tp_val in [('TP1', det.get('tp1')), ('TP2', det.get('tp2')), ('TP3 ref', det.get('tp3_ref'))]:
+        if tp_val is None:
+            continue
+        dist = abs(tp_val - sig.entry) * 100
+        rr = dist / sig.risk_pip if sig.risk_pip else 0
+        chosen = "← เลือก" if tp_name.replace(' ref','') == sig.tp_name.replace('(adj)','').strip() else ""
+        lines.append(f"{tp_name:<8} = {tp_val:.3f}  ({dist:.0f}pip)  R:R={rr:.2f}  {chosen}")
+
+    tp_ord_dist = abs(sig.tp_order - sig.entry) * 100
+    lines += [
+        f"TP order = {sig.tp_order:.3f}  ({tp_ord_dist:.0f}pip)  ← วาง order",
+        f"{'═'*52}",
+        f"R:R      = {sig.rr:.2f}",
+        f"Lot      = {sig.lot:.2f}  (portfolio-based)",
+        f"{'═'*52}",
+    ]
+    return "\n".join(lines)

@@ -42,9 +42,9 @@ def main():
         print(f"   Run: source {venv_path}/bin/activate\n")
 
     # Start FastAPI backend
-    print("📡 Starting FastAPI backend on http://localhost:8080")
+    print("📡 Starting FastAPI backend on http://localhost:8000")
     backend_proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api_server:app", "--reload", "--port", "8080"],
+        [sys.executable, "-m", "uvicorn", "api_server:app", "--reload", "--port", "8000"],
         cwd=PROJECT_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -70,8 +70,8 @@ def main():
 
     print("\n✅ Servers started!")
     print("   Frontend: http://localhost:3000")
-    print("   Backend:  http://localhost:8080")
-    print("   API Docs: http://localhost:8080/docs")
+    print("   Backend:  http://localhost:8000")
+    print("   API Docs: http://localhost:8000/docs")
     print("\n   Press Ctrl+C to stop all servers\n")
 
     # Stream output from both processes

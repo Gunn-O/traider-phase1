@@ -1,0 +1,69 @@
+<!-- Monthly Strategist - Researcher -->
+<svg viewBox="0 0 200 280" xmlns="http://www.w3.org/2000/svg">
+  <!-- Lab coat -->
+  <rect x="55" y="155" width="90" height="105" rx="12" fill="#f0f0f5"/>
+
+  <!-- Lab coat lapels -->
+  <polygon points="100,158 82,175 82,200 100,185" fill="#e0e0ea"/>
+  <polygon points="100,158 118,175 118,200 100,185" fill="#e0e0ea"/>
+
+  <!-- Shirt under coat -->
+  <rect x="88" y="158" width="24" height="30" fill="#aa00ff" opacity="0.7"/>
+
+  <!-- Pocket -->
+  <rect x="118" y="175" width="20" height="22" rx="3" fill="#e0e0ea" stroke="#ccccdd" stroke-width="1"/>
+
+  <!-- Pen in pocket -->
+  <rect x="124" y="173" width="3" height="18" rx="1" fill="#aa00ff"/>
+
+  <!-- Neck -->
+  <rect x="88" y="138" width="24" height="22" fill="#e8c5f0"/>
+
+  <!-- Head -->
+  <ellipse cx="100" cy="115" rx="43" ry="49" fill="#e8c5f0"/>
+
+  <!-- Purple hair — stylish -->
+  <ellipse cx="100" cy="76" rx="44" ry="22" fill="#6a00aa"/>
+  <rect x="56" y="78" width="14" height="38" rx="7" fill="#6a00aa"/>
+  <rect x="130" y="78" width="14" height="38" rx="7" fill="#6a00aa"/>
+
+  <!-- Hair highlight -->
+  <ellipse cx="88" cy="74" rx="12" ry="8" fill="#aa44ff" opacity="0.5"/>
+
+  <!-- Round glasses -->
+  <circle cx="84" cy="116" r="13" fill="none" stroke="#444" stroke-width="2"/>
+  <circle cx="116" cy="116" r="13" fill="none" stroke="#444" stroke-width="2"/>
+  <line x1="97" y1="116" x2="103" y2="116" stroke="#444" stroke-width="2"/>
+
+  <!-- Eyes through glasses -->
+  <ellipse cx="84" cy="116" rx="7" ry="8" fill="#ffffff"/>
+  <ellipse cx="116" cy="116" rx="7" ry="8" fill="#ffffff"/>
+  <ellipse cx="84" cy="117" rx="4.5" ry="5" fill="#2a0044"/>
+  <ellipse cx="116" cy="117" rx="4.5" ry="5" fill="#2a0044"/>
+  <circle cx="82" cy="115" r="1.5" fill="#ffffff"/>
+  <circle cx="114" cy="115" r="1.5" fill="#ffffff"/>
+
+  <!-- Eyebrows -->
+  <path d="M 73 101 Q 84 97 95 101" stroke="#6a00aa" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <path d="M 105 101 Q 116 97 127 101" stroke="#6a00aa" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+  <!-- Nose -->
+  <ellipse cx="100" cy="130" rx="3" ry="2" fill="#d0a0e0"/>
+
+  <!-- Thoughtful expression -->
+  <path d="M 90 143 Q 100 148 110 143" stroke="#a060c0" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+
+  <!-- Magnifying glass -->
+  <circle cx="38" cy="195" r="22" fill="none" stroke="#aa00ff" stroke-width="3"/>
+  <circle cx="38" cy="195" r="18" fill="#e8d0ff" opacity="0.3"/>
+  <line x1="54" y1="211" x2="68" y2="228" stroke="#aa00ff" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Search icon inside glass -->
+  <circle cx="38" cy="193" r="8" fill="none" stroke="#aa00ff" stroke-width="1.5"/>
+  <line x1="44" y1="200" x2="50" y2="206" stroke="#aa00ff" stroke-width="1.5"/>
+
+  <!-- Arms -->
+  <rect x="24" y="162" width="34" height="14" rx="7" fill="#f0f0f5"/>
+  <rect x="142" y="162" width="34" height="14" rx="7" fill="#f0f0f5"/>
+  <ellipse cx="26" cy="169" rx="10" ry="9" fill="#e8c5f0"/>
+</svg>

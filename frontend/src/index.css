@@ -1,0 +1,344 @@
+/* CSS Design System - Tra(i)der Phase I v2.1 */
+
+:root {
+  /* Colors */
+  --bg-dark: #0a0a0f;
+  --bg-card: #12121a;
+  --bg-hover: #1a1a28;
+  --text-primary: #e0e0e0;
+  --text-secondary: #888888;
+  --border-color: #2a2a3a;
+
+  /* Agent Colors */
+  --agent-analyst: #00ff88;
+  --agent-risk-manager: #ffaa00;
+  --agent-weekly: #00aaff;
+  --agent-monthly: #ff88ff;
+  --agent-reflector: #888888;
+  --agent-orchestrator: #ffd700;
+
+  /* Status Colors */
+  --status-running: #00ff88;
+  --status-stopped: #ff4444;
+  --status-warning: #ffaa00;
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+
+  /* Border Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+
+  /* Shadows */
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.5);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.page-content {
+  flex: 1;
+  padding: var(--spacing-lg);
+  overflow-y: auto;
+}
+
+/* Utility Classes */
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.card:hover {
+  background-color: var(--bg-hover);
+}
+
+.badge {
+  display: inline-block;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badge.success { background-color: rgba(0, 255, 136, 0.2); color: var(--status-running); }
+.badge.warning { background-color: rgba(255, 170, 0, 0.2); color: var(--status-warning); }
+.badge.error { background-color: rgba(255, 68, 68, 0.2); color: var(--status-stopped); }
+.badge.info { background-color: rgba(0, 170, 255, 0.2); color: var(--agent-weekly); }
+
+.text-mono {
+  font-family: var(--font-mono);
+}
+
+.text-muted {
+  color: var(--text-secondary);
+}
+
+.glow {
+  animation: glow 2s ease-in-out infinite;
+}
+
+@keyframes glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a4a;
+}
+
+/* App Layout */
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.main-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Page Content */
+.page-content {
+  padding: 24px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.page-header h1 {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.loading, .empty-state {
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 48px;
+  font-family: var(--font-mono);
+}
+
+/* Trade table */
+.trade-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.trade-table th {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+}
+
+.trade-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.trade-table tr:hover td {
+  background: #111;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.action.buy  { color: var(--status-running); font-weight: 700; }
+.action.sell { color: var(--status-stopped); font-weight: 700; }
+
+.pnl.win  { color: var(--status-running);  font-family: var(--font-mono); }
+.pnl.loss { color: var(--status-stopped); font-family: var(--font-mono); }
+
+.source-badge.sheets {
+  font-size: 11px;
+  color: var(--agent-analyst);
+  font-family: var(--font-mono);
+}
+
+.source-badge.memory {
+  font-size: 11px;
+  color: var(--status-warning);
+  font-family: var(--font-mono);
+}
+
+/* Proposal cards */
+.proposal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.proposal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.priority.high   { color: var(--status-stopped);  font-size: 11px; font-weight: 700; }
+.priority.medium { color: var(--status-warning); font-size: 11px; font-weight: 700; }
+.priority.low    { color: var(--text-secondary);   font-size: 11px; }
+
+.rule-target { color: var(--text-secondary); font-size: 12px; }
+
+.rule-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+  align-items: flex-start;
+}
+
+.rule-row .label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  min-width: 70px;
+  padding-top: 2px;
+}
+
+.rule-row code {
+  background: #0a0a0a;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.rule-row code.proposed { color: var(--agent-analyst); }
+
+.evidence {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 10px;
+  font-family: var(--font-mono);
+}
+
+.proposal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.btn-approve {
+  background: color-mix(in srgb, var(--agent-analyst) 15%, transparent);
+  border: 1px solid var(--agent-analyst);
+  color: var(--agent-analyst);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn-reject {
+  background: color-mix(in srgb, var(--status-stopped) 15%, transparent);
+  border: 1px solid var(--status-stopped);
+  color: var(--status-stopped);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* Settings */
+.settings-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.settings-section h3 {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+  margin-bottom: 16px;
+}
+
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #1a1a1a;
+  font-size: 13px;
+}
+
+.setting-row:last-child { border-bottom: none; }
+
+.conn-status.online { color: var(--agent-analyst); font-family: var(--font-mono); }
+.conn-status.offline { color: var(--status-stopped); font-family: var(--font-mono); }
+
+.muted { color: var(--text-secondary); }

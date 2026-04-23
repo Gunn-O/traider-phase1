@@ -1,0 +1,166 @@
+.dashboard {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: var(--spacing-lg);
+}
+
+.card-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: var(--spacing-lg);
+  color: var(--text-primary);
+}
+
+/* Stats Cards */
+.stats-card {
+  min-height: 200px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--spacing-lg);
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.stat-value.profit {
+  color: var(--agent-analyst);
+}
+
+.stat-value.loss {
+  color: var(--status-stopped);
+}
+
+/* World State */
+.world-state-card {
+  grid-column: span 2;
+}
+
+.world-state-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.world-state-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-md);
+  background-color: var(--bg-hover);
+  border-radius: var(--radius-md);
+}
+
+.ws-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.ws-value {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Recent Trades */
+.recent-trades-card {
+  grid-column: span 2;
+}
+
+.trades-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.trade-item {
+  padding: var(--spacing-md);
+  background-color: var(--bg-hover);
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--border-color);
+  transition: border-color 0.2s ease;
+}
+
+.trade-item:hover {
+  border-left-color: var(--agent-analyst);
+}
+
+.trade-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--spacing-sm);
+}
+
+.trade-time {
+  font-size: 12px;
+}
+
+.trade-details {
+  display: flex;
+  gap: var(--spacing-lg);
+  font-size: 13px;
+}
+
+/* Last Decision */
+.last-decision-card {
+  grid-column: span 2;
+}
+
+.decision-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.decision-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.decision-confidence {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.decision-reason {
+  font-size: 14px;
+  line-height: 1.6;
+  padding: var(--spacing-md);
+  background-color: var(--bg-hover);
+  border-radius: var(--radius-md);
+}
+
+.decision-technique {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.empty-state {
+  text-align: center;
+  padding: var(--spacing-xl);
+  font-size: 14px;
+}

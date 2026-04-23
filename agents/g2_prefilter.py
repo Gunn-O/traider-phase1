@@ -1,9 +1,14 @@
 """
-G2 — Pre-filter Agent (v2.1)
+G2 — Pre-filter Agent (v2.1.1 — Signal Engine Compatible)
 
 หน้าที่:
 - ตรวจ active plan, loss limits, news flag
-- สร้าง chart_context สำหรับ G3
+- สร้าง chart_context สำหรับ G3 (Reviewer mode)
+
+Changes (v2.1.1):
+- Works with Signal Engine output (signal object)
+- Simplified setup checks (Signal Engine handles internal validation)
+- Updated duplicate prevention to use signal.entry
 
 Reference: TRAIDER_MASTER_PLAN_v2.1.md Section 5
 """
@@ -23,29 +28,34 @@ logger = logging.getLogger(__name__)
 
 def get_reference_price(world_state: dict) -> float:
     """
-    Get reference price for duplicate prevention (works for all techniques)
+    Get reference price for duplicate prevention
 
-    Returns:
-        float: Reference price for comparison
-            - twin_candle → technical_price
-            - breakout_follow → current_price
-            - mai_ruay → mother_candle technical_price
-            - others → current_price
+    With Signal Engine:
+        - Use signal.entry as reference price
+
+    Fallback (backward compatible with G1):
+        - twin_candle → technical_price
+        - breakout_follow → current_price
+        - mai_ruay → mother_candle technical_price
+        - others → current_price
     """
+    # Priority: Use signal.entry if available
+    signal = world_state.get('signal')
+    if signal and hasattr(signal, 'entry'):
+        return signal.entry
+
+    # Fallback: Old logic for backward compatibility
     technique = world_state.get('technique_candidate', '')
 
     if technique == 'twin_candle':
         return world_state.get('twin_candle', {}).get('technical_price', 0)
     elif technique == 'breakout_follow':
-        # ใช้ current_price เพราะ breakout ไม่มี technical_price
         return world_state.get('current_price', 0)
     elif technique == 'mai_ruay':
-        # ใช้ mother_candle technical_price
         father = world_state.get('father_candle', {})
         mother = father.get('mother_candle', {})
         return mother.get('technical_price', 0)
     else:
-        # Fallback: ใช้ current_price
         return world_state.get('current_price', 0)
 
 
@@ -117,120 +127,77 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
             'chart_context': {}
         }
 
-    # Check 5: Setup Pre-check (ประหยัด Claude calls)
+    # Check 5: Signal validation (Signal Engine only returns when there's a valid setup)
+    signal = world_state.get('signal')
     chart_type = world_state.get('chart_type')
     technique_candidate = world_state.get('technique_candidate', 'skip')
 
-    # ถ้า technique_candidate = 'skip' → ไม่มี setup
-    if technique_candidate == 'skip':
-        logger.info("SKIP: No technique candidate (G1 found no setup)")
+    if signal is None:
+        # Signal Engine found pattern but no valid entry point
+        logger.info(f"SKIP: No signal (Signal Engine found {chart_type} but no entry setup)")
         return {
             'pre_approved': False,
-            'skip_reason': 'ไม่มี Setup ที่ใช้ได้',
+            'skip_reason': f'ไม่มี Setup ที่ใช้ได้ ({chart_type})',
             'chart_context': {}
         }
 
-    # Check setup สำหรับ uptrend/downtrend
-    if chart_type in ['uptrend', 'downtrend']:
-        twin_candle = world_state.get('twin_candle', {})
-        father_candle = world_state.get('father_candle', {})
+    # Validate signal has required fields
+    if not hasattr(signal, 'entry') or not hasattr(signal, 'sl') or not hasattr(signal, 'tp_order'):
+        logger.error(f"SKIP: Invalid signal object (missing entry/sl/tp)")
+        return {
+            'pre_approved': False,
+            'skip_reason': 'Signal ไม่ครบถ้วน',
+            'chart_context': {}
+        }
 
-        has_twin = twin_candle.get('found', False)
-        has_father = father_candle.get('found', False)
+    # Validate R:R ratio (should be >= 1.0 from Signal Engine)
+    if signal.rr < 1.0:
+        logger.info(f"SKIP: R:R too low ({signal.rr:.2f} < 1.0)")
+        return {
+            'pre_approved': False,
+            'skip_reason': f'R:R ต่ำเกิน ({signal.rr:.2f} < 1.0)',
+            'chart_context': {}
+        }
 
-        # ต้องมีอย่างน้อย 1 setup
-        if not has_twin and not has_father:
-            logger.info(f"SKIP: {chart_type} but no twin_candle and no father_candle")
-            return {
-                'pre_approved': False,
-                'skip_reason': f'{chart_type} แต่ไม่มีแท่งคู่และไม่มีกรอบตามเจ้า',
-                'chart_context': {}
-            }
-
-    # Check setup สำหรับ mountain
-    elif chart_type == 'mountain':
-        chart_detail = world_state.get('chart_detail', {})
-        tolerance_ok = chart_detail.get('tolerance_ok', False)
-
-        # ราคาต้องถึงฐานด้านขวาแล้ว
-        if not tolerance_ok:
-            logger.info("SKIP: Mountain but price not at right base (tolerance_ok=False)")
-            return {
-                'pre_approved': False,
-                'skip_reason': 'ภูเขายังไม่จบ ราคายังไม่ลงถึงฐานด้านขวา',
-                'chart_context': {}
-            }
-
-    # Check 6: Duplicate Prevention (ALL techniques, not just twin_candle)
-    # ป้องกันการเปิด plan ซ้ำเมื่อ setup ยังไม่เปลี่ยน
-    current_tech_price = get_reference_price(world_state)
+    # Check 6: Duplicate Prevention
+    # ป้องกันการเปิด plan ซ้ำเมื่อ setup ยังไม่เปลี่ยน (ใช้ signal.entry เป็น reference)
+    current_entry = signal.entry  # Use signal.entry from Signal Engine
     last_tech_price = float(portfolio_state.get('last_technical_price', 0))
     current_chart = world_state.get('chart_type', '')
     last_chart = portfolio_state.get('last_plan_chart_type', '')
 
-    logger.info(f"Duplicate check: technique={technique_candidate}, current_tech={current_tech_price:.2f}, "
+    logger.info(f"Duplicate check: pattern={signal.pattern}, current_entry={current_entry:.2f}, "
                 f"last_tech={last_tech_price:.2f}, current_chart={current_chart}, last_chart={last_chart}")
 
     # Threshold: 0.30 USD (30 pip)
     DUPLICATE_THRESHOLD = 0.30
 
     # Block เมื่อ: ราคาใกล้กัน AND chart type เดิม
-    if (current_tech_price > 0
+    if (current_entry > 0
         and last_tech_price > 0
         and current_chart == last_chart
-        and abs(current_tech_price - last_tech_price) < DUPLICATE_THRESHOLD):
+        and abs(current_entry - last_tech_price) < DUPLICATE_THRESHOLD):
 
-        price_diff = abs(current_tech_price - last_tech_price)
-        logger.info(f"SKIP: Setup เดิม ({technique_candidate}, tech={current_tech_price:.2f} ≈ last {last_tech_price:.2f}, diff={price_diff:.2f})")
+        price_diff = abs(current_entry - last_tech_price)
+        logger.info(f"SKIP: Setup เดิม ({signal.pattern}, entry={current_entry:.2f} ≈ last {last_tech_price:.2f}, diff={price_diff:.2f})")
         return {
             'pre_approved': False,
-            'skip_reason': f'Setup เดิม {current_tech_price:.2f} ยังไม่เปลี่ยน (ห่าง {price_diff:.2f} < {DUPLICATE_THRESHOLD}, chart เดิม)',
+            'skip_reason': f'Setup เดิม entry={current_entry:.2f} ยังไม่เปลี่ยน (ห่าง {price_diff:.2f} < {DUPLICATE_THRESHOLD})',
             'chart_context': {}
         }
     else:
         # Log why it passed
-        if current_tech_price == 0:
-            logger.debug("No reference price → allow")
+        if current_entry == 0:
+            logger.debug("No entry price → allow")
         elif last_tech_price == 0:
             logger.info("First plan (last_tech=0) → allow")
         elif current_chart != last_chart:
             logger.info(f"Chart type changed ({last_chart} → {current_chart}) → allow")
-        elif abs(current_tech_price - last_tech_price) >= DUPLICATE_THRESHOLD:
-            price_diff = abs(current_tech_price - last_tech_price)
-            logger.info(f"Price moved enough (diff={price_diff:.2f} >= {DUPLICATE_THRESHOLD}) → allow")
+        elif abs(current_entry - last_tech_price) >= DUPLICATE_THRESHOLD:
+            price_diff = abs(current_entry - last_tech_price)
+            logger.info(f"Entry moved enough (diff={price_diff:.2f} >= {DUPLICATE_THRESHOLD}) → allow")
 
-    # Check 7: Touch Validation (ตาม Strategy v2.1)
-    # "รอให้ราคาวกกลับมาแตะจุดเทคนิค ±100-300 pip"
-    if technique_candidate in ['twin_candle', 'mai_ruay']:
-        current_price = world_state.get('current_price', 0)
-
-        if current_tech_price > 0 and current_price > 0:
-            price_diff = abs(current_price - current_tech_price)
-
-            # Touch range: 1.0-10.0 USD (100-1000 pip)
-            # NOTE: เพิ่ม TOUCH_MAX เป็น 10.0 เพื่อรองรับกรณี technical point ไม่ refresh
-            TOUCH_MIN = 1.0    # 100 pip - ราคาใกล้จุดเทคนิคเกินไป (ยังไม่ย่อมา)
-            TOUCH_MAX = 10.0   # 1000 pip - ผ่อนเพื่อให้โอกาสเข้ามากขึ้น (workaround)
-
-            if price_diff < TOUCH_MIN:
-                # ราคายังอยู่ที่จุดเทคนิค (ยังไม่ออกไป) หรือใกล้เกินไป
-                logger.info(f"SKIP: ราคาใกล้จุดเทคนิคเกินไป (current={current_price:.2f}, tech={current_tech_price:.2f}, diff={price_diff:.2f} < {TOUCH_MIN})")
-                return {
-                    'pre_approved': False,
-                    'skip_reason': f'ราคายังไม่ออกจากจุดเทคนิค (ห่างแค่ {price_diff:.2f} < {TOUCH_MIN})',
-                    'chart_context': {}
-                }
-            elif price_diff > TOUCH_MAX:
-                # ราคาห่างจากจุดเทคนิคเกินไป (ยังไม่ย่อกลับมา)
-                logger.info(f"SKIP: ราคาห่างจากจุดเทคนิคเกินไป (current={current_price:.2f}, tech={current_tech_price:.2f}, diff={price_diff:.2f} > {TOUCH_MAX})")
-                return {
-                    'pre_approved': False,
-                    'skip_reason': f'ราคาปัจจุบัน {current_price:.2f} ห่างจากจุดเทคนิค {current_tech_price:.2f} มาก ({price_diff:.2f} > {TOUCH_MAX})',
-                    'chart_context': {}
-                }
-            else:
-                # ราคาอยู่ในช่วง 100-1000 pip จากจุดเทคนิค (ถูกต้อง)
-                logger.info(f"✅ Touch OK: current={current_price:.2f}, tech={current_tech_price:.2f}, diff={price_diff:.2f} (in range {TOUCH_MIN}-{TOUCH_MAX})")
+    # Check 7: Removed — Signal Engine handles touch validation internally
 
     # สร้าง chart_context
     chart_context = build_chart_context(world_state)

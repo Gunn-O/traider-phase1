@@ -30,7 +30,7 @@ from typing import Dict, List
 from dotenv import load_dotenv
 
 # Import agents (v4.3 — 4-Agent Architecture with Reflector)
-from agents.g1_pattern_detector import G1PatternDetector
+from agents.g1_pattern_detector import G1PatternDetector  # DEPRECATED — use signal_engine instead
 from agents.g2_prefilter import G2Prefilter
 from agents.g3_analyst import G3AnalystAgent, build_grounding, verify_analyst_decision
 from agents.g3_risk_manager import G3RiskManagerAgent, build_risk_context, verify_risk_decision
@@ -44,6 +44,7 @@ from agents.paper_broker import PaperBroker
 
 # Import utils
 from utils.data_connector import create_connector
+from utils.signal_engine import run_signal_engine  # NEW — replaces G1
 from config import TIMEFRAMES, CANDLES_LOOKBACK, RISK_CONFIG
 
 # Import bot_state from api_server (shared state)
@@ -63,14 +64,15 @@ except ImportError:
 # Load environment
 load_dotenv()
 
-# Setup logging
+# Setup logging (force=True to override any previous config)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
         logging.FileHandler('traider.log'),
         logging.StreamHandler()
-    ]
+    ],
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -276,15 +278,19 @@ class TraiderMainLoop:
             symbol=self.symbol
         )
 
-        # Determine data source for logging
+        # Determine data source for logging (V4.3: use source_name property)
         from agents.paper_broker import PaperBroker
-        from utils.data_connector import MT5Connector, TVConnector
+        from utils.data_connector import MT5Connector, YFinanceConnector, TVConnector
 
+        # Use source_name property (all connectors have this now)
+        data_source = getattr(self.connector, 'source_name', 'Unknown')
+
+        # Log with appropriate icon
         if isinstance(self.connector, MT5Connector):
-            data_source = "MT5"
             logger.info("📊 Data source: MT5 Terminal")
+        elif isinstance(self.connector, YFinanceConnector):
+            logger.info("📊 Data source: yfinance (GC=F Gold Futures)")
         elif isinstance(self.connector, TVConnector):
-            data_source = "TradingView"
             logger.info("📺 Data source: TradingView (OANDA)")
         else:
             # Legacy DataConnector (should not happen in V4.3)
@@ -297,16 +303,17 @@ class TraiderMainLoop:
 
         # Initialize agents (v4.3 — 4-Agent Architecture + Reflector)
         logger.info("🤖 Initializing agents (V4.3: 4-Agent + Reflector)...")
-        self.g1 = G1PatternDetector(config={'verbose': True})
+        # G1 DEPRECATED — kept for backward compatibility, use Signal Engine instead
+        # self.g1 = G1PatternDetector(config={'verbose': True})
         self.g2 = G2Prefilter(config={'verbose': True})
 
-        # Agent A: Analyst (V4.3)
+        # Agent A: Analyst (V4.20 Reviewer Mode)
         self.analyst = G3AnalystAgent(
-            system_prompt_path='strategy/XAUUSD_System_PromptV43.md',
+            system_prompt_path='strategy/XAUUSD_System_Prompt_Reviewer.md',
             api_key=os.getenv('ANTHROPIC_API_KEY'),
             config={'verbose': True}
         )
-        logger.info("✓ Agent A (Analyst) initialized — using System Prompt V4.3")
+        logger.info("✓ Agent A (Analyst) initialized — Reviewer Mode V4.20")
 
         # Agent B: Risk Manager (replaces g3_money_management.py)
         self.risk_manager = G3RiskManagerAgent(
@@ -358,6 +365,9 @@ class TraiderMainLoop:
         self.last_daily_date = None  # V4.3: For Reflector
         self.weekly_stats = {}
         self.reflection_summary = "No history yet — trade normally"
+
+        # Mountain state tracking (for Round 2 detection)
+        self.mountain_state = None  # Will be updated by Signal Engine
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -518,9 +528,16 @@ class TraiderMainLoop:
 
                     break
 
-        # Step 2: G1 Pattern Detection
-        logger.info("\n[STEP 2] G1 Pattern Detection (MTF)...")
-        world_state = self.g1.scan_all_tf(candles_by_tf)
+        # Step 2: Signal Engine (replaces G1 Pattern Detection)
+        logger.info("\n[STEP 2] Signal Engine (M5 Single TF)...")
+        world_state = run_signal_engine(
+            candles_by_tf=candles_by_tf,
+            portfolio=self.balance,
+            mountain_state=self.mountain_state
+        )
+
+        # Update mountain_state from Signal Engine output
+        self.mountain_state = world_state.get('mountain_state')
 
         # Update latest_candle for dashboard chart
         if current_candle and candle_time:
@@ -538,11 +555,16 @@ class TraiderMainLoop:
                 logger.debug(f"Failed to update latest_candle: {e}")
 
         if world_state.get('chart_type') == 'unclear':
-            logger.info("❌ SKIP: Chart unclear")
+            skip_reason = world_state.get('skip_reason', 'Chart unclear')
+            logger.info(f"❌ SKIP: {skip_reason}")
             return
 
-        logger.info(f"✓ G1: {world_state.get('selected_tf')} → {world_state.get('chart_type')} "
-                    f"(quality={world_state.get('quality', 0):.2f})")
+        signal = world_state.get('signal')
+        if signal:
+            logger.info(f"✓ Signal Engine: {signal.pattern} {signal.direction} → Entry={signal.entry:.2f}, "
+                        f"SL={signal.sl:.2f}, TP={signal.tp_order:.2f}, R:R={signal.rr:.2f}, Lot={signal.lot}")
+        else:
+            logger.info(f"✓ Signal Engine: {world_state.get('chart_type')} (quality={world_state.get('quality', 0):.2f}) — No trade signal")
 
         # Step 3: G2 Pre-filter
         logger.info("\n[STEP 3] G2 Pre-filter...")

@@ -14,8 +14,38 @@
     <!-- lightweight-charts CDN -->
     <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 
+    <!-- Icons System -->
+    <script src="/static/icons.js"></script>
+
     <style>
         [x-cloak] { display: none !important; }
+
+        /* Icon Styles */
+        .icon {
+            width: 1.25rem;
+            height: 1.25rem;
+            display: inline-block;
+            vertical-align: middle;
+        }
+
+        .icon-lg {
+            width: 2rem;
+            height: 2rem;
+        }
+
+        .icon-sm {
+            width: 1rem;
+            height: 1rem;
+        }
+
+        .agent-avatar {
+            width: 3rem;
+            height: 3rem;
+        }
+
+        .nav-item .icon {
+            margin-right: 0.5rem;
+        }
 
         /* Color System */
         :root {
@@ -375,9 +405,318 @@
             color: #6495ED;
         }
 
+        .source-badge.yfinance {
+            background-color: rgba(0, 170, 255, 0.2);
+            color: #00aaff;
+        }
+
         .source-badge.auto {
             background-color: rgba(255, 170, 0, 0.2);
             color: var(--color-pending);
+        }
+
+        /* ========================================
+           TRADING FLOOR LAYOUT - Anime Style
+           ======================================== */
+
+        .trading-floor {
+            background: #0a0a0a;
+            padding: 0;
+        }
+
+        .floor-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #00ff88;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 2px;
+            margin-bottom: 24px;
+            padding: 12px 16px;
+            background: rgba(0, 255, 136, 0.05);
+            border-left: 3px solid #00ff88;
+        }
+
+        .floor-status-dot {
+            width: 8px;
+            height: 8px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .floor-section {
+            margin-bottom: 32px;
+        }
+
+        .section-label {
+            font-size: 10px;
+            color: #666;
+            letter-spacing: 2px;
+            font-family: 'Courier New', monospace;
+            margin-bottom: 12px;
+            padding-left: 4px;
+            text-transform: uppercase;
+        }
+
+        /* Head Office Card */
+        .head-office-card {
+            display: flex;
+            gap: 24px;
+            align-items: center;
+            background: linear-gradient(135deg, color-mix(in srgb, var(--agent-color) 8%, #111), #111);
+            border: 1px solid color-mix(in srgb, var(--agent-color) 25%, transparent);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 16px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .head-office-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--agent-color), transparent);
+            opacity: 0.5;
+        }
+
+        .agent-char-large {
+            width: 140px;
+            height: 196px;
+            flex-shrink: 0;
+            filter: drop-shadow(0 8px 24px color-mix(in srgb, var(--agent-color) 30%, transparent));
+        }
+
+        .agent-char-large img,
+        .agent-char-large svg {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .agent-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .agent-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .agent-header h2 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--agent-color);
+            margin: 0;
+        }
+
+        .agent-role {
+            font-size: 0.875rem;
+            color: #888;
+            font-family: 'Courier New', monospace;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .agent-desc {
+            font-size: 0.875rem;
+            color: #aaa;
+            line-height: 1.5;
+            margin: 4px 0;
+        }
+
+        .agent-footer {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+
+        .agent-stats {
+            display: flex;
+            gap: 12px;
+            font-size: 0.75rem;
+            color: #666;
+            font-family: 'Courier New', monospace;
+        }
+
+        .agent-stats span {
+            padding: 4px 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+        }
+
+        /* Desk Grid */
+        .desk-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .desk-card {
+            background: color-mix(in srgb, var(--agent-color) 6%, #111);
+            border: 1px solid color-mix(in srgb, var(--agent-color) 20%, transparent);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .desk-card:hover {
+            border-color: var(--agent-color);
+            transform: translateY(-2px);
+        }
+
+        .desk-label {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            font-size: 8px;
+            color: #444;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .agent-char-medium {
+            width: 100px;
+            height: 140px;
+            filter: drop-shadow(0 4px 12px color-mix(in srgb, var(--agent-color) 20%, transparent));
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+
+        .agent-char-medium img,
+        .agent-char-medium svg {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .desk-card h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--agent-color);
+            margin: 0;
+            text-align: center;
+        }
+
+        /* Model badges */
+        .model-badge {
+            font-size: 9px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .model-badge.haiku {
+            background: #332200;
+            color: #ffaa00;
+            border: 1px solid #ffaa0040;
+        }
+
+        .model-badge.sonnet {
+            background: #001133;
+            color: #00aaff;
+            border: 1px solid #00aaff40;
+        }
+
+        .model-badge.python {
+            background: #222;
+            color: #888;
+            border: 1px solid #44444440;
+        }
+
+        /* Status */
+        .status-online {
+            color: #00ff88;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .status-standby {
+            color: #ffaa00;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .status-offline {
+            color: #555;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Configure button */
+        .configure-btn {
+            background: transparent;
+            border: 1px solid #333;
+            color: #666;
+            font-size: 10px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            padding: 4px 12px;
+            border-radius: 4px;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .configure-btn:hover {
+            color: var(--agent-color);
+            border-color: var(--agent-color);
+            background: color-mix(in srgb, var(--agent-color) 10%, transparent);
+        }
+
+        /* Support grid */
+        .support-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 16px;
+        }
+
+        .support-card {
+            background: color-mix(in srgb, var(--agent-color) 5%, #111);
+            border: 1px solid color-mix(in srgb, var(--agent-color) 15%, transparent);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .support-card:hover {
+            border-color: var(--agent-color);
         }
     </style>
 </head>
@@ -389,7 +728,7 @@
             <!-- Logo -->
             <div class="p-6 border-b border-gray-800">
                 <div class="flex items-center space-x-2">
-                    <span class="text-2xl">🤖</span>
+                    <div x-html="Icons.agent()" class="text-accent"></div>
                     <div>
                         <h1 class="text-lg font-bold text-accent">XAUUSD Bot</h1>
                         <p class="text-xs text-muted">Phase I v2.1</p>
@@ -401,32 +740,32 @@
             <nav class="flex-1 py-4">
                 <div class="text-xs font-semibold text-muted px-6 mb-2 uppercase tracking-wider">Overview</div>
                 <div class="nav-item" :class="{'active': currentPage === 'dashboard'}" @click="currentPage = 'dashboard'">
-                    📊 Dashboard
+                    <span x-html="Icons.dashboard()"></span> Dashboard
                 </div>
 
                 <div class="text-xs font-semibold text-muted px-6 mt-6 mb-2 uppercase tracking-wider">Trading</div>
                 <div class="nav-item" :class="{'active': currentPage === 'chart'}" @click="currentPage = 'chart'">
-                    📈 Price Chart
+                    <span x-html="Icons.chart()"></span> Price Chart
                 </div>
                 <div class="nav-item" :class="{'active': currentPage === 'history'}" @click="currentPage = 'history'">
-                    📜 Trade History
+                    <span x-html="Icons.history()"></span> Trade History
                 </div>
 
                 <div class="text-xs font-semibold text-muted px-6 mt-6 mb-2 uppercase tracking-wider">System</div>
                 <div class="nav-item" :class="{'active': currentPage === 'agents'}" @click="currentPage = 'agents'">
-                    🤖 Agent Activity
+                    <span x-html="Icons.agent()"></span> Agent Activity
                 </div>
                 <div class="nav-item" :class="{'active': currentPage === 'log'}" @click="currentPage = 'log'">
-                    📝 System Log
+                    <span x-html="Icons.log()"></span> System Log
                 </div>
                 <div class="nav-item" :class="{'active': currentPage === 'proposals'}" @click="currentPage = 'proposals'">
-                    💡 Proposals
+                    <span x-html="Icons.bulb()"></span> Proposals
                     <span x-show="state.proposals && state.proposals.length > 0"
                           class="ml-2 px-2 py-0.5 text-xs rounded-full bg-yellow-500 text-black font-bold"
                           x-text="state.proposals.length"></span>
                 </div>
                 <div class="nav-item" :class="{'active': currentPage === 'settings'}" @click="currentPage = 'settings'">
-                    ⚙️ Settings
+                    <span x-html="Icons.settings()"></span> Settings
                 </div>
             </nav>
 
@@ -466,9 +805,9 @@
 
                         <!-- Mode Badge -->
                         <div class="flex items-center">
-                            <span x-show="selectedMode === 'paper'" class="text-2xl">📄</span>
-                            <span x-show="selectedMode === 'micro'" class="text-2xl">🟡</span>
-                            <span x-show="selectedMode === 'live'" class="text-2xl">🟢</span>
+                            <div x-show="selectedMode === 'paper'" x-html="Icons.paper()" class="icon-lg"></div>
+                            <div x-show="selectedMode === 'micro'" x-html="Icons.micro()" class="icon-lg"></div>
+                            <div x-show="selectedMode === 'live'" x-html="Icons.live()" class="icon-lg"></div>
                         </div>
 
                         <!-- Symbol Selector (hidden for paper mode) -->
@@ -505,14 +844,14 @@
 
                         <!-- Control Buttons -->
                         <div class="flex space-x-2 ml-4">
-                            <button @click="startBot()" :disabled="state.status === 'running'" class="btn btn-start">
-                                ▶ Start
+                            <button @click="startBot()" :disabled="state.status === 'running'" class="btn btn-start flex items-center gap-2">
+                                <span x-html="Icons.play()" class="icon-sm"></span> Start
                             </button>
-                            <button @click="stopBot()" :disabled="state.status !== 'running'" class="btn btn-stop">
-                                ⏸ Stop
+                            <button @click="stopBot()" :disabled="state.status !== 'running'" class="btn btn-stop flex items-center gap-2">
+                                <span x-html="Icons.pause()" class="icon-sm"></span> Stop
                             </button>
-                            <button @click="emergencyStop()" class="btn btn-emergency">
-                                🚨
+                            <button @click="emergencyStop()" class="btn btn-emergency flex items-center justify-center" title="Emergency Stop">
+                                <span x-html="Icons.emergency()" class="icon"></span>
                             </button>
                         </div>
                     </div>
@@ -521,15 +860,25 @@
                         <!-- Data Source Badge -->
                         <div>
                             <div class="text-xs text-muted uppercase mb-1">Source</div>
-                            <span class="source-badge"
+                            <span class="source-badge flex items-center gap-1"
                                   :class="{
                                       'mt5': state.data_source_actual === 'MT5',
                                       'tv': state.data_source_actual === 'TradingView',
+                                      'yfinance': state.data_source_actual === 'yfinance',
                                       'auto': state.data_source_mode === 'auto'
                                   }">
-                                <span x-show="state.data_source_actual === 'MT5'">📊 MT5</span>
-                                <span x-show="state.data_source_actual === 'TradingView'">📺 TV</span>
-                                <span x-show="!state.data_source_actual && state.data_source_mode === 'auto'">❓ Auto</span>
+                                <span x-show="state.data_source_actual === 'MT5'" class="flex items-center gap-1">
+                                    <span x-html="Icons.mt5()" class="icon-sm"></span> MT5
+                                </span>
+                                <span x-show="state.data_source_actual === 'TradingView'" class="flex items-center gap-1">
+                                    <span x-html="Icons.tv()" class="icon-sm"></span> TV
+                                </span>
+                                <span x-show="state.data_source_actual === 'yfinance'" class="flex items-center gap-1">
+                                    <span x-html="Icons.yfinance()" class="icon-sm"></span> yfinance
+                                </span>
+                                <span x-show="!state.data_source_actual && state.data_source_mode === 'auto'" class="flex items-center gap-1">
+                                    <span x-html="Icons.auto()" class="icon-sm"></span> Auto
+                                </span>
                             </span>
                         </div>
 
@@ -606,7 +955,9 @@
                 <div class="grid grid-cols-2 gap-6 mx-6 mb-6">
                     <!-- Open Orders -->
                     <div class="card">
-                        <h2 class="text-lg font-bold mb-4 text-accent">📈 Open Orders</h2>
+                        <h2 class="text-lg font-bold mb-4 text-accent flex items-center gap-2">
+                            <span x-html="Icons.chart()" class="icon"></span> Open Orders
+                        </h2>
 
                         <template x-if="state.open_orders.length === 0">
                             <p class="text-sm text-muted italic">No open orders</p>
@@ -646,7 +997,9 @@
 
                     <!-- Last Decision -->
                     <div class="card">
-                        <h2 class="text-lg font-bold mb-4 text-accent">🤖 Last Decision</h2>
+                        <h2 class="text-lg font-bold mb-4 text-accent flex items-center gap-2">
+                            <span x-html="Icons.agent()" class="icon"></span> Last Decision
+                        </h2>
 
                         <template x-if="Object.keys(state.last_decision).length === 0">
                             <p class="text-sm text-muted italic">No decision yet</p>
@@ -741,7 +1094,9 @@
                 <!-- LIVE LOG -->
                 <div class="card mx-6 mb-6">
                     <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-lg font-bold text-accent">📝 Live Log</h2>
+                        <h2 class="text-lg font-bold text-accent flex items-center gap-2">
+                            <span x-html="Icons.log()" class="icon"></span> Live Log
+                        </h2>
                         <button @click="clearLogs()" class="text-xs text-muted hover:text-accent uppercase">Clear</button>
                     </div>
 
@@ -770,7 +1125,9 @@
             <!-- PRICE CHART PAGE -->
             <div x-show="currentPage === 'chart'" class="mx-6 mb-6">
                 <div class="card">
-                    <h2 class="text-xl font-bold mb-4 text-accent">📈 XAUUSD Price Chart</h2>
+                    <h2 class="text-xl font-bold mb-4 text-accent flex items-center gap-2">
+                        <span x-html="Icons.chart()" class="icon-lg"></span> XAUUSD Price Chart
+                    </h2>
 
                     <!-- Chart Container -->
                     <div id="price-chart"></div>
@@ -779,101 +1136,218 @@
                 </div>
             </div>
 
-            <!-- AGENT ACTIVITY PAGE -->
+            <!-- AGENT ACTIVITY PAGE - TRADING FLOOR LAYOUT -->
             <div x-show="currentPage === 'agents'" class="mx-6 mb-6">
                 <div class="card">
-                    <div class="flex items-center justify-between mb-6">
-                        <h2 class="text-xl font-bold text-accent">🤖 Agent Activity</h2>
-                        <button @click="fetchAgentLogs()" class="text-xs text-muted hover:text-accent uppercase">Refresh</button>
-                    </div>
+                    <div class="trading-floor">
+                        <!-- Header bar -->
+                        <div class="floor-header">
+                            <span class="floor-status-dot"></span>
+                            TRADING FLOOR — ACTIVE
+                            <div style="margin-left: auto;">
+                                <button @click="fetchAgentLogs()" class="text-xs text-muted hover:text-accent uppercase" style="background: none; border: none; cursor: pointer;">Refresh</button>
+                            </div>
+                        </div>
 
-                    <!-- Agent Cost Summary -->
-                    <div class="grid grid-cols-5 gap-4 mb-6">
-                        <template x-for="agent in ['analyst', 'risk_manager', 'weekly', 'monthly', 'reflector']" :key="agent">
-                            <div class="metric-card">
-                                <div class="flex items-center gap-2 mb-2">
-                                    <div x-html="getAgentIcon(agent)"></div>
-                                    <div class="text-xs uppercase font-bold" x-text="agent.replace('_', ' ')"></div>
+                        <!-- Head Office -->
+                        <section class="floor-section">
+                            <div class="section-label">
+                                🏢 HEAD OFFICE — EXECUTIVE SUITE
+                            </div>
+                            <div class="head-office-card" style="--agent-color: #00ff88">
+                                <div class="agent-char-large">
+                                    <img src="/static/agents/analyst.svg" alt="Analyst Agent" />
                                 </div>
-                                <div class="text-lg font-bold mono text-accent" x-text="'$' + getAgentCost(agent).toFixed(4)"></div>
-                                <div class="text-xs text-muted" x-text="getAgentCount(agent) + ' calls'"></div>
-                            </div>
-                        </template>
-                    </div>
-
-                    <!-- Agent Tabs -->
-                    <div class="agent-tabs">
-                        <div class="agent-tab" :class="{'active': selectedAgent === 'analyst'}" @click="selectedAgent = 'analyst'">
-                            <div x-html="getAgentIcon('analyst')"></div>
-                            <span>Analyst</span>
-                        </div>
-                        <div class="agent-tab" :class="{'active': selectedAgent === 'risk_manager'}" @click="selectedAgent = 'risk_manager'">
-                            <div x-html="getAgentIcon('risk_manager')"></div>
-                            <span>Risk Manager</span>
-                        </div>
-                        <div class="agent-tab" :class="{'active': selectedAgent === 'weekly'}" @click="selectedAgent = 'weekly'">
-                            <div x-html="getAgentIcon('weekly')"></div>
-                            <span>Weekly</span>
-                        </div>
-                        <div class="agent-tab" :class="{'active': selectedAgent === 'monthly'}" @click="selectedAgent = 'monthly'">
-                            <div x-html="getAgentIcon('monthly')"></div>
-                            <span>Monthly</span>
-                        </div>
-                        <div class="agent-tab" :class="{'active': selectedAgent === 'reflector'}" @click="selectedAgent = 'reflector'">
-                            <div x-html="getAgentIcon('reflector')"></div>
-                            <span>Reflector</span>
-                        </div>
-                    </div>
-
-                    <!-- Agent Log Timeline -->
-                    <div class="space-y-0">
-                        <template x-if="getAgentLogs(selectedAgent).length === 0">
-                            <div class="text-center py-12">
-                                <div class="text-4xl mb-2" x-text="getAgentEmoji(selectedAgent)"></div>
-                                <div class="text-muted">No activity yet</div>
-                            </div>
-                        </template>
-
-                        <template x-if="getAgentLogs(selectedAgent).length > 0">
-                            <div>
-                                <template x-for="(log, index) in getAgentLogs(selectedAgent)" :key="index">
-                                    <div class="timeline-entry">
-                                        <div class="timeline-dot"></div>
-                                        <div class="flex-1">
-                                            <div class="flex items-center justify-between mb-1">
-                                                <span class="badge text-xs"
-                                                      :class="{
-                                                          'badge-buy': log.action === 'BUY',
-                                                          'badge-sell': log.action === 'SELL',
-                                                          'badge-skip': log.action === 'SKIP' || log.action === 'ANALYZE' || log.action === 'EVOLVE' || log.action === 'REFLECT'
-                                                      }"
-                                                      x-text="log.action"></span>
-                                                <span class="text-xs text-muted mono" x-text="log.timestamp"></span>
-                                            </div>
-                                            <div class="text-sm mb-2" x-text="log.reason"></div>
-                                            <div class="grid grid-cols-4 gap-2 text-xs">
-                                                <div>
-                                                    <span class="text-muted">Cost:</span>
-                                                    <span class="mono font-bold text-accent" x-text="'$' + (log.cost_usd || 0).toFixed(4)"></span>
-                                                </div>
-                                                <div>
-                                                    <span class="text-muted">Tokens:</span>
-                                                    <span class="mono" x-text="((log.tokens?.input || 0) + (log.tokens?.output || 0))"></span>
-                                                </div>
-                                                <div>
-                                                    <span class="text-muted">Latency:</span>
-                                                    <span class="mono" x-text="(log.latency_sec || 0) + 's'"></span>
-                                                </div>
-                                                <div>
-                                                    <span class="text-muted">Model:</span>
-                                                    <span class="text-xs" x-text="log.model?.replace('claude-sonnet-4-20250514', 'Sonnet 4')"></span>
-                                                </div>
-                                            </div>
-                                        </div>
+                                <div class="agent-info">
+                                    <div class="agent-header">
+                                        <h2>Analyst Agent</h2>
+                                        <span class="model-badge sonnet">Sonnet</span>
                                     </div>
-                                </template>
+                                    <div class="agent-role">Head Trader</div>
+                                    <p class="agent-desc">
+                                        วิเคราะห์กราฟและตัดสินใจเทรด ประเมิน pattern และ setup คุณภาพสูง
+                                    </p>
+                                    <div class="agent-footer">
+                                        <span class="status-online">● ONLINE</span>
+                                        <div class="agent-stats">
+                                            <span x-text="'$' + getAgentCost('analyst').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('analyst') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'analyst'">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
-                        </template>
+                        </section>
+
+                        <!-- Analysis Room -->
+                        <section class="floor-section">
+                            <div class="section-label">
+                                📊 ANALYSIS ROOM
+                            </div>
+                            <div class="desk-grid">
+                                <!-- Desk 01: Risk Manager -->
+                                <div class="desk-card" style="--agent-color: #ffaa00">
+                                    <div class="desk-label">DESK 01</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/risk_manager.svg" alt="Risk Manager" />
+                                    </div>
+                                    <h3>Risk Manager</h3>
+                                    <div class="agent-role">Risk Analyst</div>
+                                    <span class="model-badge haiku">Haiku</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        บริหารความเสี่ยง Position Sizing SL/TP
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-online">● ONLINE</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('risk_manager').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('risk_manager') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'risk_manager'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Desk 02: Weekly Coach -->
+                                <div class="desk-card" style="--agent-color: #00aaff">
+                                    <div class="desk-label">DESK 02</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/weekly.svg" alt="Weekly Coach" />
+                                    </div>
+                                    <h3>Weekly Coach</h3>
+                                    <div class="agent-role">Performance Analyst</div>
+                                    <span class="model-badge sonnet">Sonnet</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        วิเคราะห์ผลรายสัปดาห์ ปรับกลยุทธ์
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-standby">● STANDBY</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('weekly').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('weekly') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'weekly'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Desk 03: Reflector -->
+                                <div class="desk-card" style="--agent-color: #888888">
+                                    <div class="desk-label">DESK 03</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/reflector.svg" alt="Reflector" />
+                                    </div>
+                                    <h3>Reflector</h3>
+                                    <div class="agent-role">Trade Reviewer</div>
+                                    <span class="model-badge python">Python</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        บันทึกและทบทวน trade ที่ผ่านมา
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-online">● ONLINE</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('reflector').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('reflector') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'reflector'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- Support Desks -->
+                        <section class="floor-section">
+                            <div class="section-label">
+                                🔬 SUPPORT DESKS
+                            </div>
+                            <div class="support-grid">
+                                <!-- Monthly Strategist -->
+                                <div class="support-card" style="--agent-color: #aa00ff">
+                                    <div class="desk-label">LAB — OPTIMIZATION</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/monthly.svg" alt="Monthly Strategist" />
+                                    </div>
+                                    <h3>Monthly Strategist</h3>
+                                    <div class="agent-role">Strategy Researcher</div>
+                                    <span class="model-badge sonnet">Sonnet</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        วิจัยและพัฒนา strategy รายเดือน
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-standby">● STANDBY</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('monthly').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('monthly') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'monthly'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- Agent Activity Log (Modal/Overlay when clicked) -->
+                        <section class="floor-section" x-show="selectedAgent" style="margin-top: 32px;">
+                            <div class="section-label" x-text="'📋 ACTIVITY LOG — ' + selectedAgent.toUpperCase().replace('_', ' ')"></div>
+                            <div class="card" style="background: #111; border: 1px solid #222;">
+                                <div class="space-y-0">
+                                    <template x-if="getAgentLogs(selectedAgent).length === 0">
+                                        <div class="text-center py-12">
+                                            <div class="text-4xl mb-2" x-html="getAgentEmoji(selectedAgent)"></div>
+                                            <div class="text-muted">No activity yet</div>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="getAgentLogs(selectedAgent).length > 0">
+                                        <div>
+                                            <template x-for="(log, index) in getAgentLogs(selectedAgent)" :key="index">
+                                                <div class="timeline-entry">
+                                                    <div class="timeline-dot"></div>
+                                                    <div class="flex-1">
+                                                        <div class="flex items-center justify-between mb-1">
+                                                            <span class="badge text-xs"
+                                                                  :class="{
+                                                                      'badge-buy': log.action === 'BUY',
+                                                                      'badge-sell': log.action === 'SELL',
+                                                                      'badge-skip': log.action === 'SKIP' || log.action === 'ANALYZE' || log.action === 'EVOLVE' || log.action === 'REFLECT'
+                                                                  }"
+                                                                  x-text="log.action"></span>
+                                                            <span class="text-xs text-muted mono" x-text="log.timestamp"></span>
+                                                        </div>
+                                                        <div class="text-sm mb-2" x-text="log.reason"></div>
+                                                        <div class="grid grid-cols-4 gap-2 text-xs">
+                                                            <div>
+                                                                <span class="text-muted">Cost:</span>
+                                                                <span class="mono font-bold text-accent" x-text="'$' + (log.cost_usd || 0).toFixed(4)"></span>
+                                                            </div>
+                                                            <div>
+                                                                <span class="text-muted">Tokens:</span>
+                                                                <span class="mono" x-text="((log.tokens?.input || 0) + (log.tokens?.output || 0))"></span>
+                                                            </div>
+                                                            <div>
+                                                                <span class="text-muted">Latency:</span>
+                                                                <span class="mono" x-text="(log.latency_sec || 0) + 's'"></span>
+                                                            </div>
+                                                            <div>
+                                                                <span class="text-muted">Model:</span>
+                                                                <span class="text-xs" x-text="log.model?.replace('claude-sonnet-4-20250514', 'Sonnet 4')"></span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </section>
                     </div>
                 </div>
             </div>
@@ -882,10 +1356,14 @@
             <div x-show="currentPage === 'history'" class="mx-6 mb-6">
                 <div class="card">
                     <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-xl font-bold text-accent">📜 Trade History</h2>
+                        <h2 class="text-xl font-bold text-accent flex items-center gap-2">
+                            <span x-html="Icons.history()" class="icon-lg"></span> Trade History
+                        </h2>
                         <div class="flex items-center gap-2">
-                            <span class="source-badge" :class="historySource === 'sheets' ? 'mt5' : 'auto'">
-                                <span x-show="historySource === 'sheets'">📊 Sheets</span>
+                            <span class="source-badge flex items-center gap-1" :class="historySource === 'sheets' ? 'mt5' : 'auto'">
+                                <span x-show="historySource === 'sheets'" class="flex items-center gap-1">
+                                    <span x-html="Icons.dashboard()" class="icon-sm"></span> Sheets
+                                </span>
                                 <span x-show="historySource === 'memory'">💾 Memory</span>
                             </span>
                             <button @click="fetchHistory()" class="text-xs text-muted hover:text-accent uppercase">Refresh</button>
@@ -894,7 +1372,9 @@
 
                     <template x-if="!historyRecords || historyRecords.length === 0">
                         <div class="text-center py-12">
-                            <div class="text-6xl mb-4">📜</div>
+                            <div class="mb-4 flex justify-center">
+                                <div x-html="Icons.history()" style="width: 4rem; height: 4rem; opacity: 0.3;"></div>
+                            </div>
                             <div class="text-muted">No trade history yet</div>
                             <div class="text-xs text-muted mt-2">Trades will appear here once logged</div>
                         </div>
@@ -954,7 +1434,9 @@
             <!-- AGENT LOG PAGE -->
             <div x-show="currentPage === 'log'" class="mx-6 mb-6">
                 <div class="card">
-                    <h2 class="text-xl font-bold mb-4 text-accent">📝 Agent Log (Full)</h2>
+                    <h2 class="text-xl font-bold mb-4 text-accent flex items-center gap-2">
+                        <span x-html="Icons.log()" class="icon-lg"></span> Agent Log (Full)
+                    </h2>
 
                     <div class="log-container" style="height: 500px;">
                         <template x-if="state.logs.length === 0">
@@ -975,7 +1457,9 @@
             <!-- SETTINGS PAGE -->
             <div x-show="currentPage === 'settings'" class="mx-6 mb-6">
                 <div class="card">
-                    <h2 class="text-xl font-bold mb-4 text-accent">⚙️ Settings</h2>
+                    <h2 class="text-xl font-bold mb-4 text-accent flex items-center gap-2">
+                        <span x-html="Icons.settings()" class="icon-lg"></span> Settings
+                    </h2>
 
                     <div class="space-y-4">
                         <div>
@@ -988,10 +1472,17 @@
                             <div class="text-sm font-semibold mb-2">System Info</div>
                             <div class="text-xs text-muted space-y-1">
                                 <div>Version: Phase I v4.3 (4-Agent + Reflector)</div>
-                                <div>
+                                <div class="flex items-center gap-1">
                                     Data Source:
-                                    <span x-text="state.data_source === 'MT5' ? '📊 MT5 Terminal' : '📺 TradingView'"></span>
-                                    <span x-show="state.data_source === 'MT5'" class="text-accent ml-1">✓</span>
+                                    <span x-show="state.data_source_actual === 'MT5'" class="flex items-center gap-1">
+                                        <span x-html="Icons.mt5()" class="icon-sm"></span> MT5 Terminal
+                                    </span>
+                                    <span x-show="state.data_source_actual === 'TradingView'" class="flex items-center gap-1">
+                                        <span x-html="Icons.tv()" class="icon-sm"></span> TradingView
+                                    </span>
+                                    <span x-show="state.data_source_actual === 'yfinance'" class="flex items-center gap-1">
+                                        <span x-html="Icons.yfinance()" class="icon-sm"></span> yfinance
+                                    </span>
                                 </div>
                                 <div>API Server: http://127.0.0.1:8080</div>
                                 <div>WebSocket: Connected</div>
@@ -1000,9 +1491,11 @@
                         </div>
 
                         <div class="border-t border-gray-800 pt-4">
-                            <div class="text-sm font-semibold mb-2 text-loss">⚠️ Danger Zone</div>
-                            <button @click="emergencyStop()" class="btn btn-emergency">
-                                🚨 Emergency Stop All Positions
+                            <div class="text-sm font-semibold mb-2 text-loss flex items-center gap-2">
+                                <span x-html="Icons.emergency()" class="icon"></span> Danger Zone
+                            </div>
+                            <button @click="emergencyStop()" class="btn btn-emergency flex items-center justify-center gap-2">
+                                <span x-html="Icons.emergency()" class="icon"></span> Emergency Stop All Positions
                             </button>
                             <p class="text-xs text-muted mt-2">This will immediately stop the bot and close all open positions</p>
                         </div>
@@ -1014,7 +1507,9 @@
             <div x-show="currentPage === 'proposals'" class="mx-6 mb-6">
                 <div class="card">
                     <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-xl font-bold text-accent">💡 Monthly Evolver Proposals</h2>
+                        <h2 class="text-xl font-bold text-accent flex items-center gap-2">
+                            <span x-html="Icons.bulb()" class="icon-lg"></span> Monthly Evolver Proposals
+                        </h2>
                         <button @click="clearProposals()"
                                 x-show="state.proposals && state.proposals.length > 0"
                                 class="btn btn-stop text-xs">
@@ -1491,15 +1986,22 @@
                     return icons[agent] || icons.analyst;
                 },
 
-                getAgentEmoji(agent) {
-                    const emoji = {
-                        analyst: '🧠',
-                        risk_manager: '🛡️',
-                        weekly: '📅',
-                        monthly: '🗓️',
-                        reflector: '💭'
+                getAgentIcon(agent) {
+                    // Return SVG avatar from sprite sheet
+                    const iconMap = {
+                        analyst: 'analyst',
+                        risk_manager: 'risk_manager',
+                        weekly: 'weekly',
+                        monthly: 'monthly',
+                        reflector: 'reflector'
                     };
-                    return emoji[agent] || '🤖';
+                    const iconId = iconMap[agent] || 'agent';
+                    return `<svg class="inline-block" style="width: 1.5rem; height: 1.5rem; vertical-align: middle;"><use href="/static/agent-avatars.svg#${iconId}"></use></svg>`;
+                },
+
+                // Backward compatibility (deprecated)
+                getAgentEmoji(agent) {
+                    return this.getAgentIcon(agent);
                 },
 
                 getAgentLogs(agent) {

@@ -1,14 +1,25 @@
 """
 G1 — Multi-TF Visual Pattern Detector
 
-หน้าที่:
+⚠️ DEPRECATED — ใช้ Signal Engine (utils/signal_engine.py) แทน ⚠️
+
+หน้าที่ (เดิม):
 - Scan 6 TF (H4, H1, M30, M15, M5, M1) และตรวจจับ chart patterns
 - ตรวจจับ 6 Chart Types: uptrend, downtrend, sideway_down, sideway_up, mountain, unclear
 - ตรวจจับ 4 Techniques: twin_candle, breakout_follow, mai_ruay, support_bounce
 - Select best setup โดย MTF tiebreak rules
 - Output: world_state → ส่งต่อ G2
 
-Reference: pattern_detection_spec.md v1.0
+⚠️ Phase I v2.1 Integration (2026-04-23):
+- G1 pattern detection replaced by Signal Engine (utils/xauusd_signal.py + utils/swing_v414.py)
+- Single TF mode: M5 only
+- Signal Engine provides: Entry, SL, TP, Lot (not just pattern detection)
+- Claude API role changed: Decision maker → Reviewer
+
+This file is kept for backward compatibility only.
+For new development, use: utils/signal_engine.py
+
+Reference: pattern_detection_spec.md v1.0 (deprecated)
 """
 
 import logging

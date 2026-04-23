@@ -16,14 +16,19 @@ Target: Windows local machine (localhost only)
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +68,7 @@ bot_state = {
     },
     "latest_candle": {},           # V4.3: Latest OHLC for chart
     "logs": [],                    # List of log strings (max 50)
-    "balance": 0.0,
+    "balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),  # อ่านจาก .env
     "last_updated": datetime.now().isoformat()
 }
 
@@ -694,7 +699,7 @@ if __name__ == "__main__":
     print("="*70)
     print("🚀 Starting XAUUSD Bot Dashboard API Server")
     print("="*70)
-    print("📊 Dashboard: http://127.0.0.1:8080")
+    print("📊 Dashboard: http://127.0.0.1:8000")
     print("📡 API Docs:  http://127.0.0.1:8080/docs")
     print("🔌 WebSocket: ws://127.0.0.1:8080/ws")
     print("="*70)

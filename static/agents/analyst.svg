@@ -1,0 +1,57 @@
+<!-- Analyst Agent - Head Trader -->
+<svg viewBox="0 0 200 280" xmlns="http://www.w3.org/2000/svg">
+  <!-- Body / Suit -->
+  <rect x="60" y="160" width="80" height="100" rx="10" fill="#1a2744"/>
+
+  <!-- Shirt -->
+  <rect x="85" y="160" width="30" height="60" fill="#ffffff"/>
+
+  <!-- Tie -->
+  <polygon points="100,165 95,200 100,210 105,200" fill="#00ff88"/>
+
+  <!-- Neck -->
+  <rect x="90" y="140" width="20" height="25" fill="#f4c5a0"/>
+
+  <!-- Head -->
+  <ellipse cx="100" cy="120" rx="42" ry="48" fill="#f4c5a0"/>
+
+  <!-- Hair -->
+  <ellipse cx="100" cy="85" rx="42" ry="20" fill="#2c1810"/>
+  <rect x="58" y="85" width="12" height="30" rx="6" fill="#2c1810"/>
+  <rect x="130" y="85" width="12" height="30" rx="6" fill="#2c1810"/>
+
+  <!-- Eyes -->
+  <ellipse cx="86" cy="118" rx="8" ry="9" fill="#ffffff"/>
+  <ellipse cx="114" cy="118" rx="8" ry="9" fill="#ffffff"/>
+  <ellipse cx="87" cy="119" rx="5" ry="6" fill="#1a1a2e"/>
+  <ellipse cx="115" cy="119" rx="5" ry="6" fill="#1a1a2e"/>
+
+  <!-- Eye shine -->
+  <circle cx="89" cy="117" r="2" fill="#ffffff"/>
+  <circle cx="117" cy="117" r="2" fill="#ffffff"/>
+
+  <!-- Glasses -->
+  <rect x="78" y="112" width="20" height="14" rx="4" fill="none" stroke="#888" stroke-width="1.5"/>
+  <rect x="102" y="112" width="20" height="14" rx="4" fill="none" stroke="#888" stroke-width="1.5"/>
+  <line x1="98" y1="118" x2="102" y2="118" stroke="#888" stroke-width="1.5"/>
+
+  <!-- Nose -->
+  <ellipse cx="100" cy="130" rx="3" ry="2" fill="#e8a882"/>
+
+  <!-- Mouth -->
+  <path d="M 92 140 Q 100 146 108 140" stroke="#c47a5a" stroke-width="1.5" fill="none"/>
+
+  <!-- Tablet -->
+  <rect x="118" y="175" width="35" height="50" rx="4" fill="#0a0a0a" stroke="#00ff88" stroke-width="1.5"/>
+
+  <!-- Chart on tablet -->
+  <polyline points="123,210 128,200 133,205 138,190 143,195 148,185" stroke="#00ff88" stroke-width="1.5" fill="none"/>
+
+  <!-- Arms -->
+  <rect x="30" y="165" width="32" height="14" rx="7" fill="#1a2744"/>
+  <rect x="138" y="165" width="32" height="14" rx="7" fill="#1a2744"/>
+
+  <!-- Hands -->
+  <ellipse cx="30" cy="172" rx="10" ry="9" fill="#f4c5a0"/>
+  <ellipse cx="168" cy="172" rx="10" ry="9" fill="#f4c5a0"/>
+</svg>

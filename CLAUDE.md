@@ -12,8 +12,36 @@
 | `strategy/XAUUSD_AI_Trading_System_v2.1.md` | ✅ **ใช้จริง** — read-only |
 | `strategy/XAUUSD_Strategy_v5.md` | ❌ **เลิกใช้แล้ว** — ห้ามอ้างอิง |
 | `docs/TRAIDER_MASTER_PLAN_v2.1.md` | ✅ Architecture reference |
-| `docs/pattern_detection_spec.md` | ✅ G1 spec |
-| `docs/claude_prompt_template.md` | ✅ G3a spec |
+| `docs/pattern_detection_spec.md` | ❌ **เลิกใช้แล้ว** — ใช้ Signal Engine แทน |
+| `docs/claude_prompt_template.md` | ❌ **เลิกใช้แล้ว** — ใช้ Reviewer Prompt แทน |
+
+---
+
+## ⚠️ V4.20 Architecture Change (2026-04-23)
+
+**Signal Engine Integration:**
+- **Signal Engine:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
+  - คำนวณ Entry/SL/TP/Lot ทั้งหมด
+  - **ห้ามแก้ไข** xauusd_signal.py และ swing_v414.py
+  - Single TF: M5 only
+  
+- **G1 Pattern Detector:** `agents/g1_pattern_detector.py`
+  - ❌ **DEPRECATED** — เก็บไว้เพื่อ backward compatibility
+  - ใช้ Signal Engine แทน
+
+**Claude Role Change:**
+- **Before:** Decision Maker (คำนวณ Entry/SL/TP)
+- **After:** Reviewer (approve/reject signal เท่านั้น)
+
+- **System Prompt:** `strategy/XAUUSD_System_Prompt_Reviewer.md`
+  - ✅ **ใช้ตอนนี้** — สั้นกว่า V43 มาก (cache ดีกว่า)
+  - ❌ ไม่ใช้ `XAUUSD_System_PromptV43.md` อีกต่อไป
+  - max_tokens: 300 (ลดจาก 2048)
+
+- **Reference Docs (อ่านอย่างเดียว):**
+  - `strategy/XAUUSD_AI_Trading_SystemV43.md` — เก็บเป็น reference
+  - `strategy/XAUUSD_System_PromptV43.md` — เก็บเป็น reference
+  - **ไม่ส่งให้ Claude อีกต่อไป**
 
 ---
 
@@ -31,25 +59,31 @@
 7. **Timestamp = candle time** — ห้ามใช้ datetime.now() ใน backtest
 8. **Technique log** มาจาก decision['technique'] ไม่ใช่ world_state
 
-### Architecture Pipeline:
+### Architecture Pipeline (V4.20):
 ```
 Market Data (M5 Single TF)
     ↓
-G1: Visual Pattern Detector
-    scan M5 only → build world_state
-    ↓ world_state
+Signal Engine: xauusd_signal.py
+    Entry/SL/TP/Lot คำนวณเสร็จ → Signal object
+    ↓ world_state + signal
 G2: Pre-filter
-    block ก่อน Claude ถ้าไม่มี Setup จริง
+    ตรวจ signal validity, R:R ≥ 1.0, duplicate
     ↓ pre_approved
-G3a: Claude API Decision (REQUIRED ทุกครั้ง)
-    system=[strategy cached, rules]
-    ↓ BUY/SELL/SKIP
-G3b: Lot = (balance × 10%) / sl_pip
+G3a: Claude API Reviewer (max_tokens=300)
+    system=[reviewer_prompt cached]
+    → APPROVE/REJECT (ไม่คำนวณ Entry/SL/TP)
+    ↓ APPROVE → ใช้ค่าจาก Signal Engine
+G3b: Lot adjustment (optional - ตอนนี้ใช้จาก Signal Engine)
 G3c: Guardian (R:R ≥ 1.0, consecutive_loss, plan active)
     ↓
 G4a: LINE Notify
 G4b: Sheets Log (candle timestamp ไม่ใช่ datetime.now())
 G4c: Position Monitor (ตรวจทุก candle close)
+```
+
+**OLD Pipeline (DEPRECATED):**
+```
+G1 Pattern Detector → G2 → G3a Decision Maker → G3b Lot → G3c Guardian → G4
 ```
 
 ### Risk Config (v2.1):

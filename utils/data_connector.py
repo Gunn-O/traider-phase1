@@ -710,8 +710,236 @@ class MT5Connector:
             self.connected = False
             logger.info("MT5 disconnected")
 
+    @property
+    def source_name(self) -> str:
+        """Return data source name for bot_state"""
+        return "MT5"
+
     def __repr__(self):
         return f"MT5Connector(symbol={self.symbol})"
+
+
+class YFinanceConnector:
+    """
+    yfinance Data Connector — Free, No Login Required
+    Symbol: GC=F (Gold Futures)
+    Priority: After MT5, before TradingView
+    """
+
+    def __init__(self, symbol: str = "XAUUSD"):
+        """
+        Initialize yfinance Connector
+
+        Args:
+            symbol: Trading symbol (XAUUSD → converts to GC=F internally)
+        """
+        try:
+            import yfinance as yf
+            self.yf = yf
+        except ImportError:
+            raise RuntimeError("yfinance not available. Install: pip install yfinance")
+
+        # Convert XAUUSD to Gold Futures symbol
+        self.yf_symbol = "GC=F"  # Gold Futures
+        self.symbol = symbol     # Keep original for display
+        self.connected = False
+
+        # Test connection by fetching 1 candle
+        try:
+            ticker = self.yf.Ticker(self.yf_symbol)
+            test_data = ticker.history(period="1d", interval="5m")
+            if test_data.empty:
+                raise RuntimeError(f"yfinance: No data for {self.yf_symbol}")
+            self.connected = True
+            logger.info(f"📊 yfinance connected | {symbol} → {self.yf_symbol}")
+        except Exception as e:
+            raise RuntimeError(f"yfinance connection failed: {e}")
+
+    def get_candles(
+        self,
+        timeframe: str,
+        count: int = 80,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> List[Dict]:
+        """
+        Get OHLC candles from yfinance
+
+        Args:
+            timeframe: 'M1', 'M5', 'M15', 'M30', 'H1', 'H4'
+            count: Number of candles
+            start_date: Start date for backtest
+            end_date: End date for backtest
+
+        Returns:
+            List of candle dicts
+        """
+        # Map timeframe to yfinance interval
+        tf_map = {
+            "M1":  "1m",
+            "M5":  "5m",
+            "M15": "15m",
+            "M30": "30m",
+            "H1":  "1h",
+            "H4":  "4h",
+        }
+        interval = tf_map.get(timeframe)
+        if interval is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        ticker = self.yf.Ticker(self.yf_symbol)
+
+        # Fetch data
+        if start_date and end_date:
+            # Backtest mode: get historical range
+            # yfinance needs string dates
+            df = ticker.history(
+                start=start_date.strftime("%Y-%m-%d"),
+                end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+                interval=interval
+            )
+        else:
+            # Simulate mode: get N latest candles
+            # yfinance period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
+            # Calculate appropriate period based on count
+            tf_minutes = TF_MINUTES.get(timeframe, 5)
+            days_needed = (count * tf_minutes) / (24 * 60) * 1.5  # 50% buffer
+
+            if days_needed <= 1:
+                period = "1d"
+            elif days_needed <= 5:
+                period = "5d"
+            elif days_needed <= 30:
+                period = "1mo"
+            elif days_needed <= 90:
+                period = "3mo"
+            elif days_needed <= 180:
+                period = "6mo"
+            else:
+                period = "1y"
+
+            df = ticker.history(period=period, interval=interval)
+
+        if df.empty:
+            raise RuntimeError(f"yfinance: No data for {self.yf_symbol} {timeframe}")
+
+        # Convert to standard format
+        candles = []
+        for idx, row in df.iterrows():
+            candles.append({
+                "time": idx,
+                "timestamp": idx.to_pydatetime() if hasattr(idx, 'to_pydatetime') else idx,
+                "open": float(row['Open']),
+                "high": float(row['High']),
+                "low": float(row['Low']),
+                "close": float(row['Close']),
+                "volume": int(row.get('Volume', 0))
+            })
+
+        # Take last N candles if simulate mode
+        if not (start_date and end_date):
+            candles = candles[-count:] if len(candles) > count else candles
+
+        return candles
+
+    def get_latest_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict]:
+        """
+        Compatibility wrapper for get_candles()
+        (matches old DataConnector API)
+        """
+        return self.get_candles(timeframe, count, start_date, end_date)
+
+    def get_all_timeframes_optimized(
+        self,
+        symbol: str,
+        base_tf: str = 'M5',
+        count: int = 55
+    ) -> Dict[str, List[Dict]]:
+        """
+        Fetch M5 and resample to all requested timeframes
+        """
+        # Fetch M5 candles (enough to resample)
+        m5_needed = count * 48  # Conservative: enough for H4
+
+        m5_candles = self.get_candles('M5', m5_needed)
+
+        # Resample to all timeframes in TIMEFRAMES
+        result = {}
+        for tf in TIMEFRAMES:
+            if tf == 'M5':
+                result[tf] = m5_candles[-count:] if len(m5_candles) >= count else m5_candles
+            elif tf == 'M1':
+                # Can't downsample M5 to M1
+                result[tf] = []
+            else:
+                # Resample M5 → M15/M30/H1/H4
+                result[tf] = self._resample_m5(m5_candles, tf, count)
+
+        return result
+
+    def _resample_m5(self, m5_candles: List[Dict], target_tf: str, count: int) -> List[Dict]:
+        """Resample M5 candles to higher timeframe"""
+        import pandas as pd
+
+        if not m5_candles:
+            return []
+
+        # Convert to DataFrame
+        df = pd.DataFrame(m5_candles)
+        df.set_index('time', inplace=True)
+
+        # Resample
+        tf_map = {'M15': '15T', 'M30': '30T', 'H1': '1H', 'H4': '4H'}
+        freq = tf_map.get(target_tf)
+        if freq is None:
+            return []
+
+        resampled = df.resample(freq).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+
+        # Convert back to dict
+        candles = []
+        for idx, row in resampled.iterrows():
+            candles.append({
+                'time': idx,
+                'timestamp': idx.to_pydatetime() if hasattr(idx, 'to_pydatetime') else idx,
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': int(row['volume'])
+            })
+
+        return candles[-count:] if len(candles) >= count else candles
+
+    def is_connected(self) -> bool:
+        """Check if yfinance is connected"""
+        return self.connected
+
+    @property
+    def source_name(self) -> str:
+        """Return data source name for bot_state"""
+        return "yfinance"
+
+    def disconnect(self):
+        """Disconnect (no-op for yfinance)"""
+        self.connected = False
+        logger.info("yfinance disconnected")
+
+    def __repr__(self):
+        return f"YFinanceConnector(symbol={self.symbol} → {self.yf_symbol})"
 
 
 class TVConnector:
@@ -960,6 +1188,15 @@ class TVConnector:
 
         return candles[-count:] if len(candles) >= count else candles
 
+    def is_connected(self) -> bool:
+        """Check if TradingView is connected"""
+        return self.connected and self.tv_client is not None
+
+    @property
+    def source_name(self) -> str:
+        """Return data source name for bot_state"""
+        return "TradingView"
+
     def disconnect(self):
         """Disconnect (no-op for TradingView)"""
         self.connected = False
@@ -980,20 +1217,23 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
 
     Priority:
     1. MT5 (if available and connected)
-    2. TradingView (fallback)
+    2. yfinance (free, no login required) ✨ NEW
+    3. TradingView (fallback, requires login)
 
     Args:
-        mode: "auto" | "mt5" | "tv" | "backtest"
-              - "auto": Try MT5 first, fallback to TV
+        mode: "auto" | "mt5" | "yf" | "tv" | "backtest"
+              - "auto": Try MT5 → yfinance → TV
               - "mt5": Force MT5 (error if not available)
+              - "yf": Force yfinance
               - "tv": Force TradingView
               - "backtest": Same as auto (for backward compatibility)
         symbol: Trading symbol
                 - MT5: use "XAUUSDm" (cent) or "XAUUSD" (standard)
+                - yfinance: use "XAUUSD" (converts to GC=F internally)
                 - TV: use "XAUUSD" (OANDA doesn't have XAUUSDm)
 
     Returns:
-        MT5Connector or TVConnector instance
+        MT5Connector, YFinanceConnector, or TVConnector instance
 
     Raises:
         RuntimeError: If forced mode is not available
@@ -1002,7 +1242,7 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
     if mode == "auto":
         mode = os.getenv("DATA_MODE", "auto")
 
-    # Normalize backtest mode to auto
+    # Normalize backtest/simulate mode to auto
     if mode in ["backtest", "simulate"]:
         mode = "auto"
 
@@ -1020,6 +1260,16 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
         except Exception as e:
             raise RuntimeError(f"MT5 connection failed: {e}")
 
+    # Force yfinance mode
+    if mode == "yf":
+        try:
+            yf_symbol = "XAUUSD" if "XAUUSD" in symbol else symbol
+            connector = YFinanceConnector(symbol=yf_symbol)
+            logger.info("📊 Using yfinance data source (forced)")
+            return connector
+        except Exception as e:
+            raise RuntimeError(f"yfinance connection failed: {e}")
+
     # Force TradingView mode
     if mode == "tv":
         if not TVDATAFEED_AVAILABLE:
@@ -1027,7 +1277,6 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
                 "Mode 'tv' requires tvdatafeed. "
                 "Install: pip install git+https://github.com/rongardF/tvdatafeed.git"
             )
-        # TradingView uses XAUUSD (not XAUUSDm)
         tv_symbol = "XAUUSD" if "XAUUSD" in symbol else symbol
         connector = TVConnector(symbol=tv_symbol)
         logger.info("📺 Using TradingView data source (forced)")
@@ -1043,27 +1292,37 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
                 return connector
             except Exception as e:
                 logger.warning(f"⚠️ MT5 not available: {e}")
-                logger.warning("⚠️ Falling back to TradingView...")
+                logger.warning("⚠️ Trying yfinance next...")
+
+        # Try yfinance second
+        try:
+            yf_symbol = "XAUUSD" if "XAUUSD" in symbol else symbol
+            connector = YFinanceConnector(symbol=yf_symbol)
+            logger.info("📊 Using yfinance data source (auto-detected)")
+            return connector
+        except Exception as e:
+            logger.warning(f"⚠️ yfinance not available: {e}")
+            logger.warning("⚠️ Falling back to TradingView...")
 
         # Fallback to TradingView
         if TVDATAFEED_AVAILABLE:
-            # TradingView uses XAUUSD (not XAUUSDm)
             tv_symbol = "XAUUSD" if "XAUUSD" in symbol else symbol
             connector = TVConnector(symbol=tv_symbol)
             logger.info("📺 Using TradingView data source (fallback)")
             return connector
 
-        # Neither available
+        # None available
         raise RuntimeError(
             "No data source available. Install one of:\n"
             "  - MetaTrader5: pip install MetaTrader5\n"
+            "  - yfinance: pip install yfinance (FREE, recommended)\n"
             "  - tvdatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git"
         )
 
     # Invalid mode
     raise ValueError(
         f"Invalid mode: {mode}. "
-        f"Must be 'auto', 'mt5', 'tv', or 'backtest'"
+        f"Must be 'auto', 'mt5', 'yf', 'tv', or 'backtest'"
     )
 
 

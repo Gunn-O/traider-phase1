@@ -1,11 +1,34 @@
+# Environment
 .env
+
+# Python
 *.pyc
 __pycache__/
-logs/
 *.log
-credentials.json
-token.json
-.DS_Store
-backtest/results/
 venv/
 .venv/
+
+# Google OAuth
+credentials.json
+token.json
+
+# Mac
+.DS_Store
+
+# Logs
+logs/
+
+# Backtest
+backtest/results/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+static_build/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
