@@ -14,10 +14,17 @@
       "Bash(pip install:*)",
       "Bash(pytest tests/test_g3_python_decision.py -v --tb=short)",
       "Bash(python -m pytest tests/test_g3_python_decision.py -v --tb=short)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(curl -s http://127.0.0.1:8080/api/health)",
+      "Bash(find static/agents -name \"*.svg\" -exec cp {} frontend/src/assets/agents/ \\\\;)",
+      "Bash(git commit -m ':*)"
     ],
     "additionalDirectories": [
-      "/tmp"
+      "/tmp",
+      "/Users/gunno/Desktop/projects/traider-phase1",
+      "/Users/gunno/Desktop/projects/traider-phase1/static/agents"
     ]
   }
 }
