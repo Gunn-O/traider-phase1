@@ -1,0 +1,594 @@
+.agent-activity {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  gap: var(--spacing-lg);
+  height: calc(100vh - 72px - var(--spacing-lg) * 2);
+}
+
+/* Trading Floor */
+.trading-floor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  overflow-y: auto;
+  padding-right: var(--spacing-sm);
+}
+
+.floor-section {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xl);
+  padding: var(--spacing-xl);
+  box-shadow: var(--shadow-lg);
+}
+
+.floor-header {
+  margin-bottom: var(--spacing-lg);
+  padding-bottom: var(--spacing-md);
+  border-bottom: 2px solid var(--border-color);
+}
+
+.floor-title {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+  margin-bottom: var(--spacing-xs);
+  background: linear-gradient(135deg, #ff3366, #ffdd00);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.floor-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PNG CHARACTER STYLES
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Large character (Head Office) */
+.agent-char-large {
+  width: 160px;
+  height: 160px;
+  object-fit: contain;
+  object-position: center bottom;
+  flex-shrink: 0;
+
+  /* Remove black background */
+  mix-blend-mode: screen;
+
+  /* Glow effect based on agent color */
+  filter: drop-shadow(
+    0 0 20px color-mix(in srgb, var(--agent-color) 40%, transparent)
+  );
+  transition: filter 0.3s ease;
+}
+
+.agent-char-large:hover {
+  filter: drop-shadow(
+    0 0 32px color-mix(in srgb, var(--agent-color) 60%, transparent)
+  ) brightness(1.1);
+}
+
+.agent-char-large-wrap {
+  width: 160px;
+  height: 160px;
+  flex-shrink: 0;
+  background: transparent;
+}
+
+/* Medium character (Desks & Support) */
+.agent-char-medium {
+  width: 120px;
+  height: 120px;
+  object-fit: contain;
+  object-position: center bottom;
+  margin-top: 16px;
+  mix-blend-mode: screen;
+  filter: drop-shadow(
+    0 0 12px color-mix(in srgb, var(--agent-color) 30%, transparent)
+  );
+  transition: filter 0.3s, transform 0.3s;
+}
+
+.agent-char-medium:hover {
+  filter: drop-shadow(
+    0 0 20px color-mix(in srgb, var(--agent-color) 50%, transparent)
+  ) brightness(1.1);
+  transform: translateY(-4px);
+}
+
+.agent-char-medium-wrap {
+  width: 120px;
+  height: 120px;
+  margin: 0 auto;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HEAD OFFICE - Large Cards
+   ═══════════════════════════════════════════════════════════════ */
+
+.head-office {
+  background: linear-gradient(135deg, rgba(255, 51, 102, 0.05), rgba(255, 51, 102, 0.08));
+  border-color: rgba(255, 51, 102, 0.2);
+}
+
+.head-office-card {
+  display: flex;
+  gap: 32px;
+  align-items: center;
+  background: color-mix(in srgb, var(--agent-color) 6%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--agent-color) 20%, transparent);
+  border-radius: 16px;
+  padding: 28px 32px;
+  margin-bottom: 16px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.head-office-card:last-child {
+  margin-bottom: 0;
+}
+
+/* Glow background */
+.head-office-card::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -10%;
+  width: 200px;
+  height: 200%;
+  background: radial-gradient(
+    ellipse,
+    color-mix(in srgb, var(--agent-color) 8%, transparent),
+    transparent 60%
+  );
+  pointer-events: none;
+}
+
+.head-office-card:hover {
+  transform: translateX(4px);
+  border-color: color-mix(in srgb, var(--agent-color) 40%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--agent-color) 15%, transparent);
+}
+
+.head-office-card .agent-info {
+  flex: 1;
+  text-align: left;
+}
+
+.head-office-card .agent-role {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--agent-color);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.head-office-card .agent-name {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.head-office-card .agent-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+.head-office-card .agent-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.head-office-card .agent-model {
+  background: color-mix(in srgb, var(--agent-color) 20%, transparent);
+  color: var(--agent-color);
+  border: 1px solid color-mix(in srgb, var(--agent-color) 30%, transparent);
+}
+
+.head-office-card .agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.head-office-card .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--agent-color);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.agent-select-btn {
+  padding: 12px 24px;
+  background: color-mix(in srgb, var(--agent-color) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--agent-color) 30%, transparent);
+  border-radius: 8px;
+  color: var(--agent-color);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.agent-select-btn:hover {
+  background: color-mix(in srgb, var(--agent-color) 25%, transparent);
+  border-color: var(--agent-color);
+  transform: scale(1.05);
+}
+
+.agent-select-btn.selected {
+  background: var(--agent-color);
+  color: var(--bg-dark);
+  border-color: var(--agent-color);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ANALYSIS ROOM - Desk Cards
+   ═══════════════════════════════════════════════════════════════ */
+
+.analysis-room {
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.05), rgba(68, 136, 255, 0.05));
+  border-color: rgba(0, 255, 136, 0.2);
+}
+
+.desk-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.desk-card {
+  background: color-mix(in srgb, var(--agent-color) 4%, var(--bg-hover));
+  border: 2px solid color-mix(in srgb, var(--agent-color) 15%, transparent);
+  border-radius: 12px;
+  padding: 24px 16px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.desk-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--agent-color);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.desk-card:hover {
+  transform: translateY(-6px);
+  border-color: var(--agent-color);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--agent-color) 20%, transparent);
+}
+
+.desk-card:hover::before {
+  opacity: 1;
+}
+
+.desk-card.selected {
+  border-color: var(--agent-color);
+  background: color-mix(in srgb, var(--agent-color) 10%, var(--bg-hover));
+  box-shadow: 0 0 24px color-mix(in srgb, var(--agent-color) 25%, transparent);
+}
+
+.desk-card.selected::before {
+  opacity: 1;
+}
+
+.desk-number {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  letter-spacing: 1.5px;
+  color: var(--agent-color);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.desk-card .agent-role {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--agent-color) 80%, var(--text-secondary));
+  margin: 12px 0 4px;
+}
+
+.desk-card .agent-name {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.desk-card .agent-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-bottom: 12px;
+  min-height: 32px;
+}
+
+.desk-card .agent-model {
+  background: color-mix(in srgb, var(--agent-color) 15%, transparent);
+  color: var(--agent-color);
+  border: 1px solid color-mix(in srgb, var(--agent-color) 25%, transparent);
+  font-size: 10px;
+  padding: 4px 10px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SUPPORT DESKS - Compact Cards (4 columns)
+   ═══════════════════════════════════════════════════════════════ */
+
+.support-desks {
+  background: linear-gradient(135deg, rgba(136, 136, 136, 0.05), rgba(136, 136, 136, 0.1));
+  border-color: rgba(136, 136, 136, 0.2);
+}
+
+.support-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.support-card {
+  background: color-mix(in srgb, var(--agent-color) 4%, var(--bg-hover));
+  border: 2px solid color-mix(in srgb, var(--agent-color) 15%, transparent);
+  border-radius: 10px;
+  padding: 20px 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-align: center;
+  position: relative;
+}
+
+.support-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--agent-color);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--agent-color) 18%, transparent);
+}
+
+.support-card.selected {
+  border-color: var(--agent-color);
+  background: color-mix(in srgb, var(--agent-color) 8%, var(--bg-hover));
+  box-shadow: 0 0 20px color-mix(in srgb, var(--agent-color) 20%, transparent);
+}
+
+.desk-label {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.8px;
+  color: var(--agent-color);
+  margin-bottom: 6px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.support-card .agent-role {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--agent-color) 70%, var(--text-secondary));
+  margin: 10px 0 4px;
+}
+
+.support-card .agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.support-card .agent-model {
+  background: color-mix(in srgb, var(--agent-color) 15%, transparent);
+  color: var(--agent-color);
+  border: 1px solid color-mix(in srgb, var(--agent-color) 25%, transparent);
+  font-size: 9px;
+  padding: 3px 8px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   AGENT DETAIL PANEL
+   ═══════════════════════════════════════════════════════════════ */
+
+.agent-detail-panel {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.detail-header {
+  padding: var(--spacing-xl);
+  border-bottom: 1px solid var(--border-color);
+  border-left: 4px solid;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--agent-color) 5%, transparent) 0%,
+    transparent 100%
+  );
+}
+
+.detail-title-group {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.agent-avatar-large {
+  width: 60px;
+  height: 70px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-avatar-large .avatar-img {
+  width: 60px;
+  height: 60px;
+  object-fit: contain;
+  mix-blend-mode: screen;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
+}
+
+.detail-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: var(--spacing-xs);
+}
+
+.detail-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.activity-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Activity List */
+.activity-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.activity-item {
+  background-color: var(--bg-hover);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  border-left: 3px solid var(--border-color);
+  transition: border-color 0.2s ease;
+}
+
+.activity-item:hover {
+  border-left-color: var(--agent-color);
+}
+
+.activity-time {
+  font-size: 11px;
+  margin-bottom: var(--spacing-sm);
+}
+
+.activity-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.activity-type {
+  align-self: flex-start;
+}
+
+.activity-message {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.activity-details {
+  background-color: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-md);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+  margin-top: var(--spacing-sm);
+}
+
+.empty-state {
+  text-align: center;
+  padding: var(--spacing-xl);
+  font-size: 14px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════════════════════ */
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVE
+   ═══════════════════════════════════════════════════════════════ */
+
+@media (max-width: 1400px) {
+  .support-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 1200px) {
+  .agent-activity {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-detail-panel {
+    height: 400px;
+  }
+
+  .desk-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .head-office-card {
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .head-office-card .agent-info {
+    text-align: center;
+  }
+
+  .desk-grid,
+  .support-grid {
+    grid-template-columns: 1fr;
+  }
+}

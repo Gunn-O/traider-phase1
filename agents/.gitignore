@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+venv/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Build output
+static_build/
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Credentials
+credentials.json
+*.key
+*.pem

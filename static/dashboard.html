@@ -1,0 +1,2024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XAUUSD Trading Bot Dashboard</title>
+
+    <!-- TailwindCSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Alpine.js CDN -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- lightweight-charts CDN -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+
+    <!-- Icons System -->
+    <script src="/static/icons.js"></script>
+
+    <style>
+        [x-cloak] { display: none !important; }
+
+        /* Icon Styles */
+        .icon {
+            width: 1.25rem;
+            height: 1.25rem;
+            display: inline-block;
+            vertical-align: middle;
+        }
+
+        .icon-lg {
+            width: 2rem;
+            height: 2rem;
+        }
+
+        .icon-sm {
+            width: 1rem;
+            height: 1rem;
+        }
+
+        .agent-avatar {
+            width: 3rem;
+            height: 3rem;
+        }
+
+        .nav-item .icon {
+            margin-right: 0.5rem;
+        }
+
+        /* Color System */
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-sidebar: #111111;
+            --bg-card: #1a1a1a;
+            --border: #2a2a2a;
+            --accent-primary: #00ff88;
+            --accent-danger: #ff4444;
+            --text-primary: #ffffff;
+            --text-muted: #888888;
+            --color-win: #00ff88;
+            --color-loss: #ff4444;
+            --color-pending: #ffaa00;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+        }
+
+        .nav-item {
+            color: var(--text-muted);
+            padding: 0.75rem 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+
+        .nav-item:hover {
+            color: var(--text-primary);
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-item.active {
+            color: var(--accent-primary);
+            background-color: rgba(0, 255, 136, 0.1);
+            border-left-color: var(--accent-primary);
+        }
+
+        /* Cards */
+        .card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+        }
+
+        .metric-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 1rem;
+        }
+
+        /* Status Dot */
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 0.5rem;
+        }
+
+        .status-running {
+            background-color: var(--accent-primary);
+            animation: pulse-green 2s infinite;
+        }
+
+        .status-stopped {
+            background-color: var(--text-muted);
+        }
+
+        .status-error {
+            background-color: var(--accent-danger);
+            animation: pulse-red 1s infinite;
+        }
+
+        @keyframes pulse-green {
+            0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent-primary); }
+            50% { opacity: 0.6; }
+        }
+
+        @keyframes pulse-red {
+            0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent-danger); }
+            50% { opacity: 0.6; }
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            font-weight: 600;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            text-transform: uppercase;
+        }
+
+        .btn-start {
+            background-color: var(--accent-primary);
+            color: #000;
+        }
+
+        .btn-start:hover:not(:disabled) {
+            background-color: #00dd77;
+            box-shadow: 0 0 15px var(--accent-primary);
+        }
+
+        .btn-stop {
+            background-color: var(--color-pending);
+            color: #000;
+        }
+
+        .btn-stop:hover:not(:disabled) {
+            background-color: #ff9900;
+        }
+
+        .btn-emergency {
+            background-color: var(--accent-danger);
+            color: white;
+        }
+
+        .btn-emergency:hover {
+            background-color: #dd3333;
+            box-shadow: 0 0 15px var(--accent-danger);
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* Monospace Numbers */
+        .mono {
+            font-family: 'Courier New', Consolas, monospace;
+            letter-spacing: 0.05em;
+        }
+
+        /* Table */
+        .table-dark {
+            width: 100%;
+            font-size: 0.875rem;
+        }
+
+        .table-dark thead {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .table-dark th {
+            padding: 0.75rem;
+            text-align: left;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+
+        .table-dark td {
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .table-dark tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        /* Badge */
+        .badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .badge-buy {
+            background-color: rgba(0, 255, 136, 0.2);
+            color: var(--color-win);
+        }
+
+        .badge-sell {
+            background-color: rgba(255, 68, 68, 0.2);
+            color: var(--color-loss);
+        }
+
+        .badge-skip {
+            background-color: rgba(136, 136, 136, 0.2);
+            color: var(--text-muted);
+        }
+
+        /* Log */
+        .log-container {
+            background-color: #000;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
+
+        .log-entry {
+            color: var(--accent-primary);
+            margin-bottom: 0.25rem;
+        }
+
+        .log-entry::before {
+            content: '● ';
+            color: var(--accent-primary);
+        }
+
+        /* Scrollbar */
+        .log-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .log-container::-webkit-scrollbar-track {
+            background: #000;
+        }
+
+        .log-container::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+
+        .log-container::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* Utility Colors */
+        .text-win { color: var(--color-win); }
+        .text-loss { color: var(--color-loss); }
+        .text-pending { color: var(--color-pending); }
+        .text-muted { color: var(--text-muted); }
+        .text-accent { color: var(--accent-primary); }
+
+        /* Select Dropdown */
+        select {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 0.5rem;
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+        }
+
+        select:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Chart Container */
+        #price-chart {
+            height: 400px;
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+
+        /* Agent Tabs */
+        .agent-tabs {
+            display: flex;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+
+        .agent-tab {
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .agent-tab:hover {
+            color: var(--text-primary);
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        .agent-tab.active {
+            color: var(--accent-primary);
+            border-bottom-color: var(--accent-primary);
+        }
+
+        .agent-tab svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        /* Agent Log Timeline */
+        .timeline-entry {
+            display: flex;
+            gap: 1rem;
+            padding: 0.75rem;
+            border-left: 2px solid var(--border);
+            margin-left: 1rem;
+            transition: all 0.2s;
+        }
+
+        .timeline-entry:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+            border-left-color: var(--accent-primary);
+        }
+
+        .timeline-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--accent-primary);
+            margin-top: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        /* Source Badge */
+        .source-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .source-badge.mt5 {
+            background-color: rgba(0, 255, 136, 0.2);
+            color: var(--color-win);
+        }
+
+        .source-badge.tv {
+            background-color: rgba(100, 149, 237, 0.2);
+            color: #6495ED;
+        }
+
+        .source-badge.yfinance {
+            background-color: rgba(0, 170, 255, 0.2);
+            color: #00aaff;
+        }
+
+        .source-badge.auto {
+            background-color: rgba(255, 170, 0, 0.2);
+            color: var(--color-pending);
+        }
+
+        /* ========================================
+           TRADING FLOOR LAYOUT - Anime Style
+           ======================================== */
+
+        .trading-floor {
+            background: #0a0a0a;
+            padding: 0;
+        }
+
+        .floor-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #00ff88;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 2px;
+            margin-bottom: 24px;
+            padding: 12px 16px;
+            background: rgba(0, 255, 136, 0.05);
+            border-left: 3px solid #00ff88;
+        }
+
+        .floor-status-dot {
+            width: 8px;
+            height: 8px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .floor-section {
+            margin-bottom: 32px;
+        }
+
+        .section-label {
+            font-size: 10px;
+            color: #666;
+            letter-spacing: 2px;
+            font-family: 'Courier New', monospace;
+            margin-bottom: 12px;
+            padding-left: 4px;
+            text-transform: uppercase;
+        }
+
+        /* Head Office Card */
+        .head-office-card {
+            display: flex;
+            gap: 24px;
+            align-items: center;
+            background: linear-gradient(135deg, color-mix(in srgb, var(--agent-color) 8%, #111), #111);
+            border: 1px solid color-mix(in srgb, var(--agent-color) 25%, transparent);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 16px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .head-office-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--agent-color), transparent);
+            opacity: 0.5;
+        }
+
+        .agent-char-large {
+            width: 140px;
+            height: 196px;
+            flex-shrink: 0;
+            filter: drop-shadow(0 8px 24px color-mix(in srgb, var(--agent-color) 30%, transparent));
+        }
+
+        .agent-char-large img,
+        .agent-char-large svg {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .agent-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .agent-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .agent-header h2 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--agent-color);
+            margin: 0;
+        }
+
+        .agent-role {
+            font-size: 0.875rem;
+            color: #888;
+            font-family: 'Courier New', monospace;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .agent-desc {
+            font-size: 0.875rem;
+            color: #aaa;
+            line-height: 1.5;
+            margin: 4px 0;
+        }
+
+        .agent-footer {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+
+        .agent-stats {
+            display: flex;
+            gap: 12px;
+            font-size: 0.75rem;
+            color: #666;
+            font-family: 'Courier New', monospace;
+        }
+
+        .agent-stats span {
+            padding: 4px 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+        }
+
+        /* Desk Grid */
+        .desk-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .desk-card {
+            background: color-mix(in srgb, var(--agent-color) 6%, #111);
+            border: 1px solid color-mix(in srgb, var(--agent-color) 20%, transparent);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .desk-card:hover {
+            border-color: var(--agent-color);
+            transform: translateY(-2px);
+        }
+
+        .desk-label {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            font-size: 8px;
+            color: #444;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .agent-char-medium {
+            width: 100px;
+            height: 140px;
+            filter: drop-shadow(0 4px 12px color-mix(in srgb, var(--agent-color) 20%, transparent));
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+
+        .agent-char-medium img,
+        .agent-char-medium svg {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .desk-card h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--agent-color);
+            margin: 0;
+            text-align: center;
+        }
+
+        /* Model badges */
+        .model-badge {
+            font-size: 9px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .model-badge.haiku {
+            background: #332200;
+            color: #ffaa00;
+            border: 1px solid #ffaa0040;
+        }
+
+        .model-badge.sonnet {
+            background: #001133;
+            color: #00aaff;
+            border: 1px solid #00aaff40;
+        }
+
+        .model-badge.python {
+            background: #222;
+            color: #888;
+            border: 1px solid #44444440;
+        }
+
+        /* Status */
+        .status-online {
+            color: #00ff88;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .status-standby {
+            color: #ffaa00;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .status-offline {
+            color: #555;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Configure button */
+        .configure-btn {
+            background: transparent;
+            border: 1px solid #333;
+            color: #666;
+            font-size: 10px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            padding: 4px 12px;
+            border-radius: 4px;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .configure-btn:hover {
+            color: var(--agent-color);
+            border-color: var(--agent-color);
+            background: color-mix(in srgb, var(--agent-color) 10%, transparent);
+        }
+
+        /* Support grid */
+        .support-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 16px;
+        }
+
+        .support-card {
+            background: color-mix(in srgb, var(--agent-color) 5%, #111);
+            border: 1px solid color-mix(in srgb, var(--agent-color) 15%, transparent);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+
+        .support-card:hover {
+            border-color: var(--agent-color);
+        }
+    </style>
+</head>
+<body x-data="dashboard()" x-init="init()" x-cloak>
+
+    <div class="flex h-screen">
+        <!-- SIDEBAR -->
+        <aside class="sidebar w-64 flex-shrink-0 flex flex-col">
+            <!-- Logo -->
+            <div class="p-6 border-b border-gray-800">
+                <div class="flex items-center space-x-2">
+                    <div x-html="Icons.agent()" class="text-accent"></div>
+                    <div>
+                        <h1 class="text-lg font-bold text-accent">XAUUSD Bot</h1>
+                        <p class="text-xs text-muted">Phase I v2.1</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Navigation -->
+            <nav class="flex-1 py-4">
+                <div class="text-xs font-semibold text-muted px-6 mb-2 uppercase tracking-wider">Overview</div>
+                <div class="nav-item" :class="{'active': currentPage === 'dashboard'}" @click="currentPage = 'dashboard'">
+                    <span x-html="Icons.dashboard()"></span> Dashboard
+                </div>
+
+                <div class="text-xs font-semibold text-muted px-6 mt-6 mb-2 uppercase tracking-wider">Trading</div>
+                <div class="nav-item" :class="{'active': currentPage === 'chart'}" @click="currentPage = 'chart'">
+                    <span x-html="Icons.chart()"></span> Price Chart
+                </div>
+                <div class="nav-item" :class="{'active': currentPage === 'history'}" @click="currentPage = 'history'">
+                    <span x-html="Icons.history()"></span> Trade History
+                </div>
+
+                <div class="text-xs font-semibold text-muted px-6 mt-6 mb-2 uppercase tracking-wider">System</div>
+                <div class="nav-item" :class="{'active': currentPage === 'agents'}" @click="currentPage = 'agents'">
+                    <span x-html="Icons.agent()"></span> Agent Activity
+                </div>
+                <div class="nav-item" :class="{'active': currentPage === 'log'}" @click="currentPage = 'log'">
+                    <span x-html="Icons.log()"></span> System Log
+                </div>
+                <div class="nav-item" :class="{'active': currentPage === 'proposals'}" @click="currentPage = 'proposals'">
+                    <span x-html="Icons.bulb()"></span> Proposals
+                    <span x-show="state.proposals && state.proposals.length > 0"
+                          class="ml-2 px-2 py-0.5 text-xs rounded-full bg-yellow-500 text-black font-bold"
+                          x-text="state.proposals.length"></span>
+                </div>
+                <div class="nav-item" :class="{'active': currentPage === 'settings'}" @click="currentPage = 'settings'">
+                    <span x-html="Icons.settings()"></span> Settings
+                </div>
+            </nav>
+
+            <!-- Status Footer -->
+            <div class="p-6 border-t border-gray-800">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center">
+                        <span class="status-dot"
+                              :class="{
+                                  'status-running': state.status === 'running',
+                                  'status-stopped': state.status === 'stopped',
+                                  'status-error': state.status === 'error'
+                              }"></span>
+                        <span class="text-sm font-semibold" x-text="state.status === 'running' ? 'Live' : 'Offline'"></span>
+                    </div>
+                    <span class="text-xs text-muted">v1.0</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <main class="flex-1 overflow-y-auto">
+
+            <!-- TOP BAR -->
+            <div class="card m-6 mb-4">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-4">
+                        <!-- Mode Selector -->
+                        <div>
+                            <div class="text-xs text-muted uppercase mb-1">Mode</div>
+                            <select x-model="selectedMode" :disabled="state.status === 'running'" class="text-sm">
+                                <option value="paper">Paper Trade (Simulate)</option>
+                                <option value="micro">Cent Account (XAUUSDm)</option>
+                                <option value="live">Real Account (XAUUSD)</option>
+                            </select>
+                        </div>
+
+                        <!-- Mode Badge -->
+                        <div class="flex items-center">
+                            <div x-show="selectedMode === 'paper'" x-html="Icons.paper()" class="icon-lg"></div>
+                            <div x-show="selectedMode === 'micro'" x-html="Icons.micro()" class="icon-lg"></div>
+                            <div x-show="selectedMode === 'live'" x-html="Icons.live()" class="icon-lg"></div>
+                        </div>
+
+                        <!-- Symbol Selector (hidden for paper mode) -->
+                        <div x-show="selectedMode !== 'paper'">
+                            <div class="text-xs text-muted uppercase mb-1">Symbol</div>
+                            <select x-model="selectedSymbol" :disabled="state.status === 'running'" class="text-sm">
+                                <option value="XAUUSDm">Gold - Cent (Test)</option>
+                                <option value="XAUUSD">Gold - Real</option>
+                            </select>
+                        </div>
+
+                        <!-- TF Selector -->
+                        <div>
+                            <div class="text-xs text-muted uppercase mb-1">Timeframe</div>
+                            <select x-model="selectedTF" :disabled="state.status === 'running'" class="text-sm">
+                                <option value="M1">M1</option>
+                                <option value="M5">M5</option>
+                                <option value="M15">M15</option>
+                                <option value="M30">M30</option>
+                                <option value="H1">H1</option>
+                                <option value="H4">H4</option>
+                            </select>
+                        </div>
+
+                        <!-- Data Source Selector -->
+                        <div>
+                            <div class="text-xs text-muted uppercase mb-1">Data Source</div>
+                            <select x-model="selectedDataSource" @change="updateDataSource()" :disabled="state.status === 'running'" class="text-sm">
+                                <option value="auto">Auto Detect</option>
+                                <option value="mt5">MetaTrader 5</option>
+                                <option value="tv">TradingView</option>
+                            </select>
+                        </div>
+
+                        <!-- Control Buttons -->
+                        <div class="flex space-x-2 ml-4">
+                            <button @click="startBot()" :disabled="state.status === 'running'" class="btn btn-start flex items-center gap-2">
+                                <span x-html="Icons.play()" class="icon-sm"></span> Start
+                            </button>
+                            <button @click="stopBot()" :disabled="state.status !== 'running'" class="btn btn-stop flex items-center gap-2">
+                                <span x-html="Icons.pause()" class="icon-sm"></span> Stop
+                            </button>
+                            <button @click="emergencyStop()" class="btn btn-emergency flex items-center justify-center" title="Emergency Stop">
+                                <span x-html="Icons.emergency()" class="icon"></span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center space-x-6">
+                        <!-- Data Source Badge -->
+                        <div>
+                            <div class="text-xs text-muted uppercase mb-1">Source</div>
+                            <span class="source-badge flex items-center gap-1"
+                                  :class="{
+                                      'mt5': state.data_source_actual === 'MT5',
+                                      'tv': state.data_source_actual === 'TradingView',
+                                      'yfinance': state.data_source_actual === 'yfinance',
+                                      'auto': state.data_source_mode === 'auto'
+                                  }">
+                                <span x-show="state.data_source_actual === 'MT5'" class="flex items-center gap-1">
+                                    <span x-html="Icons.mt5()" class="icon-sm"></span> MT5
+                                </span>
+                                <span x-show="state.data_source_actual === 'TradingView'" class="flex items-center gap-1">
+                                    <span x-html="Icons.tv()" class="icon-sm"></span> TV
+                                </span>
+                                <span x-show="state.data_source_actual === 'yfinance'" class="flex items-center gap-1">
+                                    <span x-html="Icons.yfinance()" class="icon-sm"></span> yfinance
+                                </span>
+                                <span x-show="!state.data_source_actual && state.data_source_mode === 'auto'" class="flex items-center gap-1">
+                                    <span x-html="Icons.auto()" class="icon-sm"></span> Auto
+                                </span>
+                            </span>
+                        </div>
+
+                        <!-- Status -->
+                        <div>
+                            <div class="text-xs text-muted uppercase">Status</div>
+                            <div class="text-sm font-bold uppercase"
+                                 :class="{
+                                     'text-win': state.status === 'running',
+                                     'text-muted': state.status === 'stopped',
+                                     'text-loss': state.status === 'error'
+                                 }"
+                                 x-text="state.status"></div>
+                        </div>
+
+                        <!-- Balance -->
+                        <div>
+                            <div class="text-xs text-muted uppercase">Balance</div>
+                            <div class="text-lg font-bold mono text-accent" x-text="'$' + state.balance.toFixed(2)"></div>
+                        </div>
+
+                        <!-- Time -->
+                        <div>
+                            <div class="text-xs text-muted uppercase">Time</div>
+                            <div class="text-sm mono" x-text="currentTime"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DASHBOARD PAGE -->
+            <div x-show="currentPage === 'dashboard'">
+                <!-- METRIC CARDS -->
+                <div class="grid grid-cols-4 gap-4 mx-6 mb-6">
+                    <!-- Daily P&L -->
+                    <div class="metric-card">
+                        <div class="text-xs text-muted uppercase mb-2">Daily P&L</div>
+                        <div class="text-2xl font-bold mono mb-1"
+                             :class="state.daily_pnl >= 0 ? 'text-win' : 'text-loss'"
+                             x-text="(state.daily_pnl >= 0 ? '+' : '') + '$' + state.daily_pnl.toFixed(2)"></div>
+                        <div class="text-xs text-muted">
+                            <span class="text-win" x-text="state.win + 'W'"></span> /
+                            <span class="text-loss" x-text="state.loss + 'L'"></span>
+                        </div>
+                    </div>
+
+                    <!-- Win Rate -->
+                    <div class="metric-card">
+                        <div class="text-xs text-muted uppercase mb-2">Win Rate</div>
+                        <div class="text-2xl font-bold mono mb-1"
+                             :class="winRate >= 50 ? 'text-win' : 'text-loss'"
+                             x-text="winRate + '%'"></div>
+                        <div class="text-xs text-muted" x-text="(state.win + state.loss) + ' trades'"></div>
+                    </div>
+
+                    <!-- Open Positions -->
+                    <div class="metric-card">
+                        <div class="text-xs text-muted uppercase mb-2">Open Positions</div>
+                        <div class="text-2xl font-bold mono mb-1" x-text="state.open_orders.length"></div>
+                        <div class="text-xs text-muted" x-text="state.active_plan_id || 'No active plan'"></div>
+                    </div>
+
+                    <!-- Consecutive Loss -->
+                    <div class="metric-card">
+                        <div class="text-xs text-muted uppercase mb-2">Consecutive Loss</div>
+                        <div class="text-2xl font-bold mono mb-1"
+                             :class="state.consecutive_loss >= 3 ? 'text-loss' : 'text-muted'"
+                             x-text="state.consecutive_loss"></div>
+                        <div class="text-xs text-muted">Max: 3</div>
+                    </div>
+                </div>
+
+                <!-- TWO COLUMNS: Orders + Decision -->
+                <div class="grid grid-cols-2 gap-6 mx-6 mb-6">
+                    <!-- Open Orders -->
+                    <div class="card">
+                        <h2 class="text-lg font-bold mb-4 text-accent flex items-center gap-2">
+                            <span x-html="Icons.chart()" class="icon"></span> Open Orders
+                        </h2>
+
+                        <template x-if="state.open_orders.length === 0">
+                            <p class="text-sm text-muted italic">No open orders</p>
+                        </template>
+
+                        <template x-if="state.open_orders.length > 0">
+                            <div>
+                                <template x-for="order in state.open_orders" :key="order.trade_id">
+                                    <div class="mb-4 p-3 rounded" style="background-color: rgba(255,255,255,0.03); border: 1px solid var(--border);">
+                                        <div class="flex items-center justify-between mb-2">
+                                            <span class="badge" :class="order.action === 'BUY' ? 'badge-buy' : 'badge-sell'" x-text="order.action"></span>
+                                            <span class="text-xs text-muted mono" x-text="'Lot: ' + (order.lot_size || order.lot)"></span>
+                                        </div>
+                                        <div class="grid grid-cols-3 gap-2 text-xs mb-2">
+                                            <div>
+                                                <div class="text-muted">Entry</div>
+                                                <div class="mono font-bold" x-text="(order.entry_price || order.entry).toFixed(2)"></div>
+                                            </div>
+                                            <div>
+                                                <div class="text-muted">SL</div>
+                                                <div class="mono font-bold text-loss" x-text="(order.sl_price || order.sl).toFixed(2)"></div>
+                                            </div>
+                                            <div>
+                                                <div class="text-muted">TP</div>
+                                                <div class="mono font-bold text-win" x-text="(order.tp_price || order.tp).toFixed(2)"></div>
+                                            </div>
+                                        </div>
+                                        <div class="text-sm font-bold"
+                                             :class="calcUnrealizedPnLRaw(order) >= 0 ? 'text-win' : 'text-loss'">
+                                            P&L: <span x-text="calcUnrealizedPnL(order)"></span>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+
+                    <!-- Last Decision -->
+                    <div class="card">
+                        <h2 class="text-lg font-bold mb-4 text-accent flex items-center gap-2">
+                            <span x-html="Icons.agent()" class="icon"></span> Last Decision
+                        </h2>
+
+                        <template x-if="Object.keys(state.last_decision).length === 0">
+                            <p class="text-sm text-muted italic">No decision yet</p>
+                        </template>
+
+                        <template x-if="Object.keys(state.last_decision).length > 0">
+                            <div class="space-y-3">
+                                <!-- Action Badge -->
+                                <div class="flex items-center space-x-2">
+                                    <span class="badge text-lg"
+                                          :class="{
+                                              'badge-buy': state.last_decision.action === 'BUY',
+                                              'badge-sell': state.last_decision.action === 'SELL',
+                                              'badge-skip': state.last_decision.action === 'SKIP'
+                                          }"
+                                          x-text="state.last_decision.action"></span>
+                                    <template x-if="state.last_decision.action !== 'SKIP'">
+                                        <span class="text-2xl" x-text="state.last_decision.action === 'BUY' ? '✅' : '✅'"></span>
+                                    </template>
+                                </div>
+
+                                <!-- Chart Info -->
+                                <div class="grid grid-cols-2 gap-2 text-xs">
+                                    <div>
+                                        <div class="text-muted uppercase">Chart</div>
+                                        <div class="font-bold" x-text="state.last_decision.chart_type || 'N/A'"></div>
+                                    </div>
+                                    <div>
+                                        <div class="text-muted uppercase">Technique</div>
+                                        <div class="font-bold" x-text="state.last_decision.technique || 'N/A'"></div>
+                                    </div>
+                                </div>
+
+                                <!-- Entry/SL/TP -->
+                                <template x-if="state.last_decision.entry">
+                                    <div class="grid grid-cols-3 gap-2 text-xs">
+                                        <div>
+                                            <div class="text-muted">Entry</div>
+                                            <div class="mono font-bold" x-text="state.last_decision.entry?.toFixed(2)"></div>
+                                        </div>
+                                        <div>
+                                            <div class="text-muted">SL</div>
+                                            <div class="mono font-bold text-loss" x-text="state.last_decision.sl?.toFixed(2)"></div>
+                                        </div>
+                                        <div>
+                                            <div class="text-muted">TP</div>
+                                            <div class="mono font-bold text-win" x-text="state.last_decision.tp?.toFixed(2)"></div>
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <!-- Confidence, R:R, Beauty Score -->
+                                <template x-if="state.last_decision.confidence || state.last_decision.rr_ratio || state.last_decision.beauty_score_used">
+                                    <div class="grid grid-cols-3 gap-2 text-xs">
+                                        <template x-if="state.last_decision.confidence">
+                                            <div>
+                                                <div class="text-muted">Confidence</div>
+                                                <div class="font-bold" x-text="(state.last_decision.confidence * 100).toFixed(0) + '%'"></div>
+                                            </div>
+                                        </template>
+                                        <template x-if="state.last_decision.rr_ratio">
+                                            <div>
+                                                <div class="text-muted">R:R Ratio</div>
+                                                <div class="font-bold" x-text="state.last_decision.rr_ratio?.toFixed(1)"></div>
+                                            </div>
+                                        </template>
+                                        <template x-if="state.last_decision.beauty_score_used">
+                                            <div>
+                                                <div class="text-muted">Beauty 💎</div>
+                                                <div class="font-bold"
+                                                     :class="{
+                                                         'text-win': state.last_decision.beauty_score_used >= 90,
+                                                         'text-pending': state.last_decision.beauty_score_used >= 80 && state.last_decision.beauty_score_used < 90,
+                                                         'text-loss': state.last_decision.beauty_score_used < 80
+                                                     }"
+                                                     x-text="state.last_decision.beauty_score_used"></div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <!-- Reason -->
+                                <div class="pt-2 border-t border-gray-800">
+                                    <div class="text-xs text-muted uppercase mb-1">Reason</div>
+                                    <div class="text-sm" x-text="state.last_decision.reason || state.last_decision.skip_reason || 'N/A'"></div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- LIVE LOG -->
+                <div class="card mx-6 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-lg font-bold text-accent flex items-center gap-2">
+                            <span x-html="Icons.log()" class="icon"></span> Live Log
+                        </h2>
+                        <button @click="clearLogs()" class="text-xs text-muted hover:text-accent uppercase">Clear</button>
+                    </div>
+
+                    <div class="log-container">
+                        <template x-if="state.logs.length === 0">
+                            <div class="text-muted text-sm">No logs yet...</div>
+                        </template>
+
+                        <template x-if="state.logs.length > 0">
+                            <div>
+                                <template x-for="(log, index) in state.logs.slice().reverse()" :key="index">
+                                    <div class="log-entry" x-text="log"></div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Performance Reflection -->
+                <div class="card mx-6 mb-6" style="background-color: rgba(0, 100, 255, 0.05); border-color: rgba(0, 100, 255, 0.3);">
+                    <h2 class="text-sm font-bold mb-2" style="color: #5599ff;">💭 Performance Reflection</h2>
+                    <p class="text-sm mono" x-text="state.last_reflection"></p>
+                </div>
+            </div>
+
+            <!-- PRICE CHART PAGE -->
+            <div x-show="currentPage === 'chart'" class="mx-6 mb-6">
+                <div class="card">
+                    <h2 class="text-xl font-bold mb-4 text-accent flex items-center gap-2">
+                        <span x-html="Icons.chart()" class="icon-lg"></span> XAUUSD Price Chart
+                    </h2>
+
+                    <!-- Chart Container -->
+                    <div id="price-chart"></div>
+
+                    <p class="text-xs text-muted mt-4">Real-time M5 OHLC data with order lines (Entry/SL/TP)</p>
+                </div>
+            </div>
+
+            <!-- AGENT ACTIVITY PAGE - TRADING FLOOR LAYOUT -->
+            <div x-show="currentPage === 'agents'" class="mx-6 mb-6">
+                <div class="card">
+                    <div class="trading-floor">
+                        <!-- Header bar -->
+                        <div class="floor-header">
+                            <span class="floor-status-dot"></span>
+                            TRADING FLOOR — ACTIVE
+                            <div style="margin-left: auto;">
+                                <button @click="fetchAgentLogs()" class="text-xs text-muted hover:text-accent uppercase" style="background: none; border: none; cursor: pointer;">Refresh</button>
+                            </div>
+                        </div>
+
+                        <!-- Head Office -->
+                        <section class="floor-section">
+                            <div class="section-label">
+                                🏢 HEAD OFFICE — EXECUTIVE SUITE
+                            </div>
+                            <div class="head-office-card" style="--agent-color: #00ff88">
+                                <div class="agent-char-large">
+                                    <img src="/static/agents/analyst.svg" alt="Analyst Agent" />
+                                </div>
+                                <div class="agent-info">
+                                    <div class="agent-header">
+                                        <h2>Analyst Agent</h2>
+                                        <span class="model-badge sonnet">Sonnet</span>
+                                    </div>
+                                    <div class="agent-role">Head Trader</div>
+                                    <p class="agent-desc">
+                                        วิเคราะห์กราฟและตัดสินใจเทรด ประเมิน pattern และ setup คุณภาพสูง
+                                    </p>
+                                    <div class="agent-footer">
+                                        <span class="status-online">● ONLINE</span>
+                                        <div class="agent-stats">
+                                            <span x-text="'$' + getAgentCost('analyst').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('analyst') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'analyst'">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- Analysis Room -->
+                        <section class="floor-section">
+                            <div class="section-label">
+                                📊 ANALYSIS ROOM
+                            </div>
+                            <div class="desk-grid">
+                                <!-- Desk 01: Risk Manager -->
+                                <div class="desk-card" style="--agent-color: #ffaa00">
+                                    <div class="desk-label">DESK 01</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/risk_manager.svg" alt="Risk Manager" />
+                                    </div>
+                                    <h3>Risk Manager</h3>
+                                    <div class="agent-role">Risk Analyst</div>
+                                    <span class="model-badge haiku">Haiku</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        บริหารความเสี่ยง Position Sizing SL/TP
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-online">● ONLINE</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('risk_manager').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('risk_manager') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'risk_manager'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Desk 02: Weekly Coach -->
+                                <div class="desk-card" style="--agent-color: #00aaff">
+                                    <div class="desk-label">DESK 02</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/weekly.svg" alt="Weekly Coach" />
+                                    </div>
+                                    <h3>Weekly Coach</h3>
+                                    <div class="agent-role">Performance Analyst</div>
+                                    <span class="model-badge sonnet">Sonnet</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        วิเคราะห์ผลรายสัปดาห์ ปรับกลยุทธ์
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-standby">● STANDBY</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('weekly').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('weekly') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'weekly'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Desk 03: Reflector -->
+                                <div class="desk-card" style="--agent-color: #888888">
+                                    <div class="desk-label">DESK 03</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/reflector.svg" alt="Reflector" />
+                                    </div>
+                                    <h3>Reflector</h3>
+                                    <div class="agent-role">Trade Reviewer</div>
+                                    <span class="model-badge python">Python</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        บันทึกและทบทวน trade ที่ผ่านมา
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-online">● ONLINE</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('reflector').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('reflector') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'reflector'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- Support Desks -->
+                        <section class="floor-section">
+                            <div class="section-label">
+                                🔬 SUPPORT DESKS
+                            </div>
+                            <div class="support-grid">
+                                <!-- Monthly Strategist -->
+                                <div class="support-card" style="--agent-color: #aa00ff">
+                                    <div class="desk-label">LAB — OPTIMIZATION</div>
+                                    <div class="agent-char-medium">
+                                        <img src="/static/agents/monthly.svg" alt="Monthly Strategist" />
+                                    </div>
+                                    <h3>Monthly Strategist</h3>
+                                    <div class="agent-role">Strategy Researcher</div>
+                                    <span class="model-badge sonnet">Sonnet</span>
+                                    <p style="font-size: 0.75rem; color: #777; text-align: center; margin: 8px 0;">
+                                        วิจัยและพัฒนา strategy รายเดือน
+                                    </p>
+                                    <div class="agent-footer" style="flex-direction: column; width: 100%;">
+                                        <span class="status-standby">● STANDBY</span>
+                                        <div class="agent-stats" style="justify-content: center;">
+                                            <span x-text="'$' + getAgentCost('monthly').toFixed(4)"></span>
+                                            <span x-text="getAgentCount('monthly') + ' calls'"></span>
+                                        </div>
+                                        <button class="configure-btn" @click="selectedAgent = 'monthly'" style="width: 100%;">
+                                            View Logs →
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- Agent Activity Log (Modal/Overlay when clicked) -->
+                        <section class="floor-section" x-show="selectedAgent" style="margin-top: 32px;">
+                            <div class="section-label" x-text="'📋 ACTIVITY LOG — ' + selectedAgent.toUpperCase().replace('_', ' ')"></div>
+                            <div class="card" style="background: #111; border: 1px solid #222;">
+                                <div class="space-y-0">
+                                    <template x-if="getAgentLogs(selectedAgent).length === 0">
+                                        <div class="text-center py-12">
+                                            <div class="text-4xl mb-2" x-html="getAgentEmoji(selectedAgent)"></div>
+                                            <div class="text-muted">No activity yet</div>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="getAgentLogs(selectedAgent).length > 0">
+                                        <div>
+                                            <template x-for="(log, index) in getAgentLogs(selectedAgent)" :key="index">
+                                                <div class="timeline-entry">
+                                                    <div class="timeline-dot"></div>
+                                                    <div class="flex-1">
+                                                        <div class="flex items-center justify-between mb-1">
+                                                            <span class="badge text-xs"
+                                                                  :class="{
+                                                                      'badge-buy': log.action === 'BUY',
+                                                                      'badge-sell': log.action === 'SELL',
+                                                                      'badge-skip': log.action === 'SKIP' || log.action === 'ANALYZE' || log.action === 'EVOLVE' || log.action === 'REFLECT'
+                                                                  }"
+                                                                  x-text="log.action"></span>
+                                                            <span class="text-xs text-muted mono" x-text="log.timestamp"></span>
+                                                        </div>
+                                                        <div class="text-sm mb-2" x-text="log.reason"></div>
+                                                        <div class="grid grid-cols-4 gap-2 text-xs">
+                                                            <div>
+                                                                <span class="text-muted">Cost:</span>
+                                                                <span class="mono font-bold text-accent" x-text="'$' + (log.cost_usd || 0).toFixed(4)"></span>
+                                                            </div>
+                                                            <div>
+                                                                <span class="text-muted">Tokens:</span>
+                                                                <span class="mono" x-text="((log.tokens?.input || 0) + (log.tokens?.output || 0))"></span>
+                                                            </div>
+                                                            <div>
+                                                                <span class="text-muted">Latency:</span>
+                                                                <span class="mono" x-text="(log.latency_sec || 0) + 's'"></span>
+                                                            </div>
+                                                            <div>
+                                                                <span class="text-muted">Model:</span>
+                                                                <span class="text-xs" x-text="log.model?.replace('claude-sonnet-4-20250514', 'Sonnet 4')"></span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TRADE HISTORY PAGE -->
+            <div x-show="currentPage === 'history'" class="mx-6 mb-6">
+                <div class="card">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-xl font-bold text-accent flex items-center gap-2">
+                            <span x-html="Icons.history()" class="icon-lg"></span> Trade History
+                        </h2>
+                        <div class="flex items-center gap-2">
+                            <span class="source-badge flex items-center gap-1" :class="historySource === 'sheets' ? 'mt5' : 'auto'">
+                                <span x-show="historySource === 'sheets'" class="flex items-center gap-1">
+                                    <span x-html="Icons.dashboard()" class="icon-sm"></span> Sheets
+                                </span>
+                                <span x-show="historySource === 'memory'">💾 Memory</span>
+                            </span>
+                            <button @click="fetchHistory()" class="text-xs text-muted hover:text-accent uppercase">Refresh</button>
+                        </div>
+                    </div>
+
+                    <template x-if="!historyRecords || historyRecords.length === 0">
+                        <div class="text-center py-12">
+                            <div class="mb-4 flex justify-center">
+                                <div x-html="Icons.history()" style="width: 4rem; height: 4rem; opacity: 0.3;"></div>
+                            </div>
+                            <div class="text-muted">No trade history yet</div>
+                            <div class="text-xs text-muted mt-2">Trades will appear here once logged</div>
+                        </div>
+                    </template>
+
+                    <template x-if="historyRecords && historyRecords.length > 0">
+                        <table class="table-dark">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Action</th>
+                                    <th>Lot</th>
+                                    <th>Entry</th>
+                                    <th>SL</th>
+                                    <th>TP</th>
+                                    <th>Result</th>
+                                    <th>P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="(trade, index) in historyRecords" :key="index">
+                                    <tr>
+                                        <td class="mono text-xs" x-text="trade.timestamp_open || trade.time"></td>
+                                        <td>
+                                            <span class="badge"
+                                                  :class="trade.action === 'BUY' ? 'badge-buy' : 'badge-sell'"
+                                                  x-text="trade.action"></span>
+                                        </td>
+                                        <td class="mono" x-text="trade.lot"></td>
+                                        <td class="mono" x-text="trade.entry"></td>
+                                        <td class="mono text-loss" x-text="trade.sl"></td>
+                                        <td class="mono text-win" x-text="trade.tp"></td>
+                                        <td>
+                                            <span class="badge text-xs"
+                                                  :class="{
+                                                      'badge-buy': trade.result === 'WIN',
+                                                      'badge-sell': trade.result === 'LOSS',
+                                                      'badge-skip': trade.result === 'PENDING'
+                                                  }"
+                                                  x-text="trade.result"></span>
+                                        </td>
+                                        <td class="mono font-bold"
+                                            :class="{
+                                                'text-win': parseFloat(trade.pnl) > 0,
+                                                'text-loss': parseFloat(trade.pnl) < 0,
+                                                'text-pending': parseFloat(trade.pnl) === 0
+                                            }"
+                                            x-text="trade.pnl ? '$' + parseFloat(trade.pnl).toFixed(2) : '-'"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                </div>
+            </div>
+
+            <!-- AGENT LOG PAGE -->
+            <div x-show="currentPage === 'log'" class="mx-6 mb-6">
+                <div class="card">
+                    <h2 class="text-xl font-bold mb-4 text-accent flex items-center gap-2">
+                        <span x-html="Icons.log()" class="icon-lg"></span> Agent Log (Full)
+                    </h2>
+
+                    <div class="log-container" style="height: 500px;">
+                        <template x-if="state.logs.length === 0">
+                            <div class="text-muted text-sm">No logs yet...</div>
+                        </template>
+
+                        <template x-if="state.logs.length > 0">
+                            <div>
+                                <template x-for="(log, index) in state.logs.slice().reverse()" :key="index">
+                                    <div class="log-entry" x-text="log"></div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SETTINGS PAGE -->
+            <div x-show="currentPage === 'settings'" class="mx-6 mb-6">
+                <div class="card">
+                    <h2 class="text-xl font-bold mb-4 text-accent flex items-center gap-2">
+                        <span x-html="Icons.settings()" class="icon-lg"></span> Settings
+                    </h2>
+
+                    <div class="space-y-4">
+                        <div>
+                            <div class="text-sm font-semibold mb-2">Trading Timeframe</div>
+                            <div class="text-sm text-muted mb-2">Current: <span class="text-accent" x-text="state.trading_tf"></span></div>
+                            <p class="text-xs text-muted">Change timeframe from the top bar before starting the bot</p>
+                        </div>
+
+                        <div class="border-t border-gray-800 pt-4">
+                            <div class="text-sm font-semibold mb-2">System Info</div>
+                            <div class="text-xs text-muted space-y-1">
+                                <div>Version: Phase I v4.3 (4-Agent + Reflector)</div>
+                                <div class="flex items-center gap-1">
+                                    Data Source:
+                                    <span x-show="state.data_source_actual === 'MT5'" class="flex items-center gap-1">
+                                        <span x-html="Icons.mt5()" class="icon-sm"></span> MT5 Terminal
+                                    </span>
+                                    <span x-show="state.data_source_actual === 'TradingView'" class="flex items-center gap-1">
+                                        <span x-html="Icons.tv()" class="icon-sm"></span> TradingView
+                                    </span>
+                                    <span x-show="state.data_source_actual === 'yfinance'" class="flex items-center gap-1">
+                                        <span x-html="Icons.yfinance()" class="icon-sm"></span> yfinance
+                                    </span>
+                                </div>
+                                <div>API Server: http://127.0.0.1:8080</div>
+                                <div>WebSocket: Connected</div>
+                                <div>Last Updated: <span x-text="new Date(state.last_updated).toLocaleString()"></span></div>
+                            </div>
+                        </div>
+
+                        <div class="border-t border-gray-800 pt-4">
+                            <div class="text-sm font-semibold mb-2 text-loss flex items-center gap-2">
+                                <span x-html="Icons.emergency()" class="icon"></span> Danger Zone
+                            </div>
+                            <button @click="emergencyStop()" class="btn btn-emergency flex items-center justify-center gap-2">
+                                <span x-html="Icons.emergency()" class="icon"></span> Emergency Stop All Positions
+                            </button>
+                            <p class="text-xs text-muted mt-2">This will immediately stop the bot and close all open positions</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PROPOSALS PAGE (V4.3) -->
+            <div x-show="currentPage === 'proposals'" class="mx-6 mb-6">
+                <div class="card">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-xl font-bold text-accent flex items-center gap-2">
+                            <span x-html="Icons.bulb()" class="icon-lg"></span> Monthly Evolver Proposals
+                        </h2>
+                        <button @click="clearProposals()"
+                                x-show="state.proposals && state.proposals.length > 0"
+                                class="btn btn-stop text-xs">
+                            Clear All
+                        </button>
+                    </div>
+
+                    <div class="text-sm text-muted mb-4">
+                        Proposals from Monthly Evolver (Agent D) — requires human review before implementation
+                    </div>
+
+                    <template x-if="!state.proposals || state.proposals.length === 0">
+                        <div class="text-center py-12">
+                            <div class="text-6xl mb-4">✨</div>
+                            <div class="text-muted">No proposals yet</div>
+                            <div class="text-xs text-muted mt-2">Monthly Evolver runs every 30 days</div>
+                        </div>
+                    </template>
+
+                    <template x-if="state.proposals && state.proposals.length > 0">
+                        <div class="space-y-4">
+                            <template x-for="(proposal, index) in state.proposals" :key="index">
+                                <div class="card border-l-4"
+                                     :class="{
+                                         'border-accent-primary': proposal.impact === 'high',
+                                         'border-color-pending': proposal.impact === 'medium',
+                                         'border-gray-600': proposal.impact === 'low'
+                                     }">
+                                    <div class="flex items-start justify-between mb-2">
+                                        <div class="flex-1">
+                                            <div class="font-bold text-accent mb-1" x-text="proposal.title"></div>
+                                            <div class="text-sm text-muted mb-2" x-text="proposal.rationale"></div>
+                                        </div>
+                                        <span class="px-2 py-1 text-xs rounded-full"
+                                              :class="{
+                                                  'bg-accent-primary text-black': proposal.impact === 'high',
+                                                  'bg-color-pending text-black': proposal.impact === 'medium',
+                                                  'bg-gray-600 text-white': proposal.impact === 'low'
+                                              }"
+                                              x-text="proposal.impact?.toUpperCase()"></span>
+                                    </div>
+
+                                    <template x-if="proposal.recommendation">
+                                        <div class="mt-2 p-2 bg-gray-900 rounded text-xs">
+                                            <div class="text-muted mb-1">Recommendation:</div>
+                                            <div x-text="proposal.recommendation"></div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Alpine.js Dashboard Script -->
+    <script>
+        function dashboard() {
+            return {
+                // State
+                state: {
+                    status: 'stopped',
+                    mode: 'paper',
+                    symbol: 'XAUUSDm',
+                    trading_tf: 'M5',
+                    data_source: 'TradingView',  // V4.3: MT5 / TradingView (deprecated)
+                    data_source_mode: 'auto',    // auto/mt5/tv (user selected)
+                    data_source_actual: 'TradingView',  // MT5/TradingView (after connect)
+                    current_price: 0,
+                    active_plan_id: '',
+                    open_orders: [],
+                    daily_pnl: 0,
+                    total_pnl: 0,
+                    win: 0,
+                    loss: 0,
+                    consecutive_loss: 0,
+                    last_decision: {},
+                    last_reflection: 'No history yet',
+                    proposals: [],  // V4.3: Monthly Evolver proposals
+                    logs: [],
+                    balance: 0,
+                    last_updated: new Date().toISOString(),
+                    agent_logs: {
+                        analyst: [],
+                        risk_manager: [],
+                        weekly: [],
+                        monthly: [],
+                        reflector: []
+                    },
+                    latest_candle: {}
+                },
+
+                selectedMode: 'paper',
+                selectedSymbol: 'XAUUSDm',
+                selectedTF: 'M5',
+                selectedDataSource: 'auto',
+                selectedAgent: 'analyst',
+                currentPage: 'dashboard',
+                currentTime: '',
+                ws: null,
+                chart: null,
+                candleSeries: null,
+                historyRecords: [],
+                historySource: 'memory',
+                agentCosts: {
+                    analyst: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    risk_manager: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    weekly: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    monthly: { total_cost: 0, calls: 0, model: 'Unknown', avg_cost: 0 },
+                    reflector: { total_cost: 0, calls: 0, model: 'Python', avg_cost: 0 }
+                },
+
+                // Computed
+                get winRate() {
+                    const total = this.state.win + this.state.loss;
+                    if (total === 0) return 0;
+                    return Math.round((this.state.win / total) * 100);
+                },
+
+                // Initialize
+                init() {
+                    console.log('🚀 Dashboard initialized');
+                    this.updateTime();
+                    setInterval(() => this.updateTime(), 1000);
+                    this.connectWebSocket();
+                    this.fetchStatus();
+                    this.fetchAgentLogs();
+                    this.fetchAgentCosts();
+                    this.fetchHistory();
+
+                    // Initialize chart after a short delay
+                    setTimeout(() => {
+                        this.initChart();
+                        this.fetchCandles();
+                    }, 500);
+                },
+
+                initChart() {
+                    const container = document.getElementById('price-chart');
+                    if (!container || !window.LightweightCharts) {
+                        console.error('Chart container or LightweightCharts not found');
+                        return;
+                    }
+
+                    this.chart = LightweightCharts.createChart(container, {
+                        width: container.clientWidth,
+                        height: 400,
+                        layout: {
+                            background: { color: '#0a0a0a' },
+                            textColor: '#888888',
+                        },
+                        grid: {
+                            vertLines: { color: '#1a1a1a' },
+                            horzLines: { color: '#1a1a1a' },
+                        },
+                        timeScale: {
+                            timeVisible: true,
+                            secondsVisible: false,
+                        },
+                    });
+
+                    this.candleSeries = this.chart.addCandlestickSeries({
+                        upColor: '#00ff88',
+                        downColor: '#ff4444',
+                        borderUpColor: '#00ff88',
+                        borderDownColor: '#ff4444',
+                        wickUpColor: '#00ff88',
+                        wickDownColor: '#ff4444',
+                    });
+
+                    // Handle window resize
+                    window.addEventListener('resize', () => {
+                        if (this.chart && container) {
+                            this.chart.resize(container.clientWidth, 400);
+                        }
+                    });
+
+                    console.log('✅ Chart initialized');
+                },
+
+                updateTime() {
+                    const now = new Date();
+                    this.currentTime = now.toLocaleTimeString('en-US', {
+                        hour12: false,
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    }) + ' UTC';
+                },
+
+                // WebSocket connection
+                connectWebSocket() {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+                    console.log('Connecting to WebSocket:', wsUrl);
+
+                    this.ws = new WebSocket(wsUrl);
+
+                    this.ws.onopen = () => {
+                        console.log('✅ WebSocket connected');
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        this.state = { ...this.state, ...data };
+
+                        // Update chart if latest_candle is available
+                        if (data.latest_candle && this.candleSeries && data.latest_candle.time) {
+                            this.candleSeries.update({
+                                time: data.latest_candle.time,
+                                open: data.latest_candle.open,
+                                high: data.latest_candle.high,
+                                low: data.latest_candle.low,
+                                close: data.latest_candle.close
+                            });
+                        }
+                    };
+
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                    };
+
+                    this.ws.onclose = () => {
+                        console.log('WebSocket closed, reconnecting in 3s...');
+                        setTimeout(() => this.connectWebSocket(), 3000);
+                    };
+                },
+
+                // API calls
+                async fetchStatus() {
+                    try {
+                        const response = await fetch('/api/status');
+                        const data = await response.json();
+                        this.state = { ...this.state, ...data };
+                        this.selectedMode = data.mode || 'paper';
+                        this.selectedSymbol = data.symbol || 'XAUUSDm';
+                        this.selectedTF = data.trading_tf;
+                        this.selectedDataSource = data.data_source_mode || 'auto';
+                    } catch (error) {
+                        console.error('Failed to fetch status:', error);
+                    }
+                },
+
+                async fetchAgentLogs() {
+                    try {
+                        const response = await fetch('/api/agent-logs');
+                        const data = await response.json();
+                        this.state.agent_logs = data;
+                    } catch (error) {
+                        console.error('Failed to fetch agent logs:', error);
+                    }
+                },
+
+                async fetchAgentCosts() {
+                    try {
+                        const response = await fetch('/api/agent-costs');
+                        const data = await response.json();
+                        this.agentCosts = data;
+                    } catch (error) {
+                        console.error('Failed to fetch agent costs:', error);
+                    }
+                },
+
+                async fetchHistory() {
+                    try {
+                        const response = await fetch('/api/history');
+                        const data = await response.json();
+                        this.historyRecords = data.trades || [];
+                        this.historySource = data.source || 'none';
+                    } catch (error) {
+                        console.error('Failed to fetch history:', error);
+                        this.historyRecords = [];
+                        this.historySource = 'none';
+                    }
+                },
+
+                async updateDataSource() {
+                    // In future: POST to /api/data-source with selectedDataSource
+                    console.log('Data source changed to:', this.selectedDataSource);
+                },
+
+                async fetchCandles() {
+                    try {
+                        const response = await fetch('/api/candles?limit=100');
+                        const candles = await response.json();
+
+                        if (!this.candleSeries || candles.length === 0) {
+                            console.log('Chart not ready or no candle data');
+                            return;
+                        }
+
+                        // Transform and set data
+                        const chartData = candles.map(c => ({
+                            time: c.time,
+                            open: c.open,
+                            high: c.high,
+                            low: c.low,
+                            close: c.close
+                        }));
+
+                        this.candleSeries.setData(chartData);
+                        console.log(`✅ Loaded ${chartData.length} candles to chart`);
+                    } catch (error) {
+                        console.error('Failed to fetch candles:', error);
+                    }
+                },
+
+                async startBot() {
+                    // Confirm for Real Money modes
+                    if (this.selectedMode === 'micro') {
+                        if (!confirm('⚠️ เทรดด้วยเงินจริง Cent account\n\nยืนยันหรือไม่?')) {
+                            return;
+                        }
+                    } else if (this.selectedMode === 'live') {
+                        if (!confirm('🚨 เทรดด้วยบัญชีจริง XAUUSD (REAL MONEY)\n\nยืนยันหรือไม่?')) {
+                            return;
+                        }
+                    }
+
+                    // Confirm start with selected parameters
+                    const modeLabels = {
+                        'paper': 'Paper Trade (Simulate)',
+                        'micro': 'Cent Account (XAUUSDm)',
+                        'live': 'Real Account (XAUUSD)'
+                    };
+                    const modeLabel = modeLabels[this.selectedMode] || this.selectedMode;
+
+                    // Paper mode doesn't need second confirm
+                    if (this.selectedMode !== 'paper') {
+                        if (!confirm(`Start bot with:\nMode: ${modeLabel}\nTimeframe: ${this.selectedTF}\n\nConfirm?`)) {
+                            return;
+                        }
+                    }
+
+                    try {
+                        const response = await fetch('/api/start', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                mode: this.selectedMode,
+                                tf: this.selectedTF,
+                                symbol: this.selectedSymbol
+                            })
+                        });
+
+                        if (!response.ok) {
+                            const error = await response.json();
+                            alert(`Error: ${error.detail}`);
+                            return;
+                        }
+
+                        const data = await response.json();
+                        console.log('Bot started:', data);
+                        alert(`✅ Bot started\nMode: ${modeLabel}\nTF: ${data.tf}`);
+                    } catch (error) {
+                        console.error('Failed to start bot:', error);
+                        alert('Failed to start bot. Check console for details.');
+                    }
+                },
+
+                async stopBot() {
+                    if (!confirm('Stop bot gracefully?')) return;
+
+                    try {
+                        const response = await fetch('/api/stop', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ reason: 'User requested stop' })
+                        });
+
+                        if (!response.ok) {
+                            const error = await response.json();
+                            alert(`Error: ${error.detail}`);
+                            return;
+                        }
+
+                        const data = await response.json();
+                        console.log('Bot stopped:', data);
+                        alert('Bot stopped gracefully');
+                    } catch (error) {
+                        console.error('Failed to stop bot:', error);
+                        alert('Failed to stop bot. Check console for details.');
+                    }
+                },
+
+                async emergencyStop() {
+                    if (!confirm('🚨 EMERGENCY STOP: This will close all open positions immediately. Are you sure?')) return;
+
+                    try {
+                        const response = await fetch('/api/emergency-stop', {
+                            method: 'POST'
+                        });
+
+                        const data = await response.json();
+                        console.log('Emergency stop:', data);
+                        alert(`Emergency stop executed. ${data.orders_closed} order(s) closed.`);
+                    } catch (error) {
+                        console.error('Failed to emergency stop:', error);
+                        alert('Failed to emergency stop. Check console for details.');
+                    }
+                },
+
+                clearLogs() {
+                    if (confirm('Clear all logs?')) {
+                        this.state.logs = [];
+                    }
+                },
+
+                async clearProposals() {
+                    if (!confirm('Clear all proposals? This cannot be undone.')) return;
+
+                    try {
+                        const response = await fetch('/api/proposals/clear', {
+                            method: 'POST'
+                        });
+
+                        const data = await response.json();
+                        console.log('Proposals cleared:', data);
+                        this.state.proposals = [];
+                    } catch (error) {
+                        console.error('Failed to clear proposals:', error);
+                        alert('Failed to clear proposals. Check console for details.');
+                    }
+                },
+
+                // Helper: Calculate unrealized P&L
+                calcUnrealizedPnL(order) {
+                    const currentPrice = this.state.current_price;
+                    if (!currentPrice) return 'N/A';
+
+                    const entry = order.entry_price || order.entry;
+                    const lot = order.lot_size || order.lot || 0.01;
+
+                    let pnl = 0;
+                    if (order.action === 'BUY') {
+                        pnl = (currentPrice - entry) * lot * 100;
+                    } else if (order.action === 'SELL') {
+                        pnl = (entry - currentPrice) * lot * 100;
+                    }
+
+                    const sign = pnl >= 0 ? '+' : '';
+                    return sign + '$' + pnl.toFixed(2);
+                },
+
+                calcUnrealizedPnLRaw(order) {
+                    const currentPrice = this.state.current_price;
+                    if (!currentPrice) return 0;
+
+                    const entry = order.entry_price || order.entry;
+                    const lot = order.lot_size || order.lot || 0.01;
+
+                    let pnl = 0;
+                    if (order.action === 'BUY') {
+                        pnl = (currentPrice - entry) * lot * 100;
+                    } else if (order.action === 'SELL') {
+                        pnl = (entry - currentPrice) * lot * 100;
+                    }
+
+                    return pnl;
+                },
+
+                // Agent helpers
+                getAgentIcon(agent) {
+                    const icons = {
+                        analyst: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>',
+                        risk_manager: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
+                        weekly: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>',
+                        monthly: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>',
+                        reflector: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>'
+                    };
+                    return icons[agent] || icons.analyst;
+                },
+
+                getAgentIcon(agent) {
+                    // Return SVG avatar from sprite sheet
+                    const iconMap = {
+                        analyst: 'analyst',
+                        risk_manager: 'risk_manager',
+                        weekly: 'weekly',
+                        monthly: 'monthly',
+                        reflector: 'reflector'
+                    };
+                    const iconId = iconMap[agent] || 'agent';
+                    return `<svg class="inline-block" style="width: 1.5rem; height: 1.5rem; vertical-align: middle;"><use href="/static/agent-avatars.svg#${iconId}"></use></svg>`;
+                },
+
+                // Backward compatibility (deprecated)
+                getAgentEmoji(agent) {
+                    return this.getAgentIcon(agent);
+                },
+
+                getAgentLogs(agent) {
+                    return this.state.agent_logs[agent] || [];
+                },
+
+                getAgentCost(agent) {
+                    const agentData = this.agentCosts[agent];
+                    return agentData ? agentData.total_cost : 0;
+                },
+
+                getAgentCount(agent) {
+                    const agentData = this.agentCosts[agent];
+                    return agentData ? agentData.calls : 0;
+                }
+            };
+        }
+    </script>
+</body>
+</html>

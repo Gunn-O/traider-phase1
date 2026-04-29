@@ -1,0 +1,229 @@
+.topbar {
+  height: 72px;
+  background-color: var(--bg-card);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--spacing-xl);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xl);
+}
+
+.controls-group {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.control-select {
+  padding: 6px 12px;
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.control-select:hover:not(:disabled) {
+  border-color: var(--agent-analyst);
+}
+
+.control-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.btn-start {
+  background-color: var(--agent-analyst);
+  color: var(--bg-dark);
+}
+
+.btn-start:hover {
+  background-color: #00dd77;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0, 255, 136, 0.3);
+}
+
+.btn-stop {
+  background-color: var(--status-warning);
+  color: var(--bg-dark);
+}
+
+.btn-stop:hover {
+  background-color: #ff9900;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(255, 170, 0, 0.3);
+}
+
+.btn-emergency {
+  background-color: var(--status-stopped);
+  color: white;
+}
+
+.btn-emergency:hover {
+  background-color: #ff2222;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(255, 68, 68, 0.4);
+}
+
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-hover);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-indicator.running .status-dot {
+  background-color: var(--status-running);
+}
+
+.status-indicator.stopped .status-dot {
+  background-color: var(--status-stopped);
+}
+
+.status-text {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.source-badge,
+.mode-badge {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.source-badge.tv {
+  background-color: rgba(0, 255, 136, 0.2);
+  color: var(--agent-analyst);
+}
+
+.source-badge.yfinance {
+  background-color: rgba(0, 170, 255, 0.2);
+  color: var(--agent-weekly);
+}
+
+.mode-badge {
+  background-color: rgba(255, 170, 0, 0.2);
+  color: var(--agent-risk-manager);
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xl);
+}
+
+.topbar-stats {
+  display: flex;
+  gap: var(--spacing-xl);
+}
+
+.topbar-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-value {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.stat-value.profit {
+  color: var(--agent-analyst);
+}
+
+.stat-value.loss {
+  color: var(--status-stopped);
+}
+
+.stat-pct {
+  font-size: 12px;
+  margin-left: var(--spacing-xs);
+  opacity: 0.8;
+}
+
+.ws-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-hover);
+}
+
+.ws-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.ws-indicator.connected .ws-dot {
+  background-color: var(--status-running);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.ws-indicator.disconnected .ws-dot {
+  background-color: var(--text-secondary);
+}
+
+.ws-text {
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

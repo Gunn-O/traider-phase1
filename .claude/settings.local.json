@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed -i.bak -e \"s/''A1_uptrend''/''A1''/g\" -e \"s/''A2_downtrend''/''A2''/g\" -e \"s/''A3_mountain''/''A3''/g\" -e \"s/''A4_sideways_up''/''A4''/g\" -e \"s/''A5_sideways_down''/''A5''/g\" -e \"s/''A6_unclear''/''A6''/g\" g3_decision_mock.py)",
+      "Bash(rm g3_decision_mock.py.bak)",
+      "Bash(chmod +x /Users/gunno/Desktop/projects/traider-phase1/clear_sheets_data.py)",
+      "Bash(python main.py --help)",
+      "Bash(python scripts/reset_sheets.py --help)",
+      "Bash(python scripts/reset_sheets.py)",
+      "Bash(python -c ':*)",
+      "Bash(python main.py --backtest --start 2026-04-08 --end 2026-04-10 --log-sheets)",
+      "Bash(tee /tmp/clean_bt.log)",
+      "Bash(python main.py --backtest --start 2026-04-10 --end 2026-04-10 --log-sheets)",
+      "Bash(pip install:*)",
+      "Bash(pytest tests/test_g3_python_decision.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_g3_python_decision.py -v --tb=short)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(curl -s http://127.0.0.1:8080/api/health)",
+      "Bash(find static/agents -name \"*.svg\" -exec cp {} frontend/src/assets/agents/ \\\\;)",
+      "Bash(git commit -m ':*)",
+      "Bash(> traider.log)",
+      "Bash(python main.py --backtest --start 2026-04-20 --end 2026-04-23 --no-ai --decision-engine python)",
+      "Read(//mnt/skills/public/frontend-design/**)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/Users/gunno/Desktop/projects/traider-phase1",
+      "/Users/gunno/Desktop/projects/traider-phase1/static/agents"
+    ]
+  }
+}

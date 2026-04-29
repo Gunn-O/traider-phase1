@@ -1,0 +1,269 @@
+<!-- SVG Sprite Sheet for Agent Avatars - Cute Mascot Style -->
+<!-- Usage: <svg><use href="agent-avatars.svg#analyst"></use></svg> -->
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+
+  <!-- Analyst (Agent A) - สีเขียว น่ารัก มีแว่น ชอบวิเคราะห์ -->
+  <symbol id="analyst" viewBox="0 0 100 100">
+    <!-- พื้นหลังวงกลม -->
+    <circle cx="50" cy="50" r="48" fill="#00ff88" opacity="0.2"/>
+
+    <!-- ตัว (Body) - สีเขียว -->
+    <ellipse cx="50" cy="65" rx="22" ry="25" fill="#00ff88"/>
+
+    <!-- หัว (Head) - สีเขียวอ่อน -->
+    <circle cx="50" cy="35" r="20" fill="#33ffaa"/>
+
+    <!-- หู ซ้าย-ขวา -->
+    <ellipse cx="35" cy="25" rx="5" ry="8" fill="#33ffaa"/>
+    <ellipse cx="65" cy="25" rx="5" ry="8" fill="#33ffaa"/>
+
+    <!-- แว่นตา (Glasses) - ดูเป็นนักวิเคราะห์ -->
+    <circle cx="43" cy="35" r="6" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+    <circle cx="57" cy="35" r="6" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+    <line x1="49" y1="35" x2="51" y2="35" stroke="#1a1a1a" stroke-width="2"/>
+
+    <!-- ดวงตา (Eyes) - ใสซื่อ -->
+    <circle cx="43" cy="34" r="3" fill="#1a1a1a"/>
+    <circle cx="57" cy="34" r="3" fill="#1a1a1a"/>
+    <circle cx="44" cy="33" r="1.5" fill="#ffffff"/>
+    <circle cx="58" cy="33" r="1.5" fill="#ffffff"/>
+
+    <!-- ปาก (Mouth) - ยิ้มแย้ม -->
+    <path d="M 43 41 Q 50 45 57 41" stroke="#1a1a1a" stroke-width="1.5" fill="none"/>
+
+    <!-- กราฟเส้น (Chart) บนตัว -->
+    <path d="M 35 70 L 40 65 L 45 68 L 50 60 L 55 63 L 60 58 L 65 62"
+          stroke="#1a1a1a" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+    <!-- แต้มบนหัว (Cute spots) -->
+    <circle cx="38" cy="30" r="2" fill="#00dd77" opacity="0.5"/>
+    <circle cx="62" cy="30" r="2" fill="#00dd77" opacity="0.5"/>
+  </symbol>
+
+  <!-- Risk Manager (Agent B) - สีส้ม ระมัดระวัง มีโล่ -->
+  <symbol id="risk_manager" viewBox="0 0 100 100">
+    <!-- พื้นหลังวงกลม -->
+    <circle cx="50" cy="50" r="48" fill="#ffaa00" opacity="0.2"/>
+
+    <!-- ตัว (Body) - สีส้ม -->
+    <ellipse cx="50" cy="65" rx="22" ry="25" fill="#ffaa00"/>
+
+    <!-- หัว (Head) - สีส้มอ่อน -->
+    <circle cx="50" cy="35" r="20" fill="#ffcc33"/>
+
+    <!-- หู ซ้าย-ขวา (แหลมนิดนึง - ดูตื่นตัว) -->
+    <ellipse cx="35" cy="23" rx="4" ry="9" fill="#ffcc33"/>
+    <ellipse cx="65" cy="23" rx="4" ry="9" fill="#ffcc33"/>
+
+    <!-- ดวงตา (Eyes) - ดูจริงจัง -->
+    <ellipse cx="43" cy="35" rx="4" ry="5" fill="#1a1a1a"/>
+    <ellipse cx="57" cy="35" rx="4" ry="5" fill="#1a1a1a"/>
+    <circle cx="44" cy="34" r="1.5" fill="#ffffff"/>
+    <circle cx="58" cy="34" r="1.5" fill="#ffffff"/>
+
+    <!-- คิ้ว (Eyebrows) - ดูเคร่งขรึม -->
+    <path d="M 38 30 L 46 29" stroke="#1a1a1a" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M 54 29 L 62 30" stroke="#1a1a1a" stroke-width="1.5" stroke-linecap="round"/>
+
+    <!-- ปาก (Mouth) - จริงจัง -->
+    <line x1="45" y1="42" x2="55" y2="42" stroke="#1a1a1a" stroke-width="1.5" stroke-linecap="round"/>
+
+    <!-- โล่ (Shield) บนตัว -->
+    <path d="M 50 58 L 42 62 L 42 75 Q 42 80 50 83 Q 58 80 58 75 L 58 62 Z"
+          fill="#1a1a1a" opacity="0.3"/>
+    <path d="M 50 58 L 43 61 L 43 74 Q 43 78 50 81 Q 57 78 57 74 L 57 61 Z"
+          fill="none" stroke="#1a1a1a" stroke-width="2"/>
+
+    <!-- เครื่องหมายถูก (Checkmark) ในโล่ -->
+    <path d="M 46 70 L 48 73 L 54 66" stroke="#ffaa00" stroke-width="2" fill="none" stroke-linecap="round"/>
+  </symbol>
+
+  <!-- Weekly Strategist (Agent C) - สีน้ำเงิน มีแผนที่/ปฏิทิน -->
+  <symbol id="weekly" viewBox="0 0 100 100">
+    <!-- พื้นหลังวงกลม -->
+    <circle cx="50" cy="50" r="48" fill="#00aaff" opacity="0.2"/>
+
+    <!-- ตัว (Body) - สีน้ำเงิน -->
+    <ellipse cx="50" cy="65" rx="22" ry="25" fill="#00aaff"/>
+
+    <!-- หัว (Head) - สีน้ำเงินอ่อน -->
+    <circle cx="50" cy="35" r="20" fill="#33bbff"/>
+
+    <!-- หู ซ้าย-ขวา (กลม น่ารัก) -->
+    <circle cx="34" cy="28" r="6" fill="#33bbff"/>
+    <circle cx="66" cy="28" r="6" fill="#33bbff"/>
+
+    <!-- ดวงตา (Eyes) - ดูฉลาด -->
+    <circle cx="43" cy="35" r="4" fill="#1a1a1a"/>
+    <circle cx="57" cy="35" r="4" fill="#1a1a1a"/>
+    <circle cx="44" cy="33.5" r="2" fill="#ffffff"/>
+    <circle cx="58" cy="33.5" r="2" fill="#ffffff"/>
+
+    <!-- ปาก (Mouth) - ยิ้มพอใจ -->
+    <path d="M 43 42 Q 50 46 57 42" stroke="#1a1a1a" stroke-width="1.5" fill="none"/>
+
+    <!-- ปฏิทิน (Calendar) บนตัว -->
+    <rect x="40" y="60" width="20" height="18" rx="2" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+    <line x1="40" y1="65" x2="60" y2="65" stroke="#1a1a1a" stroke-width="2"/>
+
+    <!-- วันในสัปดาห์ (Week dots) -->
+    <circle cx="44" cy="70" r="1.5" fill="#1a1a1a"/>
+    <circle cx="48" cy="70" r="1.5" fill="#1a1a1a"/>
+    <circle cx="52" cy="70" r="1.5" fill="#1a1a1a"/>
+    <circle cx="56" cy="70" r="1.5" fill="#1a1a1a"/>
+    <circle cx="44" cy="74" r="1.5" fill="#00aaff"/>
+    <circle cx="48" cy="74" r="1.5" fill="#00aaff"/>
+    <circle cx="52" cy="74" r="1.5" fill="#00aaff"/>
+
+    <!-- ดาว (Star) - วางแผนเก่ง -->
+    <path d="M 68 70 L 70 75 L 75 75 L 71 78 L 73 83 L 68 80 L 63 83 L 65 78 L 61 75 L 66 75 Z"
+          fill="#ffdd00" opacity="0.8"/>
+  </symbol>
+
+  <!-- Monthly Evolver (Agent D) - สีชมพู มี gear พัฒนาอยู่เสมอ -->
+  <symbol id="monthly" viewBox="0 0 100 100">
+    <!-- พื้นหลังวงกลม -->
+    <circle cx="50" cy="50" r="48" fill="#ff88ff" opacity="0.2"/>
+
+    <!-- ตัว (Body) - สีชมพู -->
+    <ellipse cx="50" cy="65" rx="22" ry="25" fill="#ff88ff"/>
+
+    <!-- หัว (Head) - สีชมพูอ่อน -->
+    <circle cx="50" cy="35" r="20" fill="#ffaaff"/>
+
+    <!-- หู ซ้าย-ขวา (รูปหัวใจ - น่ารัก) -->
+    <path d="M 32 25 Q 30 20 35 20 Q 38 20 38 25 Q 38 20 41 20 Q 46 20 44 25 Q 38 30 38 30 Q 38 30 32 25"
+          fill="#ffaaff"/>
+    <path d="M 56 25 Q 54 20 59 20 Q 62 20 62 25 Q 62 20 65 20 Q 70 20 68 25 Q 62 30 62 30 Q 62 30 56 25"
+          fill="#ffaaff"/>
+
+    <!-- ดวงตา (Eyes) - ดูมีพลัง -->
+    <circle cx="43" cy="35" r="4.5" fill="#1a1a1a"/>
+    <circle cx="57" cy="35" r="4.5" fill="#1a1a1a"/>
+    <circle cx="44.5" cy="33" r="2" fill="#ffffff"/>
+    <circle cx="58.5" cy="33" r="2" fill="#ffffff"/>
+
+    <!-- ปาก (Mouth) - ยิ้มกว้าง -->
+    <path d="M 42 42 Q 50 47 58 42" stroke="#1a1a1a" stroke-width="1.5" fill="none"/>
+
+    <!-- Gear (เฟือง) - สัญลักษณ์พัฒนา -->
+    <circle cx="50" cy="70" r="8" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+    <circle cx="50" cy="70" r="4" fill="#1a1a1a"/>
+    <!-- ฟันเฟือง -->
+    <rect x="48" y="60" width="4" height="4" fill="#1a1a1a"/>
+    <rect x="58" y="68" width="4" height="4" fill="#1a1a1a"/>
+    <rect x="48" y="76" width="4" height="4" fill="#1a1a1a"/>
+    <rect x="38" y="68" width="4" height="4" fill="#1a1a1a"/>
+
+    <!-- ประกายดาว (Sparkles) - พัฒนาไปเรื่อยๆ -->
+    <path d="M 68 60 L 69 63 L 72 63 L 69 65 L 70 68 L 68 66 L 66 68 L 67 65 L 64 63 L 67 63 Z"
+          fill="#ffdd00"/>
+    <path d="M 32 75 L 33 77 L 35 77 L 33 78 L 34 80 L 32 79 L 30 80 L 31 78 L 29 77 L 31 77 Z"
+          fill="#ffdd00"/>
+  </symbol>
+
+  <!-- Reflector - สีเทา มีกระจก ดูใคร่ครวญ -->
+  <symbol id="reflector" viewBox="0 0 100 100">
+    <!-- พื้นหลังวงกลม -->
+    <circle cx="50" cy="50" r="48" fill="#888888" opacity="0.2"/>
+
+    <!-- ตัว (Body) - สีเทา -->
+    <ellipse cx="50" cy="65" rx="22" ry="25" fill="#888888"/>
+
+    <!-- หัว (Head) - สีเทาอ่อน -->
+    <circle cx="50" cy="35" r="20" fill="#aaaaaa"/>
+
+    <!-- หู ซ้าย-ขวา (ห้อยลง - ดูใคร่ครวญ) -->
+    <ellipse cx="36" cy="30" rx="5" ry="9" fill="#aaaaaa"/>
+    <ellipse cx="64" cy="30" rx="5" ry="9" fill="#aaaaaa"/>
+
+    <!-- ดวงตา (Eyes) - ดูนุ่มนวล -->
+    <circle cx="43" cy="36" r="3.5" fill="#1a1a1a"/>
+    <circle cx="57" cy="36" r="3.5" fill="#1a1a1a"/>
+    <circle cx="44" cy="35" r="1.5" fill="#ffffff"/>
+    <circle cx="58" cy="35" r="1.5" fill="#ffffff"/>
+
+    <!-- ปาก (Mouth) - ยิ้มอ่อนๆ -->
+    <path d="M 44 42 Q 50 44 56 42" stroke="#1a1a1a" stroke-width="1.5" fill="none"/>
+
+    <!-- กระจก (Mirror) - สะท้อนความคิด -->
+    <ellipse cx="50" cy="70" rx="12" ry="15" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+    <ellipse cx="50" cy="70" rx="10" ry="13" fill="#ffffff" opacity="0.3"/>
+
+    <!-- เส้นสะท้อน (Reflection lines) -->
+    <line x1="44" y1="68" x2="46" y2="72" stroke="#1a1a1a" stroke-width="1" opacity="0.5"/>
+    <line x1="50" y1="66" x2="50" y2="74" stroke="#1a1a1a" stroke-width="1" opacity="0.5"/>
+    <line x1="56" y1="68" x2="54" y2="72" stroke="#1a1a1a" stroke-width="1" opacity="0.5"/>
+
+    <!-- ดาวเล็ก (ความคิด) -->
+    <circle cx="35" cy="65" r="2" fill="#aaaaaa" opacity="0.5"/>
+    <circle cx="30" cy="70" r="1.5" fill="#aaaaaa" opacity="0.5"/>
+  </symbol>
+
+  <!-- Orchestrator (Head Trader) - สีทอง มีมงกุฎ เป็นหัวหน้า -->
+  <symbol id="orchestrator" viewBox="0 0 100 100">
+    <!-- พื้นหลังวงกลม -->
+    <circle cx="50" cy="50" r="48" fill="#ffd700" opacity="0.2"/>
+
+    <!-- ตัว (Body) - สีทอง -->
+    <ellipse cx="50" cy="65" rx="24" ry="26" fill="#ffd700"/>
+
+    <!-- หัว (Head) - สีทองอ่อน -->
+    <circle cx="50" cy="35" r="21" fill="#ffe44d"/>
+
+    <!-- หู ซ้าย-ขวา (ใหญ่ - ดูมีอำนาจ) -->
+    <circle cx="32" cy="32" r="7" fill="#ffe44d"/>
+    <circle cx="68" cy="32" r="7" fill="#ffe44d"/>
+
+    <!-- มงกุฎ (Crown) - สัญลักษณ์หัวหน้า -->
+    <path d="M 35 18 L 38 15 L 41 18 L 44 12 L 47 18 L 50 10 L 53 18 L 56 12 L 59 18 L 62 15 L 65 18 L 65 25 L 35 25 Z"
+          fill="#ff9900"/>
+    <path d="M 35 18 L 38 15 L 41 18 L 44 12 L 47 18 L 50 10 L 53 18 L 56 12 L 59 18 L 62 15 L 65 18 L 65 25 L 35 25 Z"
+          fill="none" stroke="#1a1a1a" stroke-width="1.5"/>
+    <!-- อัญมณีบนมงกุฎ -->
+    <circle cx="50" cy="16" r="2.5" fill="#ff4444"/>
+    <circle cx="44" cy="20" r="1.5" fill="#4444ff"/>
+    <circle cx="56" cy="20" r="1.5" fill="#44ff44"/>
+
+    <!-- ดวงตา (Eyes) - ดูมั่นใจ -->
+    <circle cx="43" cy="36" r="4.5" fill="#1a1a1a"/>
+    <circle cx="57" cy="36" r="4.5" fill="#1a1a1a"/>
+    <circle cx="44.5" cy="34" r="2.5" fill="#ffffff"/>
+    <circle cx="58.5" cy="34" r="2.5" fill="#ffffff"/>
+
+    <!-- ปาก (Mouth) - ยิ้มมั่นใจ -->
+    <path d="M 41 43 Q 50 48 59 43" stroke="#1a1a1a" stroke-width="2" fill="none"/>
+
+    <!-- ผ้าคลุม (Cape) -->
+    <path d="M 35 65 L 30 85 L 35 88 L 40 70" fill="#cc8800" opacity="0.6"/>
+    <path d="M 65 65 L 70 85 L 65 88 L 60 70" fill="#cc8800" opacity="0.6"/>
+
+    <!-- ประกายดาว (ความเป็นผู้นำ) -->
+    <path d="M 72 45 L 74 50 L 79 50 L 75 53 L 77 58 L 72 55 L 67 58 L 69 53 L 65 50 L 70 50 Z"
+          fill="#ffdd00"/>
+    <path d="M 28 55 L 29 58 L 32 58 L 29 60 L 30 63 L 28 61 L 26 63 L 27 60 L 24 58 L 27 58 Z"
+          fill="#ffdd00"/>
+  </symbol>
+
+  <!-- Technical Analyst - สำรอง (ใช้งานเดิม) -->
+  <symbol id="technical" viewBox="0 0 100 100">
+    <circle cx="50" cy="50" r="48" fill="#00ff88" opacity="0.2"/>
+    <rect x="35" y="40" width="8" height="15" fill="#00ff88"/>
+    <line x1="39" y1="37" x2="39" y2="58" stroke="#00ff88" stroke-width="2"/>
+    <rect x="46" y="35" width="8" height="23" fill="none" stroke="#ff4444" stroke-width="2"/>
+    <line x1="50" y1="32" x2="50" y2="60" stroke="#ff4444" stroke-width="2"/>
+    <rect x="57" y="38" width="8" height="18" fill="#00ff88"/>
+    <line x1="61" y1="35" x2="61" y2="58" stroke="#00ff88" stroke-width="2"/>
+  </symbol>
+
+  <!-- Fundamental Analyst - สำรอง (ใช้งานเดิม) -->
+  <symbol id="fundamental" viewBox="0 0 100 100">
+    <circle cx="50" cy="50" r="48" fill="#00aaff" opacity="0.2"/>
+    <rect x="38" y="35" width="24" height="28" rx="2" fill="none" stroke="#00aaff" stroke-width="3"/>
+    <line x1="42" y1="42" x2="58" y2="42" stroke="#00aaff" stroke-width="2"/>
+    <line x1="42" y1="48" x2="58" y2="48" stroke="#00aaff" stroke-width="2"/>
+    <line x1="42" y1="54" x2="54" y2="54" stroke="#00aaff" stroke-width="2"/>
+  </symbol>
+
+</svg>
