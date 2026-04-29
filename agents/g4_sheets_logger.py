@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from config import TRADE_LOG_COLUMNS, PORTFOLIO_STATE_FIELDS
 
-load_dotenv()
+load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
 # Import gspread
@@ -60,6 +60,10 @@ class SheetsLogger:
         self.sheet = None
         self.trade_log_ws = None
         self.portfolio_ws = None
+
+        # Batch mode for backtest (minimize API calls)
+        self._batch_mode = False
+        self._write_queue = []
 
         if self.enabled:
             if not GSPREAD_AVAILABLE:
@@ -122,6 +126,75 @@ class SheetsLogger:
             ws.append_row(headers)
             logger.info(f"✓ Created worksheet: {title}")
             return ws
+
+    # ========================================================================
+    # BATCH MODE (for backtest to avoid rate limits)
+    # ========================================================================
+
+    def set_batch_mode(self, enabled: bool):
+        """
+        Enable/disable batch mode
+
+        When enabled: Queue all writes instead of executing immediately
+        When disabled: Flush queue and execute all pending writes
+
+        Args:
+            enabled: True to enable batch mode, False to disable and flush
+        """
+        if not self.enabled:
+            return
+
+        logger.info(f"{'Enabling' if enabled else 'Disabling'} Sheets batch mode")
+        self._batch_mode = enabled
+
+        if not enabled:
+            self._flush_queue()
+
+    def _flush_queue(self):
+        """
+        Flush all pending writes to Sheets
+
+        Includes exponential backoff retry for rate limit (429) errors
+        """
+        if not self._write_queue:
+            logger.info("Batch queue empty, nothing to flush")
+            return
+
+        logger.info(f"Flushing {len(self._write_queue)} queued Sheets writes...")
+        import time
+
+        success_count = 0
+        fail_count = 0
+
+        for i, (fn, args, kwargs) in enumerate(self._write_queue):
+            # Retry with exponential backoff
+            for attempt in range(3):
+                try:
+                    fn(*args, **kwargs)
+                    success_count += 1
+                    break
+                except Exception as e:
+                    error_str = str(e)
+                    # Check for rate limit error
+                    if '429' in error_str or 'Quota exceeded' in error_str:
+                        wait_time = 2 ** attempt
+                        logger.warning(f"Rate limit hit, retry {attempt+1}/3 after {wait_time}s")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Sheets write error (non-retryable): {e}")
+                        fail_count += 1
+                        break
+            else:
+                # All retries exhausted
+                logger.error(f"Failed to write after 3 retries: {fn.__name__}")
+                fail_count += 1
+
+            # Progress every 10 writes
+            if (i + 1) % 10 == 0:
+                logger.info(f"  Progress: {i+1}/{len(self._write_queue)}")
+
+        self._write_queue.clear()
+        logger.info(f"✓ Flush complete: {success_count} success, {fail_count} failed")
 
     # ========================================================================
     # TRADE LOG METHODS
@@ -207,6 +280,9 @@ class SheetsLogger:
         """
         Update order เมื่อปิด (PENDING → WIN/LOSS)
 
+        In batch mode: Queue for later flush
+        In normal mode: Execute immediately
+
         Args:
             trade_id: TRD-YYYYMMDD-NNN
             result: 'WIN' | 'LOSS'
@@ -216,11 +292,33 @@ class SheetsLogger:
             timestamp_close: ISO timestamp
 
         Returns:
-            True if success
+            True if success or queued
         """
         if not self.enabled:
             return False
 
+        # Batch mode: Queue for later
+        if self._batch_mode:
+            self._write_queue.append((
+                self._do_update_order_close,
+                [trade_id, result, close_price, close_reason, pnl_usd, timestamp_close],
+                {}
+            ))
+            return True
+
+        # Normal mode: Execute immediately
+        return self._do_update_order_close(
+            trade_id, result, close_price, close_reason, pnl_usd, timestamp_close
+        )
+
+    def _do_update_order_close(self, trade_id: str, result: str,
+                                close_price: float, close_reason: str,
+                                pnl_usd: float, timestamp_close: str) -> bool:
+        """
+        Internal method: Actually update Sheets
+
+        Called by update_order_close() or batch flush
+        """
         try:
             # Find row by trade_id
             cell = self.trade_log_ws.find(trade_id)

@@ -29,15 +29,12 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 from dotenv import load_dotenv
 
-# Import agents (v4.3 — 4-Agent Architecture with Reflector)
-from agents.g1_pattern_detector import G1PatternDetector  # DEPRECATED — use signal_engine instead
+# Import agents (Phase II — Signal Engine Architecture)
+# REMOVED: g1_pattern_detector, g3_analyst, g3_risk_manager, g4_reflector (Phase I cleanup)
 from agents.g2_prefilter import G2Prefilter
-from agents.g3_analyst import G3AnalystAgent, build_grounding, verify_analyst_decision
-from agents.g3_risk_manager import G3RiskManagerAgent, build_risk_context, verify_risk_decision
 from agents.g4_weekly_strategist import G4WeeklyStrategist, aggregate_weekly_stats, should_run_weekly
 from agents.g4_monthly_evolver import G4MonthlyEvolver, aggregate_monthly_stats, should_run_monthly
-from agents.g4_reflector import Reflector, should_run_daily
-from agents.g3_risk_gate import guardian_check  # Legacy guardian (still used)
+from agents.g3_risk_gate import guardian_check
 from agents.g4_sheets_logger import SheetsLogger
 from agents.g4_position_monitor import PositionMonitor, generate_plan_id, generate_trade_id
 from agents.paper_broker import PaperBroker
@@ -61,8 +58,8 @@ except ImportError:
     def update_bot_state(updates): pass
     def add_log(msg): pass
 
-# Load environment
-load_dotenv()
+# Load environment (override=True to ensure .env takes precedence over shell)
+load_dotenv(override=True)
 
 # Setup logging (force=True to override any previous config)
 logging.basicConfig(
@@ -301,48 +298,58 @@ class TraiderMainLoop:
         update_bot_state({"data_source_actual": data_source})
         logger.info("✓ Data connector ready")
 
-        # Initialize agents (v4.3 — 4-Agent Architecture + Reflector)
-        logger.info("🤖 Initializing agents (V4.3: 4-Agent + Reflector)...")
-        # G1 DEPRECATED — kept for backward compatibility, use Signal Engine instead
-        # self.g1 = G1PatternDetector(config={'verbose': True})
+        # Initialize agents (Phase II — Signal Engine Architecture)
+        logger.info("🤖 Initializing agents (Phase II: Signal Engine)...")
+
+        # G2: Pre-filter (active)
         self.g2 = G2Prefilter(config={'verbose': True})
 
-        # Agent A: Analyst (V4.20 Reviewer Mode)
-        self.analyst = G3AnalystAgent(
-            system_prompt_path='strategy/XAUUSD_System_Prompt_Reviewer.md',
-            api_key=os.getenv('ANTHROPIC_API_KEY'),
-            config={'verbose': True}
-        )
-        logger.info("✓ Agent A (Analyst) initialized — Reviewer Mode V4.20")
+        # Phase II: Analyst and Risk Manager REMOVED
+        # - BACKTEST: Signal Engine → AUTO_APPROVE (no Claude)
+        # - SIM/LIVE: Signal Engine → Claude Reviewer (future implementation)
+        self.analyst = None  # Placeholder for Phase II Claude Reviewer
+        self.risk_manager = None  # Removed - use Signal Engine lot directly
 
-        # Agent B: Risk Manager (replaces g3_money_management.py)
-        self.risk_manager = G3RiskManagerAgent(
-            api_key=os.getenv('ANTHROPIC_API_KEY'),
-            config={'verbose': True}
-        )
-        logger.info("✓ Agent B (Risk Manager) initialized — using Haiku")
-
-        # Agent C: Weekly Strategist (new)
+        # Weekly Strategist (analysis only, not used in backtest loop)
         self.weekly_strategist = G4WeeklyStrategist(
             api_key=os.getenv('ANTHROPIC_API_KEY'),
             config={'verbose': True}
         )
-        logger.info("✓ Agent C (Weekly Strategist) initialized")
+        logger.info("✓ Weekly Strategist initialized")
 
-        # Agent D: Monthly Evolver (new)
+        # Monthly Evolver (analysis only, not used in backtest loop)
         self.monthly_evolver = G4MonthlyEvolver(
             api_key=os.getenv('ANTHROPIC_API_KEY'),
             config={'verbose': True}
         )
-        logger.info("✓ Agent D (Monthly Evolver) initialized")
+        logger.info("✓ Monthly Evolver initialized")
 
         # Initialize G4
-        # Enable sheets if: (1) simulate mode OR (2) backtest with --log-sheets flag
-        sheets_enabled_override = None
-        if self.is_backtest and hasattr(args, 'log_sheets'):
-            sheets_enabled_override = args.log_sheets
+        # Backtest mode: Disable Sheets by default (use LocalDB instead)
+        # SIM/LIVE mode: Use .env SHEETS_ENABLED setting
+        # Backtest with --log-sheets: Enable Sheets (for final flush)
+        if self.is_backtest:
+            # Backtest: Disable Sheets unless --log-sheets explicitly passed
+            sheets_enabled_override = args.log_sheets if hasattr(args, 'log_sheets') else False
+        else:
+            # SIM/LIVE: Use .env setting
+            sheets_enabled_override = None
 
         self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override)
+        logger.info(f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id={self.sheets_logger.sheets_id[:20]}..." if self.sheets_logger.sheets_id else f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id=None")
+
+        # Initialize LocalDB for backtest (avoid Sheets API rate limits)
+        if self.is_backtest:
+            from utils.local_db import LocalDB
+            self.local_db = LocalDB()
+            self.local_db.clear_trades()
+            # Enable batch mode to queue Sheets writes until end
+            if self.sheets_logger.enabled:
+                self.sheets_logger.set_batch_mode(True)
+            logger.info("✓ Backtest mode: LocalDB + Sheets batch mode")
+        else:
+            self.local_db = None
+
         self.position_monitor = PositionMonitor(sheets_logger=self.sheets_logger)
         logger.info("✓ Position Monitor initialized")
 
@@ -352,9 +359,8 @@ class TraiderMainLoop:
         set_position_monitor(self.position_monitor)
         set_connector(self.connector)
 
-        # Reflector: Daily reflection (Python only - $0)
-        self.reflector = Reflector(sheets_logger=self.sheets_logger)
-        logger.info("✓ Reflector initialized (Python only — $0 cost)")
+        # Phase II: Reflector removed (not needed in backtest)
+        self.reflector = None
 
         # Initialize Broker (Paper/Micro/Live)
         self.broker = create_broker(self.trading_mode, self.symbol)
@@ -381,6 +387,9 @@ class TraiderMainLoop:
             'total_g2_blocks': 0,
         }
 
+        # Initialize portfolio state cache (for backtest mode duplicate prevention)
+        self.portfolio_state_cache = {}
+
         logger.info("✓ All agents initialized")
 
     def run_once(self, candle_time=None, candles_by_tf=None, current_candle=None):
@@ -405,20 +414,53 @@ class TraiderMainLoop:
         logger.info("🔄 Starting trading cycle...")
         logger.info("="*70)
 
-        # Step 0: Monitor existing positions (check SL/TP)
+        # Step 0: Monitor positions (ต้องรันทุก candle ก่อน pipeline)
         logger.info("\n[STEP 0] Monitoring positions...")
-        self.monitor_positions(current_candle=current_candle)
+        closed = None  # Initialize before if-else block
+        if current_candle:
+            # check_and_update() expects candle dict (not separate params)
+            closed = self.position_monitor.check_and_update(candle=current_candle)
+            if closed:
+                for t in closed:
+                    logger.info(
+                        f"✅ Position closed: {t['trade_id']} "
+                        f"{t['result']} pnl={t.get('pnl', 0):.2f} "
+                        f"reason={t.get('close_reason')} @ {t.get('close_price')}"
+                    )
+
+                    # Update LocalDB (backtest mode)
+                    if self.is_backtest and self.local_db:
+                        self.local_db.update_trade_result(
+                            trade_id=t['trade_id'],
+                            result=t['result'],
+                            pnl=t.get('pnl_usd', t.get('pnl', 0)),
+                            close_price=t.get('close_price', 0),
+                            close_time=t.get('timestamp_close', candle_time),
+                            close_reason=t.get('close_reason', '')
+                        )
+        else:
+            # Fallback to old monitor_positions for simulate mode
+            self.monitor_positions(current_candle=current_candle)
 
         # CRITICAL: Load portfolio state
         # - Backtest mode: Use in-memory cache for last_technical_price (duplicate prevention)
         #   Reload other fields from Sheets (active_plan_id, consecutive_loss updated by monitor)
         # - Simulate/Live mode: Reload from Sheets (to get fresh state)
-        if hasattr(self, 'portfolio_state_cache'):
+        if self.is_backtest:
             # Backtest mode: Use in-memory cache for critical fields (prevent Sheets sync race)
             # 1. Load fresh state from Sheets (for consecutive_loss, realized_pnl, etc.)
             portfolio_state = self.sheets_logger.get_portfolio_state()
 
-            # 2. Override critical fields from cache (always use cache, never Sheets)
+            # 2. Update from Step 0 closed trades (if any)
+            if current_candle and candle_time and closed:
+                for t in closed:
+                    if t.get('result') == 'LOSS':
+                        portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
+                    elif t.get('result') == 'WIN':
+                        portfolio_state['consecutive_loss'] = 0
+                    portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + t.get('pnl', 0)
+
+            # 3. Override critical fields from cache (always use cache, never Sheets)
             #    - active_plan_id: Prevents duplicate plans (Sheets sync delay)
             #    - last_technical_price: Prevents duplicate twin_candle (Sheets sync delay)
             #    - last_plan_chart_type: Used with last_technical_price
@@ -426,14 +468,14 @@ class TraiderMainLoop:
             portfolio_state['last_technical_price'] = self.portfolio_state_cache.get('last_technical_price', 0.0)
             portfolio_state['last_plan_chart_type'] = self.portfolio_state_cache.get('last_plan_chart_type', '')
 
-            # 3. Check if plan closed (clear cache if no pending orders)
+            # 4. Check if plan closed (clear cache if no pending orders)
             pending_count = len(self.position_monitor.get_open_orders())
             if pending_count == 0 and portfolio_state['active_plan_id']:
                 logger.info(f"Plan {portfolio_state['active_plan_id']} fully closed → clearing cache")
                 portfolio_state['active_plan_id'] = ''
                 self.portfolio_state_cache['active_plan_id'] = ''
 
-            # 4. Update cache with current state
+            # 5. Update cache with current state
             self.portfolio_state_cache = portfolio_state
             logger.debug(f"Cache: active_plan={portfolio_state['active_plan_id']}, "
                         f"pending={pending_count}, last_tech={portfolio_state['last_technical_price']:.2f}")
@@ -449,16 +491,10 @@ class TraiderMainLoop:
         # Step 0b: Daily/Weekly/Monthly triggers
         current_date = candle_time.date() if candle_time else datetime.now().date()
 
-        # Reflector — รันทุกวัน (Python only, $0)
-        if should_run_daily(self.last_daily_date, current_date):
-            logger.info("\n[Reflector] Running daily reflection...")
-            history = self.sheets_logger.get_recent_trades(limit=50) if self.sheets_logger.enabled else []
-            reflection_result = self.reflector.update(trade_history=history, force=False)
-            self.reflection_summary = reflection_result['reflection_summary']
-            logger.info(f"✓ Daily reflection: {self.reflection_summary}")
-            self.last_daily_date = current_date
+        # Phase II: Reflector removed (not needed in backtest)
+        # Daily reflection skipped in Phase II
 
-        # Weekly Strategist (Agent C) — รันทุก 7 วัน
+        # Weekly Strategist — รันทุก 7 วัน (analysis only)
         if should_run_weekly(self.last_weekly_date, current_date):
             logger.info("\n[Agent C] Running Weekly Strategist...")
             history = self.sheets_logger.get_recent_trades(limit=100) if self.sheets_logger.enabled else []
@@ -578,90 +614,81 @@ class TraiderMainLoop:
 
         logger.info("✓ G2: Pre-filter PASSED")
 
-        # Step 3a: Agent A — Analyst (with Grounding + Post-verify)
-        logger.info("\n[STEP 3a] Agent A — Analyst...")
+        # Step 3a: Decision — Phase II AUTO_APPROVE (no Claude in backtest)
+        logger.info("\n[STEP 3a] Decision...")
 
-        # Build grounding (Python คำนวณค่าสำคัญก่อนส่ง Claude)
-        grounding = build_grounding(world_state, self.balance)
-        logger.info(f"  Grounding: technical_price={grounding['technical_price']:.2f}, "
-                    f"SL ref=10%:{grounding['sl_reference']['10pct_range_pip']:.0f}pip, "
-                    f"20%:{grounding['sl_reference']['20pct_range_pip']:.0f}pip")
-
-        # Call Agent A
-        analyst_result = self.analyst.decide(
-            world_state=world_state,
-            balance=self.balance,
-            portfolio_state=portfolio_state,
-            reflection_summary=self.reflection_summary,
-            grounding=grounding
-        )
-
-        if not analyst_result['success']:
-            logger.error("❌ Agent A failed")
+        # Phase II: Use Signal Engine decision directly (already in world_state)
+        signal = world_state.get('signal')
+        if not signal:
+            logger.error("❌ No signal from Signal Engine")
             return
 
-        decision = analyst_result['decision']
-        llm_log = analyst_result['llm_log']
-        verify_errors = analyst_result['verify_errors']
+        # Convert signal to decision format (for compatibility with existing code)
+        decision = {
+            'action': signal.direction,  # Signal has 'direction' not 'action'
+            'entry': signal.entry,
+            'sl': signal.sl,
+            'tp': signal.tp_order,  # Signal has 'tp_order' not 'tp'
+            'lot': signal.lot,
+            'rr_ratio': signal.rr,
+            'confidence': 1.0,  # Signal Engine is deterministic
+            'setup': signal.pattern.lower() if hasattr(signal, 'pattern') else 'unknown',
+            'skip_reason': None
+        }
 
-        # Update session stats
-        update_session_stats(
-            self.session_stats,
-            llm_log,
-            opened_plan=(decision.get('action') != 'SKIP'),
-            g2_blocked=False
-        )
+        # Phase II: No Claude call in backtest → $0 cost
+        llm_log = {
+            'action': 'BACKTEST_AUTO_APPROVE',
+            'total_tokens': 0,
+            'cost_usd': 0.0,
+            'cache_hit': False
+        }
 
-        # Log token usage
-        logger.info(
-            f"💰 Agent A: {llm_log.get('total_tokens', 0):,} tokens | "
-            f"Cost: ${llm_log.get('cost_usd', 0):.4f} | "
-            f"Cache: {'✅ HIT' if llm_log.get('cache_hit') else '❌ MISS'} | "
-            f"Session: ${self.session_stats['total_cost_usd']:.4f}"
-        )
-
-        # Warning if cost is abnormally high
-        if llm_log.get('cost_usd', 0) > 0.030:
-            logger.warning(
-                f"⚠️  Cost สูงผิดปกติ: ${llm_log['cost_usd']:.4f}/call "
-                f"(target ≤ $0.020) — cache อาจไม่ทำงาน"
-            )
-
-        # Log verify errors (if any)
-        if verify_errors:
-            logger.warning(f"⚠️  Agent A verify errors: {verify_errors}")
-
-        if decision.get('action') == 'SKIP':
-            logger.info(f"❌ SKIP: {decision.get('skip_reason', 'Agent A decided to skip')}")
-            return
-
-        logger.info(f"✓ Agent A: {decision['action']} @ {decision['entry']:.2f} "
+        logger.info(f"✓ Signal Engine: {decision['action']} @ {decision['entry']:.2f} "
                     f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f})")
 
         # Step 3b: Agent B — Risk Manager
         logger.info("\n[STEP 3b] Agent B — Risk Manager...")
 
-        # Build risk context (Python คำนวณก่อนส่ง Haiku)
-        risk_context = build_risk_context(
-            decision=decision,
-            balance=self.balance,
-            portfolio_state=portfolio_state,
-            weekly_stats=self.weekly_stats
-        )
+        # Agent B: Backtest bypass (deterministic), Simulate/Live call Haiku
+        if self.is_backtest:
+            # Backtest: ใช้ lot จาก Signal Engine โดยตรง
+            signal = world_state.get('signal')
+            lot = signal.lot if signal and hasattr(signal, 'lot') else 0.01
+            # Winrate test override
+            if os.getenv('WINRATE_TEST', 'false').lower() == 'true':
+                lot = 0.01
+            risk_result = {
+                'approved': True,
+                'lot': lot,
+                'reason': 'backtest_auto_approve',
+                'adjusted': False,
+                'llm_log': {'action': 'BACKTEST_SKIP', 'cost_usd': 0}
+            }
+            logger.info(f"✓ Agent B: BACKTEST mode → lot={lot:.2f} (no API call)")
+        else:
+            # Simulate/Live: Build risk context and call Haiku
+            from agents.g3_claude_decision import build_risk_context
 
-        logger.info(f"  Risk Context: base_lot={risk_context['base_lot']:.2f}, "
-                    f"consecutive_loss={risk_context['consecutive_loss']}, "
-                    f"weekly_wr={risk_context['weekly_winrate']:.1%}")
+            risk_context = build_risk_context(
+                decision=decision,
+                balance=self.balance,
+                portfolio_state=portfolio_state,
+                weekly_stats=self.weekly_stats
+            )
 
-        # Call Agent B
-        risk_result = self.risk_manager.approve(
-            decision=decision,
-            risk_context=risk_context
-        )
+            logger.info(f"  Risk Context: base_lot={risk_context['base_lot']:.2f}, "
+                        f"consecutive_loss={risk_context['consecutive_loss']}, "
+                        f"weekly_wr={risk_context['weekly_winrate']:.1%}")
 
-        if not risk_result['approved']:
-            logger.warning(f"❌ Agent B REJECTED: {risk_result['reason']}")
-            return
+            risk_result = self.risk_manager.approve(
+                decision=decision,
+                risk_context=risk_context
+            )
+
+            if not risk_result['approved']:
+                logger.warning(f"❌ Agent B REJECTED: {risk_result['reason']}")
+                return
 
         lot = risk_result['lot']
         adjusted = risk_result.get('adjusted', False)
@@ -689,6 +716,15 @@ class TraiderMainLoop:
         # Step 4: Create Order Plan
         logger.info("\n[STEP 4] Creating Order Plan...")
 
+        # Calculate max_loss_usd from Signal Engine data (backtest-compatible)
+        signal = world_state.get('signal')
+        if signal and hasattr(signal, 'risk_pip'):
+            max_loss_usd = (signal.risk_pip / 100.0) * lot
+        else:
+            # Fallback: calculate from entry-SL distance
+            sl_distance_pip = abs(decision['entry'] - decision['sl']) * 100
+            max_loss_usd = (sl_distance_pip / 100.0) * lot
+
         # Create order (1 order per plan)
         order = {
             'order_num': 1,
@@ -704,7 +740,7 @@ class TraiderMainLoop:
         plan = {
             'lot_total': lot,
             'total_orders': 1,
-            'max_loss_usd': risk_context['max_loss_usd'],
+            'max_loss_usd': max_loss_usd,
             'orders': [order]
         }
 
@@ -727,12 +763,45 @@ class TraiderMainLoop:
             order['lot_size'] = order['lot']
             orders_with_ids.append(order)
 
-        # Prepare decision for Sheets (add 'technique' field from 'setup')
+        # Prepare decision for Sheets (add 'technique' field from signal.pattern)
         decision_for_sheets = decision.copy()
-        decision_for_sheets['technique'] = decision.get('setup', 'none')  # Agent A uses 'setup', Sheets uses 'technique'
+        signal = world_state.get('signal')
+        decision_for_sheets['technique'] = (
+            signal.pattern.lower()
+            if signal and hasattr(signal, 'pattern')
+            else decision.get('setup', 'none')
+        )
 
         # Log to Sheets
         self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision_for_sheets, world_state, llm_log, candle_time=candle_time)
+
+        # Log to LocalDB (backtest mode — no rate limits)
+        if self.is_backtest and self.local_db:
+            for order in orders_with_ids:
+                self.local_db.insert_trade({
+                    'trade_id': order['trade_id'],
+                    'plan_id': plan_id,
+                    'order_num': order.get('order_num', 1),
+                    'timestamp_open': candle_time.isoformat() if candle_time else datetime.now().isoformat(),
+                    'timeframe': world_state.get('selected_tf', 'M5'),
+                    'chart_type': world_state.get('chart_type', ''),
+                    'technique': decision_for_sheets.get('technique', ''),
+                    'action': order['action'],
+                    'entry_price': order['entry'],
+                    'sl_price': order['sl'],
+                    'tp_price': order['tp'],
+                    'lot_size': order['lot'],
+                    'lot_total_plan': lot,
+                    'rr_ratio': decision.get('rr_ratio', 0),
+                    'confidence': decision.get('confidence', 0),
+                    'rsi_14': world_state.get('metadata', {}).get('rsi_14', 50),
+                    'session': world_state.get('session', ''),
+                    'ai_reason': decision.get('reason', ''),
+                    'llm_tokens': llm_log.get('total_tokens', 0),
+                    'llm_cost_usd': llm_log.get('cost_usd', 0),
+                    'result': 'PENDING',
+                    'trailing_sl': order['sl']
+                })
 
         # Execute trades via broker (if paper mode)
         if self.broker is not None:
@@ -765,8 +834,11 @@ class TraiderMainLoop:
         portfolio_state['total_open_lot'] = lot  # From Agent B
 
         # Update last technical price (for duplicate prevention)
-        # Always save (0.0 if no twin_candle, disables duplicate prevention for non-twin techniques)
-        portfolio_state['last_technical_price'] = world_state.get('twin_candle', {}).get('technical_price', 0.0)
+        # Signal Engine provides entry price (not twin_candle)
+        signal = world_state.get('signal')
+        portfolio_state['last_technical_price'] = (
+            signal.entry if signal and hasattr(signal, 'entry') else 0.0
+        )
         portfolio_state['last_plan_chart_type'] = world_state.get('chart_type', '')
 
         logger.info(f"Portfolio state updated: last_technical_price={portfolio_state['last_technical_price']:.2f}, "
@@ -780,6 +852,9 @@ class TraiderMainLoop:
             self.portfolio_state_cache['last_technical_price'] = portfolio_state['last_technical_price']
             self.portfolio_state_cache['last_plan_chart_type'] = portfolio_state['last_plan_chart_type']
             logger.info(f"✓ Cache updated: active_plan={plan_id}, last_tech={portfolio_state['last_technical_price']:.2f}")
+
+        # Update session stats (track total plans)
+        update_session_stats(self.session_stats, llm_log, opened_plan=True)
 
         logger.info(f"✓ G4: Plan {plan_id} logged ({len(orders_with_ids)} orders)")
         logger.info("\n" + "="*70)
@@ -1164,29 +1239,80 @@ class TraiderMainLoop:
         logger.info(f"\n⏭  Skipped {skipped_weekend} weekend candles")
         logger.info(f"⏭  Skipped {skipped_insufficient} candles (insufficient data)")
 
-        # Summary
-        logger.info("\n" + "="*70)
-        logger.info("📊 BACKTEST SUMMARY")
-        logger.info("="*70)
-        logger.info(f"Period: {start_date} → {end_date}")
-        logger.info(f"Total candles: {len(all_m5_candles)}")
-        logger.info(f"Processed signals: {total_signals}")
-        logger.info(f"Total plans: {self.session_stats['total_plans']}")
+        # Force-close any remaining PENDING trades (backtest ended)
+        if self.local_db:
+            logger.info("\n🔄 Checking for PENDING trades to force-close...")
+            pending_trades = self.local_db.get_pending_trades()
 
-        # Read from Google Sheets for full results
-        portfolio_state = self.sheets_logger.get_portfolio_state()
-        logger.info(f"Win rate: Check Google Sheets")
-        logger.info(f"Total P&L: ${portfolio_state.get('realized_pnl_usd', 0):.2f}")
+            if pending_trades:
+                logger.warning(f"⚠️  {len(pending_trades)} PENDING trades at backtest end — force-closing as PENDING_EXPIRED")
+                last_candle = all_m5_candles[-1]
+                last_price = last_candle['close']
+                last_time = last_candle.get('timestamp', datetime.now())
 
-        # Check for pending orders
-        pending = [o for o in self.position_monitor.open_orders if o.get('result') == 'PENDING']
-        if pending:
-            logger.warning(
-                f"⚠️  {len(pending)} orders ยัง PENDING ตอนจบ backtest "
-                f"— อาจต้องขยาย end_date ให้ plan มีโอกาสปิด"
-            )
+                for trade in pending_trades:
+                    # PENDING_EXPIRED: P&L = 0 (ไม่นับ unrealized gains/losses)
+                    # เหตุผล: backtest จบก่อนที่ position จะปิด → ไม่มี realized P&L
+                    self.local_db.update_trade_result(
+                        trade_id=trade['trade_id'],
+                        result='PENDING_EXPIRED',
+                        pnl=0,  # ← ต้องเป็น 0 เสมอ (ไม่คำนวณ unrealized)
+                        close_price=last_price,
+                        close_time=last_time,
+                        close_reason='BACKTEST_END'
+                    )
+                    logger.info(f"  ✓ {trade['trade_id']}: PENDING_EXPIRED @ {last_price:.2f}")
 
-        logger.info("="*70)
+            # Flush Sheets batch queue (write all pending updates)
+            if self.sheets_logger.enabled:
+                logger.info("\n📤 Flushing Sheets batch queue...")
+                self.sheets_logger.set_batch_mode(False)  # This triggers flush
+
+        # Summary (from LocalDB)
+        if self.local_db:
+            summary = self.local_db.get_summary()
+
+            logger.info("\n" + "="*70)
+            logger.info("📊 BACKTEST SUMMARY (LocalDB)")
+            logger.info("="*70)
+            logger.info(f"Period: {start_date} → {end_date}")
+            logger.info(f"Total candles: {len(all_m5_candles)}")
+            logger.info(f"Processed signals: {total_signals}")
+            logger.info(f"Total trades: {summary['total']}")
+            logger.info(f"  WIN: {summary['wins']} ({summary['wr_pct']:.1f}%)")
+            logger.info(f"  LOSS: {summary['losses']}")
+            logger.info(f"  PENDING: {summary['pending']}")
+            logger.info(f"  PENDING_EXPIRED: {summary['expired']}")
+            logger.info(f"Net P&L: ${summary['net_pnl']:.2f}")
+            logger.info(f"Avg WIN: ${summary['avg_win']:.2f}" if summary['avg_win'] else "Avg WIN: N/A")
+            logger.info(f"Avg LOSS: ${summary['avg_loss']:.2f}" if summary['avg_loss'] else "Avg LOSS: N/A")
+            logger.info("="*70)
+
+            # Pattern breakdown
+            patterns = self.local_db.get_summary_by_pattern()
+            if patterns:
+                logger.info("\n📈 Pattern Breakdown:")
+                for p in patterns:
+                    total = p['total']
+                    wins = p['wins']
+                    wr = wins / total * 100 if total > 0 else 0
+                    logger.info(f"  {p['pattern']:<15} {total:>3} trades  WR {wr:>5.1f}%  Net ${p['net_pnl_usd']:>8.2f}")
+
+            # Check for remaining PENDING (should be 0 after force-close)
+            if summary['pending'] > 0:
+                logger.warning(f"\n⚠️  {summary['pending']} orders ยัง PENDING (unexpected!)")
+
+        else:
+            # Fallback to old summary (Sheets)
+            logger.info("\n" + "="*70)
+            logger.info("📊 BACKTEST SUMMARY")
+            logger.info("="*70)
+            logger.info(f"Period: {start_date} → {end_date}")
+            logger.info(f"Total candles: {len(all_m5_candles)}")
+            logger.info(f"Processed signals: {total_signals}")
+            logger.info(f"Total plans: {self.session_stats['total_plans']}")
+            logger.info("Win rate: Check Google Sheets")
+            logger.info("="*70)
 
         # Print session summary with token usage and break-even analysis
         print_session_summary(self.session_stats, self.balance)

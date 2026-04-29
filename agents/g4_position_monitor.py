@@ -282,23 +282,27 @@ class PositionMonitor:
 
         Args:
             candle: Current candle dict
+
+        Returns:
+            List of closed trades (with updated result, pnl, etc.)
         """
         if not self.open_orders:
-            return
+            return []
 
         pending_orders = [o for o in self.open_orders if o.get('result') == 'PENDING']
         if not pending_orders:
-            return
+            return []
 
         logger.info(f"Checking {len(pending_orders)} pending orders...")
 
         updates = check_positions_on_candle_close(candle, pending_orders)
 
         if not updates:
-            return
+            return []
 
-        # Track closed plan IDs to update portfolio state later
+        # Track closed plan IDs and closed trades to return
         closed_plan_ids = set()
+        closed_trades = []
 
         # Apply updates
         for update in updates:
@@ -316,6 +320,8 @@ class PositionMonitor:
                         # Track plan_id for portfolio update
                         if 'plan_id' in order:
                             closed_plan_ids.add(order['plan_id'])
+                        # Add to closed trades list (for return value)
+                        closed_trades.append(order.copy())
                         break
 
                 # Update Sheets
@@ -352,6 +358,9 @@ class PositionMonitor:
         # Check if any plans are fully closed and update portfolio state
         if closed_plan_ids and self.sheets_logger:
             self._update_portfolio_after_closes(closed_plan_ids)
+
+        # Return list of closed trades for caller to process
+        return closed_trades
 
     def get_open_orders(self) -> List[dict]:
         """Return list of orders ที่ยังเปิดอยู่"""

@@ -7,6 +7,7 @@ import AgentActivity from './pages/AgentActivity'
 import TradeHistory from './pages/TradeHistory'
 import Proposals from './pages/Proposals'
 import Settings from './pages/Settings'
+import Backtest from './pages/Backtest'
 
 export default function App() {
   const {
@@ -48,6 +49,10 @@ export default function App() {
             <Route
               path="/proposals"
               element={<Proposals botState={botState}/>}
+            />
+            <Route
+              path="/backtest"
+              element={<Backtest/>}
             />
             <Route
               path="/settings"

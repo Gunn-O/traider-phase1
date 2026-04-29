@@ -1,5 +1,5 @@
 """
-Signal Engine Wrapper — v2.1
+Signal Engine Wrapper — v4.25
 Integrates xauusd_signal.py as the main Signal Engine (replaces G1 pattern detection)
 
 Changes:
@@ -7,15 +7,124 @@ Changes:
 - Claude API role: Decision maker → Reviewer only
 - Mountain state tracking for round 2 detection
 - Single TF mode: M5 only
+
+V4.25 Updates:
+- Time filter: Block trades 60min before market close (21:00 UTC)
+- Gap filter: Wait 80 bars after opening gap > 20% R55
+- Pattern names: DOWNTREND_IMPULSE, UPTREND_IMPULSE
 """
 
 import logging
 from typing import List, Dict, Optional
 from datetime import datetime
+import pytz
 
 from utils.xauusd_signal import find_signal, OHLC, Signal, format_signal
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# V4.25 Filters
+# ═══════════════════════════════════════════════════════════════════
+
+def is_near_market_close(candle_time: datetime,
+                        close_hour: int = 21,
+                        close_minute: int = 0,
+                        buffer_minutes: int = 60) -> bool:
+    """
+    V4.25: Block trades before market close
+
+    Args:
+        candle_time: Current candle timestamp
+        close_hour: Market close hour in UTC (default 21)
+        close_minute: Market close minute (default 0)
+        buffer_minutes: Minutes before close to block (default 60)
+
+    Returns:
+        True if within buffer zone (block trading), False otherwise
+    """
+    # Convert to UTC if not already
+    if candle_time.tzinfo is None:
+        utc_time = pytz.UTC.localize(candle_time)
+    else:
+        utc_time = candle_time.astimezone(pytz.UTC)
+
+    # Check if in 20:00-21:00 UTC range (60min before 21:00 close)
+    hour = utc_time.hour
+    minute = utc_time.minute
+
+    # Simple check: if hour is 20 (20:00-20:59), block
+    if hour == close_hour - 1 and minute >= 0:
+        return True
+
+    # If exactly at close hour and within first few minutes
+    if hour == close_hour and minute <= close_minute:
+        return True
+
+    return False
+
+
+def check_opening_gap(candles: List[dict], R55: float,
+                     gap_threshold_pct: float = 0.20) -> bool:
+    """
+    V4.25: Check for opening gap
+
+    Args:
+        candles: List of candles
+        R55: Range 55 (pip)
+        gap_threshold_pct: Gap threshold as % of R55 (default 20%)
+
+    Returns:
+        True if there's a gap > threshold (should skip), False otherwise
+
+    Note: This checks if the MOST RECENT gap (last 2 candles) is large.
+          For backtest initialization, use a separate function to find
+          the gap bar index and start from there.
+    """
+    if len(candles) < 2:
+        return False
+
+    # Check gap between last 2 candles
+    prev_candle = candles[-2]
+    curr_candle = candles[-1]
+
+    # Gap = abs(current open - previous close)
+    gap = abs(curr_candle['open'] - prev_candle['close']) * 100  # in pip
+
+    gap_threshold = R55 * gap_threshold_pct
+
+    if gap > gap_threshold:
+        logger.info(f"Opening gap detected: {gap:.0f}pip > {gap_threshold:.0f}pip ({gap_threshold_pct*100:.0f}%R55)")
+        return True
+
+    return False
+
+
+def _parse_quality(quality_str: str) -> float:
+    """
+    แปลง quality string จาก xauusd_signal.py → float
+
+    xauusd_signal.py ส่ง:
+      DOWNTREND/UPTREND: "100%✓" หรือ "~60%⚠️" หรือ "✗"
+      MOUNTAIN:          "✅"     หรือ "⚠️ นาน"
+
+    Note: ใช้ทั้ง ✓ (U+2713) และ ✅ (U+2705) เพราะ xauusd_signal.py ใช้ ✓
+
+    G2 threshold: quality >= 0.50
+    """
+    # 100% quality (รองรับทั้ง ✓ และ ✅)
+    if quality_str in ("100%✓", "100%✅", "✓", "✅"):
+        return 1.0   # ผ่าน G2 (≥ 0.50)
+    # ~60% quality (รองรับทั้ง ⚠ และ ⚠️)
+    elif quality_str in ("~60%⚠️", "~60%⚠"):
+        return 0.6   # ผ่าน G2 (≥ 0.50)
+    # Mountain นานเกิน 40 แท่ง
+    elif quality_str in ("⚠️ นาน", "⚠ นาน"):
+        return 0.4   # ไม่ผ่าน G2 (< 0.50) — ภูเขานานเกิน 40 แท่ง
+    else:
+        # "✗" หรือ "❌" หรือ unknown
+        return 0.0   # ไม่ผ่าน G2
 
 
 def convert_candles_to_ohlc(candles: List[dict]) -> List[OHLC]:
@@ -93,6 +202,18 @@ def run_signal_engine(
             'skip_reason': 'insufficient_data'
         }
 
+    # V4.25: Time filter — Block trades near market close
+    current_timestamp = candles[-1].get('timestamp', datetime.now())
+    if is_near_market_close(current_timestamp):
+        logger.info("V4.25 Time filter: Near market close (< 60min before 21:00 UTC) — SKIP")
+        return {
+            'selected_tf': timeframe,
+            'chart_type': 'unclear',
+            'quality': 0.0,
+            'signal': None,
+            'skip_reason': 'near_market_close'
+        }
+
     # Convert to OHLC format
     ohlc_bars = convert_candles_to_ohlc(candles)
     logger.debug(f"Converted {len(ohlc_bars)} M5 candles to OHLC format")
@@ -149,24 +270,21 @@ def run_signal_engine(
 
     # Map pattern to chart_type
     chart_type_mapping = {
-        'DOWNTREND': 'downtrend',
-        'UPTREND': 'uptrend',
+        'DOWNTREND': 'downtrend',           # V4.20 backward compatibility
+        'DOWNTREND_IMPULSE': 'downtrend',   # V4.25
+        'UPTREND': 'uptrend',               # V4.20 backward compatibility
+        'UPTREND_IMPULSE': 'uptrend',       # V4.25
         'MOUNTAIN': 'mountain',
         'MOUNTAIN_R2': 'mountain_r2'
     }
     chart_type = chart_type_mapping.get(signal.pattern, 'unclear')
 
-    # Map quality string to numeric (100%✓ → 1.0, ~60%⚠️ → 0.6)
-    quality_mapping = {
-        '100%✓': 1.0,
-        '~60%⚠️': 0.6,
-        '✗': 0.0
-    }
-    quality = quality_mapping.get(signal.quality, 0.5)
+    # Parse quality string from xauusd_signal.py
+    quality = _parse_quality(signal.quality)
 
     # Determine technique based on pattern
     # Signal Engine always provides Entry/SL/TP, so technique is based on pattern type
-    if signal.pattern in ['DOWNTREND', 'UPTREND']:
+    if signal.pattern in ['DOWNTREND', 'DOWNTREND_IMPULSE', 'UPTREND', 'UPTREND_IMPULSE']:
         # Check if it's twin candle or breakout based on signal details
         # For now, default to twin_candle (xauusd_signal focuses on twin candle setups)
         technique = signal.details.get('technique', 'twin_candle')
@@ -224,7 +342,7 @@ def run_signal_engine(
         'metadata': {
             'candles_checked': len(candles),
             'range_55': round(range_usd, 2),
-            'signal_engine_version': '4.20'
+            'signal_engine_version': '4.25'
         },
         'mountain_state': updated_mountain_state  # Return updated state
     }

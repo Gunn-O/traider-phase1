@@ -17,12 +17,16 @@ Target: Windows local machine (localhost only)
 import asyncio
 import logging
 import os
+import subprocess
+import threading
+import sys
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -40,6 +44,63 @@ logger = logging.getLogger(__name__)
 sheets_logger = None
 position_monitor = None
 connector = None
+
+# ── Global backtest state ──────────────────────────
+_backtest_state = {
+    "is_running": False,
+    "start": None,
+    "end": None,
+    "error": None,
+    "pid": None,
+}
+
+def _run_backtest_thread(start: str, end: str):
+    """รัน backtest ใน background thread"""
+    global _backtest_state
+    try:
+        _backtest_state["is_running"] = True
+        _backtest_state["error"] = None
+
+        # หา project root (ที่มี main.py)
+        project_root = Path(__file__).parent
+        python_exe   = sys.executable  # ใช้ python เดิมที่รัน api_server
+
+        cmd = [
+            python_exe, "main.py",
+            "--backtest",
+            "--start", start,
+            "--end",   end,
+            "--decision-engine", "python"
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        _backtest_state["pid"] = proc.pid
+
+        # Stream output ไป log
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                logger.info(f"[BACKTEST] {line}")
+
+        proc.wait()
+
+        if proc.returncode != 0:
+            _backtest_state["error"] = f"Exit code {proc.returncode}"
+            logger.error(f"Backtest failed: exit {proc.returncode}")
+
+    except Exception as e:
+        _backtest_state["error"] = str(e)
+        logger.error(f"Backtest thread error: {e}")
+    finally:
+        _backtest_state["is_running"] = False
+        _backtest_state["pid"] = None
+        logger.info("✅ Backtest thread finished")
 
 bot_state = {
     "status": "stopped",           # stopped / running / error
@@ -80,6 +141,15 @@ app = FastAPI(
     title="XAUUSD Trading Bot Dashboard",
     description="Web dashboard for Tra(i)der Phase I v4.3 (4-Agent + Reflector)",
     version="4.3.0"
+)
+
+# CORS middleware (allow frontend on localhost:3000)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Mount static files (for dashboard.html and assets)
@@ -554,6 +624,152 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+
+
+# ============================================================================
+# BACKTEST ENDPOINTS
+# ============================================================================
+
+@app.post("/api/backtest/run")
+async def run_backtest(request: Request):
+    """
+    Run backtest in background
+
+    Body:
+        {
+            "start": "2026-04-01",
+            "end": "2026-04-21"
+        }
+    """
+    global _backtest_state
+
+    if _backtest_state["is_running"]:
+        return {"status": "already_running",
+                "message": "Backtest กำลังรันอยู่"}
+
+    body = await request.json()
+    start = body.get("start", "2026-04-01")
+    end   = body.get("end",   "2026-04-21")
+
+    # Validate date format
+    try:
+        start_dt = datetime.strptime(start, "%Y-%m-%d")
+        end_dt   = datetime.strptime(end,   "%Y-%m-%d")
+    except:
+        return {"status": "error",
+                "message": "รูปแบบวันที่ไม่ถูกต้อง (YYYY-MM-DD)"}
+
+    # Validate range
+    if end_dt <= start_dt:
+        return {"status": "error",
+                "message": "End date ต้องมากกว่า Start date"}
+
+    days = (end_dt - start_dt).days
+    MAX_DAYS = 60  # yfinance 5m data limit
+    if days > MAX_DAYS:
+        return {"status": "error",
+                "message": f"ช่วงเวลาสูงสุด {MAX_DAYS} วัน (เลือก {days} วัน)"}
+
+    # Validate ไม่เกินวันนี้
+    if end_dt > datetime.now():
+        return {"status": "error",
+                "message": "End date ต้องไม่เกินวันปัจจุบัน"}
+
+    # Clear LocalDB ก่อนรัน
+    try:
+        from utils.local_db import LocalDB
+        db = LocalDB()
+        db.clear_trades()
+        db.close()
+        logger.info(f"✅ LocalDB cleared, starting backtest {start} → {end}")
+    except Exception as e:
+        logger.error(f"LocalDB clear failed: {e}")
+
+    # อัปเดต state
+    _backtest_state["start"] = start
+    _backtest_state["end"]   = end
+
+    # รันใน background thread
+    t = threading.Thread(
+        target=_run_backtest_thread,
+        args=(start, end),
+        daemon=True
+    )
+    t.start()
+
+    return {"status": "started", "start": start, "end": end}
+
+
+@app.get("/api/backtest/results")
+async def get_backtest_results():
+    """
+    Get backtest results from LocalDB
+
+    Returns:
+        {
+            "status": "done" | "running" | "error",
+            "summary": {...},
+            "by_pattern": [...],
+            "trades": [...],
+            "equity_curve": [...]
+        }
+    """
+    if _backtest_state["is_running"]:
+        return {"status": "running", "message": "ยังรันอยู่"}
+
+    try:
+        from utils.local_db import LocalDB
+        db = LocalDB()
+        return {
+            "status":       "done",
+            "summary":      db.get_summary(),
+            "by_pattern":   db.get_summary_by_pattern(),
+            "trades":       db.get_all_trades()[-100:],
+            "equity_curve": db.get_equity_curve(initial_balance=1000.0),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if 'db' in locals():
+            db.close()
+
+
+@app.get("/api/backtest/status")
+async def get_backtest_status():
+    """
+    Get backtest progress status
+
+    Returns:
+        {
+            "is_running": bool,
+            "trades_so_far": int,
+            "wins": int,
+            "losses": int,
+            "pending": int,
+            "start": str,
+            "end": str,
+            "error": str | None
+        }
+    """
+    from utils.local_db import LocalDB
+    db = LocalDB()
+    s  = db.get_summary()
+
+    wins   = s.get("wins", 0) or 0
+    losses = s.get("losses", 0) or 0
+    pending= s.get("pending", 0) or 0
+    total  = wins + losses + pending
+
+    return {
+        "is_running":    _backtest_state["is_running"],
+        "trades_so_far": total,
+        "wins":          wins,
+        "losses":        losses,
+        "pending":       pending,
+        "start":         _backtest_state.get("start"),
+        "end":           _backtest_state.get("end"),
+        "error":         _backtest_state.get("error"),
+    }
 
 
 # ============================================================================

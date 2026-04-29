@@ -1,11 +1,16 @@
 """
-XAUUSD Signal Finder — v4.20
+XAUUSD Signal Finder — v4.25
 ระบบหาจุด Entry / SL / TP สำหรับ XAUUSD M5
 
 Patterns ที่รองรับ:
-  1. เทรนด์ขึ้น  → BUY  (Branch A)
-  2. เทรนด์ลง    → SELL (Branch B)
-  3. ภูเขา     → BUY  (Branch D) รวม รอบ 2
+  1. เทรนด์ขึ้น Impulse  → BUY  (Branch A)
+  2. เทรนด์ลง Impulse    → SELL (Branch B)
+  3. ภูเขา              → BUY  (Branch D) รวม รอบ 2
+
+V4.25 Changes:
+  - เพิ่ม impulse verification (3+ consecutive candles, 50% R55 total)
+  - Pattern names: DOWNTREND_IMPULSE, UPTREND_IMPULSE
+  - Matches TradingView backtest: 62.1% WR, 42 trades
 
 การใช้งาน:
   from xauusd_signal import find_signal, OHLC
@@ -48,7 +53,7 @@ class OHLC:
 
 @dataclass
 class Signal:
-    pattern:    str           # 'DOWNTREND' | 'MOUNTAIN' | 'MOUNTAIN_R2' | 'UPTREND'
+    pattern:    str           # 'DOWNTREND_IMPULSE' | 'UPTREND_IMPULSE' | 'MOUNTAIN' | 'MOUNTAIN_R2'
     direction:  str           # 'BUY' | 'SELL'
     quality:    str           # '100%✓' | '~60%⚠️'
     entry:      float
@@ -211,6 +216,65 @@ def _calc_sl_mountain(base_low: float, base_tuples: list[tuple],
     return sl1, "SL1"
 
 
+def _verify_impulse(window_t: list[tuple], direction: str, R55: float) -> bool:
+    """
+    V4.25: ตรวจว่ามี impulse move ใน window
+
+    เงื่อนไข:
+    - หา consecutive candles ที่มี body ≥ 3% R55
+    - direction 'SELL': bearish (Close < Open)
+    - direction 'BUY':  bullish (Close > Open)
+    - ต้องมีอย่างน้อย 3 แท่งต่อเนื่อง
+    - รวม body ≥ 50% R55
+
+    Note: Impulse can occur anywhere in window.
+          Zone check applies to consolidation (LH/LL or HL/HH), not impulse.
+
+    Args:
+        window_t: 55 bars window (tuple format)
+        direction: 'SELL' หรือ 'BUY'
+        R55: Range 55 (pip)
+
+    Returns:
+        True ถ้าพบ impulse move, False ถ้าไม่พบ
+    """
+    if len(window_t) < 3:
+        return False
+
+    # Thresholds
+    body_thresh  = R55 * 0.03 / 100   # 3% R55 ต่อแท่ง (USD)
+    total_thresh = R55 * 0.50 / 100   # 50% R55 รวม (USD)
+    min_bars     = 3
+
+    # Loop through window to find consecutive impulse candles
+    for i in range(len(window_t)):
+        consecutive = 0
+        total_body  = 0.0
+
+        # Try to build consecutive run starting from i
+        for j in range(i, min(i + 10, len(window_t))):
+            bar = window_t[j]
+            o, c = _O(bar), _C(bar)
+            body = abs(c - o)
+
+            # Check direction
+            is_directional = (c < o) if direction == 'SELL' else (c > o)
+
+            # Check if this bar qualifies
+            if is_directional and body >= body_thresh:
+                consecutive += 1
+                total_body  += body
+
+                # Check if we found impulse
+                if consecutive >= min_bars and total_body >= total_thresh:
+                    return True
+            else:
+                # Bar doesn't qualify → reset
+                break
+
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Pattern Detectors
 # ═══════════════════════════════════════════════════════════════════
@@ -243,6 +307,10 @@ def _detect_downtrend(window_t: list[tuple], all_t: list[tuple],
 
     rb_pct = (last_lh['body_hi'] - last_ll['body_lo']) * 100 / R55 * 100
     if not (10 <= rb_pct <= 40):
+        return None
+
+    # V4.25: Impulse verification
+    if not _verify_impulse(window_t, 'SELL', R55):
         return None
 
     lh_hi   = last_lh['body_hi']
@@ -290,7 +358,7 @@ def _detect_downtrend(window_t: list[tuple], all_t: list[tuple],
     quality = "100%✓" if ("100%" in _q(pct_lh) and "100%" in _q(pct_ll)) else "~60%⚠️"
 
     return Signal(
-        pattern   = 'DOWNTREND',
+        pattern   = 'DOWNTREND_IMPULSE',
         direction = 'SELL',
         quality   = quality,
         entry     = entry,
@@ -342,6 +410,10 @@ def _detect_uptrend(window_t: list[tuple], all_t: list[tuple],
     if not (10 <= rb_pct <= 40):
         return None
 
+    # V4.25: Impulse verification
+    if not _verify_impulse(window_t, 'BUY', R55):
+        return None
+
     hl_lo   = last_hl['body_lo']
     zone_hi = hl_lo + _BUF100
     if _L(cur) > zone_hi:
@@ -383,7 +455,7 @@ def _detect_uptrend(window_t: list[tuple], all_t: list[tuple],
     quality = "100%✓" if ("100%" in _q(100 - pct_hl) and "100%" in _q(100 - pct_hh)) else "~60%⚠️"
 
     return Signal(
-        pattern   = 'UPTREND',
+        pattern   = 'UPTREND_IMPULSE',
         direction = 'BUY',
         quality   = quality,
         entry     = entry,
