@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 def is_near_market_close(candle_time: datetime,
                         close_hour: int = 21,
                         close_minute: int = 0,
-                        buffer_minutes: int = 60) -> bool:
+                        buffer_minutes: int = 120) -> bool:
     """
     V4.25: Block trades before market close
 
@@ -50,12 +50,17 @@ def is_near_market_close(candle_time: datetime,
     else:
         utc_time = candle_time.astimezone(pytz.UTC)
 
-    # Check if in 20:00-21:00 UTC range (60min before 21:00 close)
+    # V65: Only block on Friday (weekday 4)
+    if utc_time.weekday() != 4:
+        return False
+
+    # Check if in 19:00-21:00 UTC range (120min before 21:00 close)
     hour = utc_time.hour
     minute = utc_time.minute
 
-    # Simple check: if hour is 20 (20:00-20:59), block
-    if hour == close_hour - 1 and minute >= 0:
+    # With 120min buffer: block from 19:00-21:00
+    # If hour is 19 or 20, block
+    if hour in [close_hour - 2, close_hour - 1]:
         return True
 
     # If exactly at close hour and within first few minutes

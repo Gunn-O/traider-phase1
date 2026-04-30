@@ -518,6 +518,42 @@ def _detect_mountain(window_t: list[tuple], all_t: list[tuple],
 
     if height < R55 * 0.50:
         return None
+    # V65: เงื่อนไขเพิ่มเติม 4 ข้อ
+    # 1. ขนาดภูเขา >= 10 แท่ง
+    bars_base_to_peak = peak_sw['bar_nums'][0] - base_sw['bar_nums'][-1]
+    bars_peak_to_cur = cur[0] - peak_sw['bar_nums'][-1]
+    mountain_size = bars_base_to_peak + bars_peak_to_cur
+    if mountain_size < 10:
+        return None
+    
+    # 2. ห้ามมี Low ทะลุ thresh_10 ในช่วง 20-80% ของภูเขา
+    thresh_10 = base_lo + (peak_hi - base_lo) * 0.20
+    all_mid = [b for b in window_t
+               if base_sw['bar_nums'][-1] < b[0] <= cur[0]]
+    total_bars = len(all_mid)
+    if total_bars >= 3:
+        lo20 = int(total_bars * 0.20)
+        hi80 = int(total_bars * 0.80)
+        scan_bars = all_mid[lo20:hi80+1]
+        for b in scan_bars:
+            if _L(b) <= thresh_10:
+                return None  # ราคาลงเทลุดเกินเกณฑ์ → ✗
+    
+    # 3. ฐาน→entry ไม่เกิน 42 แท่ง
+    bars_base_to_cur = cur[0] - base_sw['bar_nums'][-1]
+    if bars_base_to_cur > 42:
+        return None
+    
+    # 4. ตรวจ Swing High ระหว่างฐาน → Entry Zone
+    # ถ้าฐาน → entry ≤ 25 แท่ง → ข้าม SH check
+    bars_base_to_entry = cur[0] - base_sw['bar_nums'][-1]
+    if bars_base_to_entry > 25:
+        peak_bar_last = peak_sw['bar_nums'][-1]
+        sh_after_peak = [s for s in hs if s['bar_nums'][0] > peak_bar_last
+                         and s['bar_nums'][0] <= cur[0]]
+        if len(sh_after_peak) > 2:
+            return None
+
 
     buf = min(height * 0.10, 100)
     zone_lo = base_lo - buf / 100
@@ -670,17 +706,18 @@ def find_signal(
         sig.lot = _calc_lot(sig.risk_pip, portfolio)
         return sig
 
-    # 3. เทรนด์ลง
-    sig = _detect_downtrend(window_t, all_t, R55, H55, L55, cur_t)
-    if sig:
-        sig.lot = _calc_lot(sig.risk_pip, portfolio)
-        return sig
+    # V65: MOUNTAIN-only — Downtrend/Uptrend disabled
+    # # 3. เทรนด์ลง
+    # sig = _detect_downtrend(window_t, all_t, R55, H55, L55, cur_t)
+    # if sig:
+    #     sig.lot = _calc_lot(sig.risk_pip, portfolio)
+    #     return sig
 
-    # 4. เทรนด์ขึ้น
-    sig = _detect_uptrend(window_t, all_t, R55, H55, L55, cur_t)
-    if sig:
-        sig.lot = _calc_lot(sig.risk_pip, portfolio)
-        return sig
+    # # 4. เทรนด์ขึ้น
+    # sig = _detect_uptrend(window_t, all_t, R55, H55, L55, cur_t)
+    # if sig:
+    #     sig.lot = _calc_lot(sig.risk_pip, portfolio)
+    #     return sig
 
     return None
 

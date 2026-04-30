@@ -17,6 +17,7 @@ import logging
 from typing import Dict
 
 from config import RISK_CONFIG
+from utils.strategy_loader import is_pattern_active
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -156,6 +157,16 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
         return {
             'pre_approved': False,
             'skip_reason': f'R:R ต่ำเกิน ({signal.rr:.2f} < 1.0)',
+            'chart_context': {}
+        }
+
+    # Check 5b: V65 Strategy active check
+    pattern_name = signal.pattern
+    if not is_pattern_active(pattern_name):
+        logger.info(f"SKIP: Pattern '{pattern_name}' is not active in strategy config")
+        return {
+            'pre_approved': False,
+            'skip_reason': f'Pattern {pattern_name} ปิดการใช้งาน (ดูที่ Strategy Manager)',
             'chart_context': {}
         }
 

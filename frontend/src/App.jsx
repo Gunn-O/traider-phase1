@@ -8,6 +8,7 @@ import TradeHistory from './pages/TradeHistory'
 import Proposals from './pages/Proposals'
 import Settings from './pages/Settings'
 import Backtest from './pages/Backtest'
+import Strategy from './pages/Strategy'
 
 export default function App() {
   const {
@@ -53,6 +54,10 @@ export default function App() {
             <Route
               path="/backtest"
               element={<Backtest/>}
+            />
+            <Route
+              path="/strategy"
+              element={<Strategy/>}
             />
             <Route
               path="/settings"

@@ -773,6 +773,93 @@ async def get_backtest_status():
 
 
 # ============================================================================
+# STRATEGY MANAGER ENDPOINTS (V65)
+# ============================================================================
+
+@app.get("/api/strategies")
+async def get_strategies():
+    """
+    Get all strategy patterns with their active status
+
+    Returns:
+        {
+            "version": str,
+            "patterns": {
+                "MOUNTAIN": {"active": bool, "name": str, ...},
+                ...
+            },
+            "active_count": int
+        }
+    """
+    from utils.strategy_loader import load_config, get_active_patterns
+
+    try:
+        config = load_config()
+        active = get_active_patterns()
+
+        return {
+            "version": config.get("version", "?"),
+            "patterns": config.get("patterns", {}),
+            "active_count": len(active),
+            "active_patterns": active,
+            "last_updated": config.get("last_updated", "")
+        }
+    except Exception as e:
+        logger.error(f"Failed to load strategies: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+@app.post("/api/strategies")
+async def update_strategies(request: Request):
+    """
+    Update active pattern list
+
+    Body:
+        {
+            "active": ["MOUNTAIN", "MOUNTAIN_R2"]
+        }
+
+    Returns:
+        {
+            "success": bool,
+            "active_patterns": List[str]
+        }
+    """
+    from utils.strategy_loader import save_active, get_active_patterns
+
+    try:
+        body = await request.json()
+        active_list = body.get("active", [])
+
+        if not isinstance(active_list, list):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "active must be a list of pattern names"}
+            )
+
+        # Save updated active list
+        save_active(active_list)
+
+        # Verify
+        updated = get_active_patterns()
+
+        logger.info(f"Strategy patterns updated: {updated}")
+        return {
+            "success": True,
+            "active_patterns": updated
+        }
+    except Exception as e:
+        logger.error(f"Failed to update strategies: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+# ============================================================================
 # STARTUP / SHUTDOWN EVENTS
 # ============================================================================
 
