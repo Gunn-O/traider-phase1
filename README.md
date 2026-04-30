@@ -261,6 +261,86 @@ Enable/disable trading patterns:
 
 ---
 
+## 🖱️ Windows Desktop Shortcuts (One-Click Launch)
+
+For easy access, create desktop shortcuts that launch the application with one click:
+
+### Quick Setup (Automatic)
+
+Run this command in PowerShell (as Administrator):
+
+```powershell
+# Right-click PowerShell → Run as Administrator
+cd Desktop\projects\traider-phase1
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\create_shortcuts.ps1
+```
+
+**This creates 4 shortcuts on your Desktop:**
+
+1. **Traider Dashboard** 🚀 **(Recommended)**
+   - Starts Backend + Frontend
+   - Opens browser automatically
+   - Everything in one click!
+
+2. **Traider Bot** 🤖
+   - Interactive menu to choose mode:
+     - Backtest
+     - Simulation
+     - Live Trading
+     - Winrate Test
+     - Dashboard
+
+3. **Traider Backend** ⚙️
+   - Starts API server only
+   - For advanced users
+
+4. **Traider Frontend** 🎨
+   - Starts dashboard only
+   - Requires backend running separately
+
+### Manual Setup (Alternative)
+
+If automatic setup doesn't work, create shortcuts manually:
+
+**For Dashboard (All-in-One):**
+1. Right-click Desktop → New → Shortcut
+2. Location: `C:\Users\YourName\Desktop\projects\traider-phase1\start_dashboard.bat`
+3. Name: `Traider Dashboard`
+4. Click Finish
+
+**For Bot Launcher:**
+1. Right-click Desktop → New → Shortcut
+2. Location: `C:\Users\YourName\Desktop\projects\traider-phase1\start_bot.bat`
+3. Name: `Traider Bot`
+4. Click Finish
+
+### 📂 Available Batch Files
+
+You can also run these directly from the project folder:
+
+| File | Description | Use Case |
+|------|-------------|----------|
+| `start_dashboard.bat` | Start everything + open browser | **Recommended for daily use** |
+| `start_bot.bat` | Interactive menu launcher | Choose mode interactively |
+| `start_backend.bat` | Backend API only | For development |
+| `start_frontend.bat` | Frontend only | For development |
+
+### 🎯 Recommended Workflow
+
+**For Trading:**
+1. Double-click **"Traider Dashboard"** on Desktop
+2. Wait 10-15 seconds
+3. Dashboard opens in browser automatically
+4. Start trading!
+
+**For Development:**
+1. Use `start_backend.bat` in one terminal
+2. Use `start_frontend.bat` in another terminal
+3. Make changes and see live reload
+
+---
+
 ## Running the Bot
 
 ### 1. Backtest Mode (No API calls, Historical Data)
@@ -530,9 +610,10 @@ Tested against TradingView data (Apr 1-21, 2026):
 - [ ] Configure MT5 credentials in `.env`
 - [ ] Enable Algo Trading in MT5
 - [ ] Test MT5 connection (`python -c "import MetaTrader5..."`)
+- [ ] Create desktop shortcuts (`.\create_shortcuts.ps1` in PowerShell)
 - [ ] Run backtest (`python main.py --backtest --no-ai`)
 - [ ] Run simulation (`python main.py --simulate`)
-- [ ] Start dashboard (`python api_server.py` + `npm run dev`)
+- [ ] Start dashboard (double-click "Traider Dashboard" icon OR `python api_server.py` + `npm run dev`)
 - [ ] Review results and configure risk settings
 - [ ] (Optional) Enable LINE notifications
 - [ ] Ready for live trading!
