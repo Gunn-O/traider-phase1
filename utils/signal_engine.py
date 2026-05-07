@@ -193,9 +193,17 @@ def run_signal_engine(
             'mountain_state': dict (updated)
         }
     """
-    # Single TF mode: Use M5 only
-    timeframe = 'M5'
+    # Active timeframe — config-driven (default M5, override via env BACKTEST_TIMEFRAME)
+    import os as _os
+    timeframe = _os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
     candles = candles_by_tf.get(timeframe, [])
+    # Fallback to first available TF if exact match not found
+    if not candles:
+        for tf in ('M1', 'M5', 'M15', 'M30', 'H1', 'H4'):
+            if candles_by_tf.get(tf):
+                timeframe = tf
+                candles = candles_by_tf[tf]
+                break
 
     if not candles or len(candles) < 55:
         logger.warning(f"Not enough M5 candles: {len(candles)} < 55")
@@ -223,12 +231,31 @@ def run_signal_engine(
     ohlc_bars = convert_candles_to_ohlc(candles)
     logger.debug(f"Converted {len(ohlc_bars)} M5 candles to OHLC format")
 
-    # Call xauusd_signal.find_signal()
-    signal = find_signal(
-        bars=ohlc_bars,
-        portfolio=portfolio,
-        mountain_state=mountain_state
-    )
+    # Run each enabled strategy and collect candidates
+    # Strategies in strategies/ each expose find_signal(bars, portfolio[, ...])
+    # is_pattern_active() reads config/strategies.json so toggles take effect immediately
+    from utils.strategy_loader import is_pattern_active
+    from strategies import mountain as _mountain_strat
+    from strategies import mai_ruay as _mai_ruay_strat
+
+    candidates: list = []
+
+    # MOUNTAIN / MOUNTAIN_R2 — single call returns either pattern; gate by both flags
+    if is_pattern_active('MOUNTAIN') or is_pattern_active('MOUNTAIN_R2'):
+        sig_mtn = _mountain_strat.find_signal(
+            bars=ohlc_bars, portfolio=portfolio, mountain_state=mountain_state
+        )
+        if sig_mtn is not None and is_pattern_active(sig_mtn.pattern):
+            candidates.append(sig_mtn)
+
+    # MAI_RUAY
+    if is_pattern_active('MAI_RUAY'):
+        sig_mr = _mai_ruay_strat.find_signal(bars=ohlc_bars, portfolio=portfolio)
+        if sig_mr is not None:
+            candidates.append(sig_mr)
+
+    # Pick best by R:R (matches existing xauusd_signal selection logic)
+    signal = max(candidates, key=lambda s: s.rr) if candidates else None
 
     # Get current price and session
     current_price = candles[-1]['close']
@@ -280,7 +307,8 @@ def run_signal_engine(
         'UPTREND': 'uptrend',               # V4.20 backward compatibility
         'UPTREND_IMPULSE': 'uptrend',       # V4.25
         'MOUNTAIN': 'mountain',
-        'MOUNTAIN_R2': 'mountain_r2'
+        'MOUNTAIN_R2': 'mountain_r2',
+        'MAI_RUAY': 'mai_ruay',             # Branch F (Father/Mother candle)
     }
     chart_type = chart_type_mapping.get(signal.pattern, 'unclear')
 
@@ -295,6 +323,8 @@ def run_signal_engine(
         technique = signal.details.get('technique', 'twin_candle')
     elif signal.pattern in ['MOUNTAIN', 'MOUNTAIN_R2']:
         technique = 'mountain'
+    elif signal.pattern == 'MAI_RUAY':
+        technique = 'mai_ruay'
     else:
         technique = 'skip'
 

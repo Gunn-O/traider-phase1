@@ -29,8 +29,15 @@ RISK_CONFIG = {
     'trailing_sl_target': 500,   # pip — ตั้ง SL ที่ +500 pip
     'trailing_sl_step': 1000,    # pip — เลื่อนทุก 1000 pip
 
-    # R:R
-    'min_rr_ratio': 1.0,
+    # R:R — Cent account: ลด threshold ต่ำสุดเพื่อเก็บข้อมูล
+    # Mountain: R:R เฉลี่ย 1.24 → ผ่านสบาย
+    # MAI_RUAY: R:R เฉลี่ย 0.73 → ต้องลด threshold ถึงผ่าน
+    # Trade-off: WR ต้องสูงพอชดเชย (MAI_RUAY 66.7% > break-even 57.8% → profitable)
+    'min_rr_ratio': 0.0,         # ลดเป็น 0 (เก็บข้อมูล Cent account)
+
+    # Anti-overtrade — Cooldown หลัง signal เปิด
+    'cooldown_bars': 3,          # ห่างจาก signal ก่อน ≥ N candles ใหม่ (M5: 3 = 15 min, M1: 15 = 15 min)
+    'duplicate_pip_threshold': 50,  # ห่าง entry < 50 pip + same chart_type → SKIP (เปลี่ยนจาก 30)
 
     # Winrate Test
     'winrate_test_lot': 0.01

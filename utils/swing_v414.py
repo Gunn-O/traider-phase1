@@ -62,8 +62,6 @@ def scan_swings(bars, R55,
     """
     thresh1  = R55 * 0.01  # 1%R55  â à¹à¸à¸·à¹à¸­à¸à¹à¸à¸à¸±à¹à¸à¸à¹à¸³à¹à¸à¹à¸à¸à¸¹à¹
     thresh5  = R55 * 0.10  # 10%R55  â à¹à¸à¹à¸à¸«à¸à¸² exception
-    pair_thresh = max(R55 * 0.01, 100)  # V65: dynamic pair threshold
-
     highs, lows = [], []
     seen_h, seen_l = set(), set()
 
@@ -120,6 +118,7 @@ def scan_swings(bars, R55,
     for i in range(len(bars) - 1):
         j = i + 1
         bi, bj = bars[i], bars[j]
+        pair_thresh = max(R55 * 0.01, 100)   # 1%R55 หรือ 100pip แล้วแต่อันมากกว่า
         if abs(C(bi) - O(bj)) * 100 > pair_thresh: continue
 
         bid = bsize(bi) < thresh1

@@ -16,7 +16,7 @@ export default function Settings({ botState }) {
         <div className="setting-row">
           <span>Default Symbol</span>
           <span className="mono">
-            {botState?.symbol || 'XAUUSDm'}
+            {botState?.symbol || 'XAUUSDc'}
           </span>
         </div>
         <div className="setting-row">

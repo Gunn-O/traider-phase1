@@ -1,11 +1,42 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import './TopBar.css'
+
+// Relational map: data source -> selectable symbols
+// (label is what user sees; value is what we send to backend — backend maps to provider symbol)
+const SYMBOL_OPTIONS_BY_SOURCE = {
+  auto: [
+    { value: 'XAUUSDc', label: 'XAUUSDc (Cent)' },
+    { value: 'XAUUSDm', label: 'XAUUSDm (Micro)' },
+    { value: 'XAUUSD',  label: 'XAUUSD (Standard)' },
+  ],
+  mt5: [
+    { value: 'XAUUSDc', label: 'XAUUSDc (Cent)' },
+    { value: 'XAUUSDm', label: 'XAUUSDm (Micro)' },
+    { value: 'XAUUSD',  label: 'XAUUSD (Standard)' },
+  ],
+  yf: [
+    { value: 'XAUUSD', label: 'Gold Futures (GC=F)' },
+  ],
+  tv: [
+    { value: 'XAUUSD', label: 'XAUUSD (OANDA)' },
+  ],
+}
 
 export default function TopBar({ botState, onStart, onStop, onEmergencyStop }) {
   const [mode, setMode] = useState('paper')
-  const [symbol, setSymbol] = useState('XAUUSDm')
+  const [symbol, setSymbol] = useState('XAUUSDc')
   const [timeframe, setTimeframe] = useState('M5')
   const [dataSource, setDataSource] = useState('auto')
+
+  // When data source changes, ensure selected symbol is still valid for that source
+  useEffect(() => {
+    const allowed = SYMBOL_OPTIONS_BY_SOURCE[dataSource] || []
+    if (!allowed.find(o => o.value === symbol)) {
+      setSymbol(allowed[0]?.value || 'XAUUSDc')
+    }
+  }, [dataSource])
+
+  const symbolOptions = SYMBOL_OPTIONS_BY_SOURCE[dataSource] || SYMBOL_OPTIONS_BY_SOURCE.auto
 
   const statusClass = botState?.status === 'running' ? 'running' : 'stopped'
   const dataSourceClass = botState?.data_source_actual === 'TradingView' ? 'tv' : 'yfinance'
@@ -61,10 +92,12 @@ export default function TopBar({ botState, onStart, onStop, onEmergencyStop }) {
             disabled={botState?.status === 'running'}
             className="control-select"
           >
+            <option value="M1">M1</option>
             <option value="M5">M5</option>
             <option value="M15">M15</option>
             <option value="M30">M30</option>
             <option value="H1">H1</option>
+            <option value="H4">H4</option>
           </select>
 
           <select
@@ -75,7 +108,19 @@ export default function TopBar({ botState, onStart, onStop, onEmergencyStop }) {
           >
             <option value="auto">Auto</option>
             <option value="mt5">MT5</option>
+            <option value="yf">yfinance</option>
             <option value="tv">TradingView</option>
+          </select>
+
+          <select
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+            disabled={botState?.status === 'running'}
+            className="control-select"
+          >
+            {symbolOptions.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
           </select>
 
           {botState?.status !== 'running' ? (

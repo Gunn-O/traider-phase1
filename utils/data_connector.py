@@ -273,7 +273,7 @@ class DataConnector:
         for attempt in range(max_retries):
             try:
                 # Get data from TradingView
-                # Gold symbols (XAUUSD/XAUUSDm) on OANDA exchange
+                # Gold symbols (XAUUSD/XAUUSDc) on OANDA exchange
                 if start_date and end_date:
                     # Date range mode for backtest
                     # Calculate number of bars needed
@@ -512,12 +512,12 @@ class MT5Connector:
     ใช้ได้ทุก mode: backtest/simulate/paper/live
     """
 
-    def __init__(self, symbol: str = "XAUUSDm"):
+    def __init__(self, symbol: str = "XAUUSDc"):
         """
         Initialize MT5 Connector
 
         Args:
-            symbol: Trading symbol (e.g., "XAUUSDm", "XAUUSD")
+            symbol: Trading symbol (e.g., "XAUUSDc", "XAUUSD")
         """
         if not MT5_AVAILABLE:
             raise RuntimeError("MetaTrader5 not available")
@@ -525,12 +525,15 @@ class MT5Connector:
         self.symbol = symbol
         self.connected = False
 
-        # Try to initialize MT5
-        if not mt5.initialize():
+        # Try to initialize MT5 (support MT5_TERMINAL_PATH env to pin a specific
+        # terminal when multiple MT5 instances are installed)
+        mt5_path = os.getenv('MT5_TERMINAL_PATH', '').strip()
+        init_ok = mt5.initialize(path=mt5_path) if mt5_path else mt5.initialize()
+        if not init_ok:
             raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
         self.connected = True
-        logger.info(f"✅ MT5 connected | symbol={symbol}")
+        logger.info(f"✅ MT5 connected | symbol={symbol}" + (f" | path={mt5_path}" if mt5_path else ""))
 
     def get_candles(
         self,
@@ -588,7 +591,7 @@ class MT5Connector:
                 "high": float(r["high"]),
                 "low": float(r["low"]),
                 "close": float(r["close"]),
-                "volume": int(r.get("tick_volume", 0))
+                "volume": int(r["tick_volume"])
             })
 
         return candles
@@ -1211,7 +1214,7 @@ class TVConnector:
 # Auto-Detection Factory Function
 # ============================================================================
 
-def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
+def create_connector(mode: str = "auto", symbol: str = "XAUUSDc"):
     """
     Auto-detect data source and create appropriate connector
 
@@ -1228,9 +1231,9 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
               - "tv": Force TradingView
               - "backtest": Same as auto (for backward compatibility)
         symbol: Trading symbol
-                - MT5: use "XAUUSDm" (cent) or "XAUUSD" (standard)
+                - MT5: use "XAUUSDc" (cent) or "XAUUSD" (standard)
                 - yfinance: use "XAUUSD" (converts to GC=F internally)
-                - TV: use "XAUUSD" (OANDA doesn't have XAUUSDm)
+                - TV: use "XAUUSD" (OANDA doesn't have XAUUSDc)
 
     Returns:
         MT5Connector, YFinanceConnector, or TVConnector instance
@@ -1341,7 +1344,7 @@ if __name__ == "__main__":
 
     for tf in timeframes:
         try:
-            candles = connector.get_latest_candles("XAUUSDm", timeframe=tf, count=55)
+            candles = connector.get_latest_candles("XAUUSDc", timeframe=tf, count=55)
             print(f"✓ {tf}: {len(candles)} candles")
 
             if candles:

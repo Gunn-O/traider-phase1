@@ -54,12 +54,13 @@ _backtest_state = {
     "pid": None,
 }
 
-def _run_backtest_thread(start: str, end: str):
+def _run_backtest_thread(start: str, end: str, timeframe: str = "M5"):
     """รัน backtest ใน background thread"""
     global _backtest_state
     try:
         _backtest_state["is_running"] = True
         _backtest_state["error"] = None
+        _backtest_state["timeframe"] = timeframe
 
         # หา project root (ที่มี main.py)
         project_root = Path(__file__).parent
@@ -73,12 +74,18 @@ def _run_backtest_thread(start: str, end: str):
             "--decision-engine", "python"
         ]
 
+        # Pass BACKTEST_TIMEFRAME via env to subprocess
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["BACKTEST_TIMEFRAME"] = timeframe
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(project_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            env=env,
         )
         _backtest_state["pid"] = proc.pid
 
@@ -105,7 +112,7 @@ def _run_backtest_thread(start: str, end: str):
 bot_state = {
     "status": "stopped",           # stopped / running / error
     "mode": "paper",               # paper / micro / live
-    "symbol": "XAUUSDm",           # Trading symbol (XAUUSDm=Cent, XAUUSD=Real)
+    "symbol": "XAUUSDc",           # Trading symbol (XAUUSDc=Cent, XAUUSD=Real)
     "trading_tf": "M5",            # Selected timeframe
     "data_source_mode": "auto",    # V4.3: auto / mt5 / tv (user selected)
     "data_source_actual": "TradingView",  # V4.3: MT5 / TradingView (after connect)
@@ -201,7 +208,7 @@ manager = ConnectionManager()
 
 class StartRequest(BaseModel):
     tf: str = "M5"           # Timeframe to trade
-    symbol: str = "XAUUSDm"  # Symbol to trade (XAUUSDm=Cent, XAUUSD=Real)
+    symbol: str = "XAUUSDc"  # Symbol to trade (XAUUSDc=Cent, XAUUSD=Real)
     mode: str = "paper"      # Trading mode (paper/micro/live)
     data_source: str = "auto"  # Data source (auto/mt5/tv)
 
@@ -240,10 +247,10 @@ async def start_bot(request: StartRequest):
     Start bot with selected timeframe and symbol
 
     Args:
-        request: {"tf": "M5", "symbol": "XAUUSDm"}
+        request: {"tf": "M5", "symbol": "XAUUSDc"}
 
     Returns:
-        {"status": "started", "tf": "M5", "symbol": "XAUUSDm"}
+        {"status": "started", "tf": "M5", "symbol": "XAUUSDc"}
     """
     if bot_state["status"] == "running":
         raise HTTPException(status_code=400, detail="Bot already running")
@@ -254,7 +261,7 @@ async def start_bot(request: StartRequest):
         raise HTTPException(status_code=400, detail=f"Invalid TF. Must be one of {valid_tfs}")
 
     # Validate Symbol
-    valid_symbols = ["XAUUSDm", "XAUUSD"]
+    valid_symbols = ["XAUUSDc", "XAUUSDm", "XAUUSD"]
     if request.symbol not in valid_symbols:
         raise HTTPException(status_code=400, detail=f"Invalid symbol. Must be one of {valid_symbols}")
 
@@ -264,17 +271,12 @@ async def start_bot(request: StartRequest):
         raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of {valid_modes}")
 
     # Validate Data Source
-    valid_data_sources = ["auto", "mt5", "tv"]
+    valid_data_sources = ["auto", "mt5", "yf", "tv"]
     if request.data_source not in valid_data_sources:
         raise HTTPException(status_code=400, detail=f"Invalid data_source. Must be one of {valid_data_sources}")
 
-    # Auto-set symbol based on mode (paper always uses XAUUSDm for price data)
-    if request.mode == "paper":
-        actual_symbol = "XAUUSDm"
-    elif request.mode == "micro":
-        actual_symbol = "XAUUSDm"
-    else:  # live
-        actual_symbol = "XAUUSD"
+    # Use symbol as selected by user (no auto-override)
+    actual_symbol = request.symbol
 
     # Update state
     bot_state["status"] = "running"
@@ -648,8 +650,15 @@ async def run_backtest(request: Request):
                 "message": "Backtest กำลังรันอยู่"}
 
     body = await request.json()
-    start = body.get("start", "2026-04-01")
-    end   = body.get("end",   "2026-04-21")
+    start     = body.get("start", "2026-04-01")
+    end       = body.get("end",   "2026-04-21")
+    timeframe = body.get("timeframe", "M5").upper()
+
+    # Validate timeframe
+    valid_tfs = ["M1", "M5", "M15", "M30", "H1", "H4"]
+    if timeframe not in valid_tfs:
+        return {"status": "error",
+                "message": f"Timeframe ต้องเป็นหนึ่งใน {valid_tfs}"}
 
     # Validate date format
     try:
@@ -686,18 +695,19 @@ async def run_backtest(request: Request):
         logger.error(f"LocalDB clear failed: {e}")
 
     # อัปเดต state
-    _backtest_state["start"] = start
-    _backtest_state["end"]   = end
+    _backtest_state["start"]     = start
+    _backtest_state["end"]       = end
+    _backtest_state["timeframe"] = timeframe
 
     # รันใน background thread
     t = threading.Thread(
         target=_run_backtest_thread,
-        args=(start, end),
+        args=(start, end, timeframe),
         daemon=True
     )
     t.start()
 
-    return {"status": "started", "start": start, "end": end}
+    return {"status": "started", "start": start, "end": end, "timeframe": timeframe}
 
 
 @app.get("/api/backtest/results")

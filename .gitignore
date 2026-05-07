@@ -57,3 +57,12 @@ strategy/proposals/
 
 # Claude Code
 .claude/
+
+# PyInstaller build artifacts
+TraiderLauncher.exe
+TraiderLauncher.spec
+build/
+dist/
+
+# Backtest output
+backtest_results/

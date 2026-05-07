@@ -250,6 +250,7 @@ const TradeList = ({ trades }) => {
 export default function Backtest() {
   const [startDate, setStartDate] = useState("2026-04-01")
   const [endDate,   setEndDate]   = useState("2026-04-21")
+  const [timeframe, setTimeframe] = useState("M1")
   const [results,   setResults]   = useState(null)
   const [loading,   setLoading]   = useState(false)
   const [polling,   setPolling]   = useState(false)
@@ -282,7 +283,7 @@ export default function Backtest() {
     const res = await fetch(`${API}/api/backtest/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ start: startDate, end: endDate })
+      body: JSON.stringify({ start: startDate, end: endDate, timeframe })
     })
 
     const data = await res.json()
@@ -341,6 +342,22 @@ export default function Backtest() {
                    }} />
           </div>
         ))}
+
+        {/* Timeframe selector */}
+        <div>
+          <div style={{ fontSize: 11, color: "#555", marginBottom: 4 }}>Timeframe</div>
+          <select value={timeframe}
+                  onChange={e => setTimeframe(e.target.value)}
+                  style={{
+                    background: "#1a1a1a", border: "1px solid #333",
+                    borderRadius: 6, padding: "8px 12px",
+                    color: "#fff", fontSize: 14
+                  }}>
+            {["M1", "M5", "M15", "M30", "H1", "H4"].map(tf => (
+              <option key={tf} value={tf}>{tf}</option>
+            ))}
+          </select>
+        </div>
 
         {/* Day count indicator */}
         {startDate && endDate && (() => {
