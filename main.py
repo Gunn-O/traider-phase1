@@ -66,7 +66,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.FileHandler('traider.log'),
+        # encoding='utf-8' so emoji/Thai chars don't get dropped on cp874 systems
+        logging.FileHandler('traider.log', encoding='utf-8'),
         logging.StreamHandler()
     ],
     force=True
@@ -273,17 +274,29 @@ class TraiderMainLoop:
         self.mode = 'winrate_test' if args.winrate_test else 'simulate'
         self.is_backtest = args.backtest if hasattr(args, 'backtest') else False
 
-        # Use symbol from bot_state (from dashboard) or fallback to env var
-        self.symbol = bot_state.get("symbol", os.getenv('BACKTEST_SYMBOL', 'XAUUSDc'))
+        # CLI args win over bot_state (subprocesses don't share bot_state with api_server)
+        self.symbol = (
+            getattr(args, 'symbol', None)
+            or bot_state.get("symbol")
+            or os.getenv('BACKTEST_SYMBOL', 'XAUUSDc')
+        )
         self.balance = float(os.getenv('ACCOUNT_BALANCE', '300'))
 
-        # Get trading mode from bot_state (from dashboard)
-        self.trading_mode = bot_state.get("mode", "paper")
+        self.trading_mode = (
+            getattr(args, 'mode', None)
+            or bot_state.get("mode", "paper")
+        )
 
         # Real-money safety: require explicit confirmation 2x for live/micro modes
-        # (skipped in backtest path because no orders go to broker there)
+        # Skipped when --no-confirm (api_server-spawned subprocess) or in backtest
         if self.trading_mode in ('micro', 'live') and not self.is_backtest:
-            self._confirm_real_trade()
+            if not getattr(args, 'no_confirm', False):
+                self._confirm_real_trade()
+            else:
+                logger.warning(
+                    f"⚠️  Real-money mode {self.trading_mode!r} bypassing 2x confirmation "
+                    f"(--no-confirm) — caller is responsible for prior user confirmation."
+                )
 
         # Update bot_state with balance
         update_bot_state({"balance": self.balance})
@@ -291,17 +304,21 @@ class TraiderMainLoop:
         logger.info("="*70)
         logger.info("🤖 Tra(i)der Phase I v4.3 — AI Trading System (4-Agent + Reflector)")
         logger.info("="*70)
-        logger.info(f"Mode: {self.mode}")
-        logger.info(f"Symbol: {self.symbol}")
-        logger.info(f"Balance: ${self.balance:,.2f}")
+        logger.info(f"Mode (label):   {self.mode}")
+        logger.info(f"Trading mode:   {self.trading_mode}  (paper=sim / micro=cent / live=real)")
+        logger.info(f"Symbol:         {self.symbol}")
+        logger.info(f"Active TF:      {os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()}  (env BACKTEST_TIMEFRAME)")
+        logger.info(f"Data source:    {getattr(args, 'data_source', 'auto')}")
+        logger.info(f"Balance (.env): ${self.balance:,.2f}")
         if self.is_backtest:
             logger.info(f"Backtest mode: Sheets logging {'ENABLED' if args.log_sheets else 'DISABLED'}")
         logger.info("="*70)
 
-        # Initialize data connector (V4.3: auto-detect MT5 or TradingView)
-        logger.info(f"📡 Initializing data connector...")
+        # Initialize data connector — honor --data-source CLI arg (auto/mt5/yf/tv)
+        ds_mode = getattr(args, 'data_source', None) or 'auto'
+        logger.info(f"📡 Initializing data connector (requested: {ds_mode})...")
         self.connector = create_connector(
-            mode="auto",
+            mode=ds_mode,
             symbol=self.symbol
         )
 
@@ -617,7 +634,8 @@ class TraiderMainLoop:
                     break
 
         # Step 2: Signal Engine (replaces G1 Pattern Detection)
-        logger.info("\n[STEP 2] Signal Engine (M5 Single TF)...")
+        active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+        logger.info(f"\n[STEP 2] Signal Engine ({active_tf} Single TF)...")
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
             portfolio=self.balance,
@@ -961,10 +979,13 @@ class TraiderMainLoop:
             }
         """
         try:
-            # Use optimized method: fetch M5, resample to H4/H1/M30/M15
+            # Active TF follows env BACKTEST_TIMEFRAME (set by /api/start with user's TopBar selection)
+            active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+
+            # Use optimized method: fetch active TF directly (avoid resample mismatch)
             candles_by_tf = self.connector.get_all_timeframes_optimized(
                 self.symbol,
-                base_tf='M5',
+                base_tf=active_tf,
                 count=CANDLES_LOOKBACK
             )
 
@@ -1435,6 +1456,19 @@ def parse_args():
                         default='python',
                         help='Decision engine: claude (API) or python (rules-based, default)')
 
+    # Trading mode CLI args (used when spawned from api_server /api/start) —
+    # override bot_state values which are process-local and not shared across subprocesses.
+    parser.add_argument('--mode', type=str, choices=['paper', 'micro', 'live'],
+                        help='Trading mode: paper (sim) / micro (cent broker) / live (real broker)')
+    parser.add_argument('--symbol', type=str,
+                        help='Symbol e.g. XAUUSDc (override bot_state)')
+    parser.add_argument('--tf', type=str, choices=['M1', 'M5', 'M15', 'M30', 'H1', 'H4'],
+                        help='Timeframe (override bot_state)')
+    parser.add_argument('--data-source', type=str, choices=['auto', 'mt5', 'yf', 'tv'],
+                        default='auto', help='Data source for prices')
+    parser.add_argument('--no-confirm', action='store_true',
+                        help='Skip 2x real-money confirmation prompts (for headless / API-spawned runs)')
+
     return parser.parse_args()
 
 
@@ -1459,12 +1493,19 @@ def main():
             traider.run_once()
 
         else:
-            # Run continuously
-            logger.info("Running in continuous mode... (press Ctrl+C to stop)")
+            # Run continuously — poll interval = active TF duration (capped 1h)
+            # ตั้ง interval ตาม TF: M1=60s, M5=300s, M15=900s, M30=1800s, H1/H4=3600s
+            tf_seconds = {
+                'M1': 60, 'M5': 300, 'M15': 900,
+                'M30': 1800, 'H1': 3600, 'H4': 3600,
+            }
+            active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+            poll_secs = tf_seconds.get(active_tf, 300)
+            logger.info(f"Running in continuous mode... TF={active_tf}, poll every {poll_secs}s (Ctrl+C to stop)")
             while True:
                 traider.run_once()
                 traider.monitor_positions()
-                time.sleep(300)  # Wait 5 minutes (M5 candle close)
+                time.sleep(poll_secs)
 
     except KeyboardInterrupt:
         logger.info("\n\n👋 Shutting down gracefully...")

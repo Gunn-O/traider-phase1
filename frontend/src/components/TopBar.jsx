@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect } from 'react'
 import './TopBar.css'
 
 // Relational map: data source -> selectable symbols
@@ -22,11 +22,22 @@ const SYMBOL_OPTIONS_BY_SOURCE = {
   ],
 }
 
-export default function TopBar({ botState, onStart, onStop, onEmergencyStop }) {
-  const [mode, setMode] = useState('paper')
-  const [symbol, setSymbol] = useState('XAUUSDc')
-  const [timeframe, setTimeframe] = useState('M5')
-  const [dataSource, setDataSource] = useState('auto')
+// Display label for mode badge (top-left of TopBar)
+// Backend still uses paper/micro/live internally; UI just relabels.
+const MODE_BADGE = {
+  paper: 'SIMULATION',
+  micro: 'BROKER • CENT',
+  live:  'BROKER • REAL',
+}
+
+export default function TopBar({ botState, selection, onSelectionChange, onStart, onStop, onEmergencyStop }) {
+  // State lifted to App.jsx so Dashboard's MT5LivePanel sees the same TF/symbol.
+  const { tradeKind, accountType, symbol, timeframe, dataSource } = selection
+  const setTradeKind   = v => onSelectionChange({ tradeKind: v })
+  const setAccountType = v => onSelectionChange({ accountType: v })
+  const setSymbol      = v => onSelectionChange({ symbol: v })
+  const setTimeframe   = v => onSelectionChange({ timeframe: v })
+  const setDataSource  = v => onSelectionChange({ dataSource: v })
 
   // When data source changes, ensure selected symbol is still valid for that source
   useEffect(() => {
@@ -40,6 +51,11 @@ export default function TopBar({ botState, onStart, onStop, onEmergencyStop }) {
 
   const statusClass = botState?.status === 'running' ? 'running' : 'stopped'
   const dataSourceClass = botState?.data_source_actual === 'TradingView' ? 'tv' : 'yfinance'
+
+  // Derive backend mode from 2-level UI
+  const mode = tradeKind === 'simulation'
+    ? 'paper'
+    : (accountType === 'cent' ? 'micro' : 'live')
 
   const handleStart = () => {
     onStart({ tf: timeframe, symbol, mode, data_source: dataSource })
@@ -69,22 +85,35 @@ export default function TopBar({ botState, onStart, onStop, onEmergencyStop }) {
           </div>
 
           <div className="mode-badge">
-            {botState?.mode?.toUpperCase() || mode.toUpperCase()}
+            {MODE_BADGE[botState?.mode] || MODE_BADGE[mode]}
           </div>
         </div>
 
         {/* Controls */}
         <div className="controls-group">
           <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value)}
+            value={tradeKind}
+            onChange={(e) => setTradeKind(e.target.value)}
             disabled={botState?.status === 'running'}
             className="control-select"
+            title="Simulation = ไม่ส่งออเดอร์จริง / Broker = ส่งออเดอร์จริง"
           >
-            <option value="paper">Paper Trade</option>
-            <option value="micro">Cent Account</option>
-            <option value="live">Real Account</option>
+            <option value="simulation">Simulation Trade</option>
+            <option value="broker">Broker Trade</option>
           </select>
+
+          {tradeKind === 'broker' && (
+            <select
+              value={accountType}
+              onChange={(e) => setAccountType(e.target.value)}
+              disabled={botState?.status === 'running'}
+              className="control-select"
+              title="Cent = บัญชี Cent (เงินน้อย, ทดสอบ) / Real = บัญชีจริง"
+            >
+              <option value="cent">Cent</option>
+              <option value="real">Real</option>
+            </select>
+          )}
 
           <select
             value={timeframe}

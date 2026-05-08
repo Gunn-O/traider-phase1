@@ -88,10 +88,11 @@ def find_mt5_path() -> str | None:
 
 def is_mt5_running() -> bool:
     try:
-        r = subprocess.run(
-            ['tasklist', '/FI', 'IMAGENAME eq terminal64.exe'],
-            capture_output=True, text=True, timeout=5,
-        )
+        # CREATE_NO_WINDOW ป้องกัน console เด้งทุก 5 วินาที จาก health-loop
+        kwargs = {'capture_output': True, 'text': True, 'timeout': 5}
+        if sys.platform == 'win32':
+            kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq terminal64.exe'], **kwargs)
         return 'terminal64.exe' in r.stdout
     except Exception:
         return False
@@ -128,22 +129,40 @@ class ServiceManager:
         env['PYTHONIOENCODING'] = 'utf-8'
         if env_extra:
             env.update(env_extra)
+
+        # Windows: hide console + suppress window flashes from child processes
+        # CREATE_NO_WINDOW alone doesn't propagate through cmd.exe / npm.cmd / node;
+        # STARTUPINFO with SW_HIDE forces every spawned console to start hidden.
         creationflags = 0
+        startupinfo = None
         if sys.platform == 'win32':
-            creationflags = subprocess.CREATE_NO_WINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+
         try:
-            # Windows .cmd files (npm.cmd) require shell=True OR full path resolution
+            # Resolve npm.cmd / .cmd files to absolute path so shell=True isn't needed —
+            # shell=True spawns cmd.exe which flashes a console even with CREATE_NO_WINDOW.
+            if use_shell and isinstance(cmd, list) and cmd and cmd[0] in ('npm', 'npx', 'node'):
+                resolved = shutil_which(cmd[0]) or shutil_which(cmd[0] + '.cmd')
+                if resolved:
+                    cmd = [resolved] + cmd[1:]
+                    use_shell = False  # call directly — no shell needed
+
             if use_shell:
                 proc = subprocess.Popen(
                     ' '.join(cmd) if isinstance(cmd, list) else cmd,
                     cwd=str(cwd) if cwd else None,
                     env=env, creationflags=creationflags, shell=True,
+                    startupinfo=startupinfo,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             else:
                 proc = subprocess.Popen(
                     cmd, cwd=str(cwd) if cwd else None,
                     env=env, creationflags=creationflags,
+                    startupinfo=startupinfo,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             self.procs.append(proc)
@@ -153,17 +172,88 @@ class ServiceManager:
             self.log(f"[!] {name} FAILED to start: {e}")
             return None
 
-    def stop_all(self):
-        for proc in self.procs:
+    def _kill_tree(self, pid: int) -> bool:
+        """
+        Kill process and all descendants. On Windows, terminate() ฆ่าได้แค่ parent —
+        npm.cmd → cmd.exe → node.exe → vite workers ต้องใช้ taskkill /F /T เพื่อล้าง tree.
+        """
+        if sys.platform == 'win32':
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
+                r = subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(pid)],
+                    capture_output=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                return r.returncode == 0
             except Exception:
+                return False
+        return False  # POSIX: rely on terminate() which sends SIGTERM to group
+
+    def _kill_by_port(self, port: int) -> int:
+        """
+        Fallback for taskkill /T missing detached children (vite sometimes spawns
+        workers that escape the tree). Find PID(s) listening on `port` and kill.
+        Returns count of PIDs killed.
+        """
+        if sys.platform != 'win32':
+            return 0
+        killed = 0
+        try:
+            r = subprocess.run(
+                ['netstat', '-ano', '-p', 'TCP'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            pids = set()
+            target = f':{port}'
+            for line in r.stdout.splitlines():
+                # Lines look like:  TCP    127.0.0.1:3000   0.0.0.0:0   LISTENING   12345
+                parts = line.split()
+                if len(parts) >= 5 and 'LISTENING' in line:
+                    local = parts[1]
+                    if local.endswith(target):
+                        try: pids.add(int(parts[-1]))
+                        except ValueError: pass
+            for pid in pids:
                 try:
-                    proc.kill()
+                    subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(pid)],
+                        capture_output=True, timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    killed += 1
                 except Exception:
                     pass
-        self.log(f"[x] Stopped {len(self.procs)} processes")
+        except Exception as e:
+            self.log(f"[!] _kill_by_port({port}) failed: {e}")
+        return killed
+
+    def stop_all(self):
+        killed = 0
+        for proc in self.procs:
+            try:
+                if sys.platform == 'win32':
+                    # Tree-kill: handles npm → node → vite worker chain
+                    if self._kill_tree(proc.pid):
+                        killed += 1
+                        continue
+                # POSIX or taskkill failed — fall back to terminate
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                killed += 1
+            except Exception as e:
+                self.log(f"[!] kill pid={proc.pid} failed: {e}")
+
+        # Safety net: kill anything still listening on backend/frontend ports.
+        # vite occasionally spawns workers that detach from the tree → taskkill /T misses them.
+        leftover = self._kill_by_port(BACKEND_PORT) + self._kill_by_port(FRONTEND_PORT)
+        if leftover:
+            self.log(f"[x] Killed {leftover} extra process(es) holding ports {BACKEND_PORT}/{FRONTEND_PORT}")
+
+        self.log(f"[x] Stopped {killed}/{len(self.procs)} tracked + {leftover} leftover")
         self.procs.clear()
 
 

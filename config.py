@@ -105,11 +105,14 @@ def calc_lot(balance: float, sl_pip: int, winrate_test: bool = False) -> dict:
 # TIMEFRAME CONFIG
 # ============================================================================
 
-# Single TF mode: ง่าย, เร็ว, reliable กว่า MTF
-# M1: signal เยอะ (20-50/day) เหมาะสำหรับ testing
-# M5: balanced quality (5-15/day) เหมาะสำหรับ production
-TIMEFRAMES = ['M5']  # Balanced: quality + frequency (DEFAULT)
-# TIMEFRAMES = ['M1']  # Uncomment for more signals per day
+# Single TF mode — auto-driven by env BACKTEST_TIMEFRAME (set by api_server /api/start
+# or by /api/backtest/run). Fallback M5 when no env var (e.g. one-off CLI runs).
+# Valid: M1, M5, M15, M30, H1, H4
+import os as _os
+_active_tf_env = _os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+if _active_tf_env not in ('M1', 'M5', 'M15', 'M30', 'H1', 'H4'):
+    _active_tf_env = 'M5'
+TIMEFRAMES = [_active_tf_env]
 
 TF_SIZE = {
     'H4': 6,

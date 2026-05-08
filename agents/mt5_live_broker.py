@@ -13,7 +13,8 @@ Interface ตรงกับ PaperBroker เพื่อให้ main.py สล
     get_current_price
 """
 
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
 
@@ -32,12 +33,20 @@ MAGIC_BY_MODE = {
     'live':  10003,  # Standard/Real account
 }
 
-DEFAULT_DEVIATION = 20   # points (max slippage on entry fill)
+DEFAULT_DEVIATION = 20   # points (max slippage on entry fill — market order only)
 DEFAULT_FILLING = None   # set in __init__ after mt5 import succeeds
 COMMENT_MAX_LEN = 31     # MT5 comment field is 31 chars max
 MAX_SPREAD_PIP  = 100    # safety: reject order if current spread > 100 pip (= 1 USD)
                          # Cent broker normal ~28 pip; spike ใน news ~80+ pip
                          # > 100 pip = ตลาดผิดปกติ (off-hours / news / liquidity drop)
+
+# Pending-order expiration = N × current TF duration (auto from env BACKTEST_TIMEFRAME)
+# 5 แท่งเป็นค่ามาตรฐาน — ถ้าราคาไม่กลับมาภายใน 5 แท่ง = setup กลายเป็น stale
+PENDING_EXPIRY_BARS = 5
+TF_SECONDS = {
+    'M1': 60, 'M5': 300, 'M15': 900,
+    'M30': 1800, 'H1': 3600, 'H4': 14400,
+}
 
 
 class MT5LiveBroker:
@@ -132,11 +141,14 @@ class MT5LiveBroker:
         technique: Optional[str] = None,
         session: Optional[str] = None,
         beauty_score: Optional[int] = None,
-        entry_price: Optional[float] = None,  # ignored for live (broker decides fill price)
+        entry_price: Optional[float] = None,  # required: zone level for pending limit
         trail_meta: Optional[dict] = None,    # Mountain trailing: {tp1, tp2_base, tech_point, height_pip}
     ) -> Optional[int]:
         """
-        ส่ง market order จริงไปที่ MT5 broker
+        ส่ง pending LIMIT order ที่ entry_price (zone level) — รอราคากลับมาแตะ.
+        Fallback เป็น market order ถ้าราคาเลย entry ไปแล้ว (ไม่สามารถตั้ง limit ได้).
+
+        Expiration = PENDING_EXPIRY_BARS × current_TF (auto-scale ตาม TF)
 
         Returns:
             broker ticket (int) หรือ None ถ้า fail
@@ -157,19 +169,23 @@ class MT5LiveBroker:
             )
             return None
 
-        # Per-trade dynamic spread adjustment for SL/TP
-        # MT5 candle ใช้ bid stream → strategy SL/TP ตั้งใจ trigger ที่ bid level
-        # BUY:  broker ปิดด้วย bid → SL/TP ตรงเป๊ะกับ chart, ไม่ต้องปรับ
-        # SELL: broker ปิดด้วย ask = bid + spread → SL trigger เร็วกว่า, TP ช้ากว่า
-        #       ชดเชย: shift SL & TP ขึ้น โดย spread amount เพื่อ trigger ที่ bid level จริง
+        # ── Decide order type: PENDING LIMIT vs MARKET fallback ─────────────
+        # Pending limit only valid when entry is on the "wait" side of current price:
+        #   BUY_LIMIT: entry < ask (need price to drop)
+        #   SELL_LIMIT: entry > bid (need price to rise)
+        # If price already past entry, use market order as fallback (zone touched + bounced fast).
+        is_pending = False
+        if entry_price is not None and entry_price > 0:
+            if action == 'BUY' and entry_price < ask:
+                is_pending = True
+            elif action == 'SELL' and entry_price > bid:
+                is_pending = True
+
+        # Spread adjustment (same logic as before — applied to broker SL/TP for SELL)
         if action == 'BUY':
-            order_type = mt5.ORDER_TYPE_BUY
-            price = ask
             broker_sl = float(sl)
             broker_tp = float(tp)
-        else:  # SELL
-            order_type = mt5.ORDER_TYPE_SELL
-            price = bid
+        else:
             broker_sl = float(sl) + spread_usd
             broker_tp = float(tp) + spread_usd
             logger.info(
@@ -177,10 +193,33 @@ class MT5LiveBroker:
                 f"SL {sl:.3f}→{broker_sl:.3f}  TP {tp:.3f}→{broker_tp:.3f}"
             )
 
+        # Choose order type + price
+        if is_pending:
+            if action == 'BUY':
+                order_type = mt5.ORDER_TYPE_BUY_LIMIT
+            else:
+                order_type = mt5.ORDER_TYPE_SELL_LIMIT
+            price = float(entry_price)
+            trade_action = mt5.TRADE_ACTION_PENDING
+        else:
+            order_type = mt5.ORDER_TYPE_BUY if action == 'BUY' else mt5.ORDER_TYPE_SELL
+            price = ask if action == 'BUY' else bid
+            trade_action = mt5.TRADE_ACTION_DEAL
+            logger.info(
+                f"  ⚡ Market order fallback (price already past entry: "
+                f"entry={entry_price} bid/ask={bid:.3f}/{ask:.3f})"
+            )
+
+        # Expiration: N × TF duration (auto-scale)
+        active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+        tf_secs = TF_SECONDS.get(active_tf, 300)
+        expire_secs = tf_secs * PENDING_EXPIRY_BARS
+        expiration_dt = datetime.now() + timedelta(seconds=expire_secs)
+
         comment = (trade_id or f"BOT-{plan_id}")[:COMMENT_MAX_LEN]
 
         request = {
-            "action":       mt5.TRADE_ACTION_DEAL,
+            "action":       trade_action,
             "symbol":       self.symbol,
             "volume":       float(lot),
             "type":         order_type,
@@ -190,9 +229,14 @@ class MT5LiveBroker:
             "deviation":    self.deviation,
             "magic":        self.magic,
             "comment":      comment,
-            "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": self.filling,
         }
+        if is_pending:
+            # Pending order: time-bound expiration
+            request["type_time"]  = mt5.ORDER_TIME_SPECIFIED
+            request["expiration"] = int(expiration_dt.timestamp())
+        else:
+            request["type_time"]  = mt5.ORDER_TIME_GTC
 
         # Validate before send
         check = mt5.order_check(request)
@@ -237,9 +281,14 @@ class MT5LiveBroker:
                 f"tech={self._trail_state[ticket]['tech_point']:.3f} "
                 f"H={self._trail_state[ticket]['height_usd']:.3f}"
             )
+        order_label = (
+            f"{action}_LIMIT @ {price:.3f} (expire {expire_secs}s = {PENDING_EXPIRY_BARS}×{active_tf})"
+            if is_pending
+            else f"{action} MARKET @ {result.price:.3f}"
+        )
         logger.info(
-            f"💹 LIVE {action} sent | ticket={ticket} fill_price={result.price:.5f} "
-            f"vol={result.volume} sl={sl:.5f} tp={tp:.5f} comment={comment}"
+            f"💹 LIVE {order_label} | ticket={ticket} vol={result.volume} "
+            f"sl={broker_sl:.3f} tp={broker_tp:.3f} comment={comment}"
         )
         return ticket
 

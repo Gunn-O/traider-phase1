@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useBotState } from './hooks/useBotState'
 import Sidebar from './components/Sidebar'
@@ -16,6 +17,19 @@ export default function App() {
     startBot, stopBot, emergencyStop
   } = useBotState()
 
+  // Lifted state — TopBar selectors drive the dashboard panel too,
+  // so MT5 candle fetches use whatever TF/symbol the user has selected
+  // (not whatever bot_state happens to hold from a previous run).
+  const [selection, setSelection] = useState({
+    tradeKind:   'simulation',  // 'simulation' | 'broker'
+    accountType: 'cent',        // 'cent' | 'real'
+    symbol:      'XAUUSDc',
+    timeframe:   'M5',
+    dataSource:  'auto',
+  })
+
+  const updateSelection = (patch) => setSelection(prev => ({ ...prev, ...patch }))
+
   return (
     <div className="app-layout">
       <Sidebar
@@ -25,6 +39,8 @@ export default function App() {
       <div className="main-wrapper">
         <TopBar
           botState={botState}
+          selection={selection}
+          onSelectionChange={updateSelection}
           onStart={startBot}
           onStop={stopBot}
           onEmergencyStop={emergencyStop}
@@ -37,7 +53,7 @@ export default function App() {
             />
             <Route
               path="/dashboard"
-              element={<Dashboard botState={botState}/>}
+              element={<Dashboard botState={botState} selection={selection}/>}
             />
             <Route
               path="/agents"

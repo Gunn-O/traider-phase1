@@ -206,7 +206,7 @@ def run_signal_engine(
                 break
 
     if not candles or len(candles) < 55:
-        logger.warning(f"Not enough M5 candles: {len(candles)} < 55")
+        logger.warning(f"Not enough {timeframe} candles: {len(candles)} < 55")
         return {
             'selected_tf': timeframe,
             'chart_type': 'unclear',
