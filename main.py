@@ -51,7 +51,7 @@ except ImportError:
     # Fallback if api_server not available (for command-line mode)
     bot_state = {
         "status": "stopped",
-        "symbol": "XAUUSDm",
+        "symbol": "XAUUSDc",
         "trading_tf": "M5",
         "balance": 0.0
     }
@@ -66,7 +66,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.FileHandler('traider.log'),
+        # encoding='utf-8' so emoji/Thai chars don't get dropped on cp874 systems
+        logging.FileHandler('traider.log', encoding='utf-8'),
         logging.StreamHandler()
     ],
     force=True
@@ -216,18 +217,20 @@ def create_broker(mode: str, symbol: str):
 
     Args:
         mode: Trading mode ('paper', 'micro', 'live')
-        symbol: Trading symbol (e.g., 'XAUUSDm', 'XAUUSD')
+        symbol: Trading symbol (e.g., 'XAUUSDc', 'XAUUSD')
 
     Returns:
-        PaperBroker instance if mode='paper', None otherwise
+        PaperBroker if mode='paper'
+        MT5LiveBroker if mode in ('micro', 'live') — sends real orders to MT5
     """
     if mode == 'paper':
         logger.info(f"📄 Creating PaperBroker (mode={mode}, symbol={symbol})")
         return PaperBroker(symbol=symbol)
-    else:
-        # For 'micro' and 'live' modes, return None (use MT5 directly)
-        logger.info(f"💹 Using MT5 direct trading (mode={mode}, symbol={symbol})")
-        return None
+    if mode in ('micro', 'live'):
+        from agents.mt5_live_broker import MT5LiveBroker
+        logger.info(f"💹 Creating MT5LiveBroker (mode={mode}, symbol={symbol}) — REAL ORDERS")
+        return MT5LiveBroker(symbol=symbol, mode=mode)
+    raise ValueError(f"Unknown trading mode: {mode}")
 
 
 # ============================================================================
@@ -236,6 +239,29 @@ def create_broker(mode: str, symbol: str):
 
 class TraiderMainLoop:
     """Main trading loop for Tra(i)der Phase I v4.3 (4-Agent Architecture + Reflector)"""
+
+    @staticmethod
+    def _confirm_real_trade():
+        """Block start ของ live/micro mode จนกว่า user จะพิมพ์ 'I UNDERSTAND' 2 ครั้ง"""
+        import sys
+        msg1 = (
+            "\n" + "!"*72 + "\n"
+            "  REAL TRADING MODE — โหมดนี้จะส่ง order จริงไปที่ MT5 (เงินจริง)\n"
+            "  หากระบบ malfunction อาจสูญเสียเงินทั้งหมดในบัญชี\n"
+            "  ห้ามรันถ้ายังไม่ได้ทดสอบ paper/backtest จนแน่ใจ\n"
+            + "!"*72 + "\n"
+        )
+        sys.stderr.write(msg1)
+        try:
+            r1 = input("ยืนยันครั้งที่ 1 — พิมพ์ 'I UNDERSTAND' (case-sensitive): ").strip()
+            if r1 != "I UNDERSTAND":
+                raise SystemExit("LIVE mode aborted: confirmation 1 failed")
+            r2 = input("ยืนยันครั้งที่ 2 — พิมพ์ 'I UNDERSTAND' อีกครั้ง: ").strip()
+            if r2 != "I UNDERSTAND":
+                raise SystemExit("LIVE mode aborted: confirmation 2 failed")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("LIVE mode aborted by user")
+        sys.stderr.write("✅ Live trade confirmed.\n\n")
 
     def __init__(self, args):
         """
@@ -248,12 +274,29 @@ class TraiderMainLoop:
         self.mode = 'winrate_test' if args.winrate_test else 'simulate'
         self.is_backtest = args.backtest if hasattr(args, 'backtest') else False
 
-        # Use symbol from bot_state (from dashboard) or fallback to env var
-        self.symbol = bot_state.get("symbol", os.getenv('BACKTEST_SYMBOL', 'XAUUSDm'))
+        # CLI args win over bot_state (subprocesses don't share bot_state with api_server)
+        self.symbol = (
+            getattr(args, 'symbol', None)
+            or bot_state.get("symbol")
+            or os.getenv('BACKTEST_SYMBOL', 'XAUUSDc')
+        )
         self.balance = float(os.getenv('ACCOUNT_BALANCE', '300'))
 
-        # Get trading mode from bot_state (from dashboard)
-        self.trading_mode = bot_state.get("mode", "paper")
+        self.trading_mode = (
+            getattr(args, 'mode', None)
+            or bot_state.get("mode", "paper")
+        )
+
+        # Real-money safety: require explicit confirmation 2x for live/micro modes
+        # Skipped when --no-confirm (api_server-spawned subprocess) or in backtest
+        if self.trading_mode in ('micro', 'live') and not self.is_backtest:
+            if not getattr(args, 'no_confirm', False):
+                self._confirm_real_trade()
+            else:
+                logger.warning(
+                    f"⚠️  Real-money mode {self.trading_mode!r} bypassing 2x confirmation "
+                    f"(--no-confirm) — caller is responsible for prior user confirmation."
+                )
 
         # Update bot_state with balance
         update_bot_state({"balance": self.balance})
@@ -261,17 +304,21 @@ class TraiderMainLoop:
         logger.info("="*70)
         logger.info("🤖 Tra(i)der Phase I v4.3 — AI Trading System (4-Agent + Reflector)")
         logger.info("="*70)
-        logger.info(f"Mode: {self.mode}")
-        logger.info(f"Symbol: {self.symbol}")
-        logger.info(f"Balance: ${self.balance:,.2f}")
+        logger.info(f"Mode (label):   {self.mode}")
+        logger.info(f"Trading mode:   {self.trading_mode}  (paper=sim / micro=cent / live=real)")
+        logger.info(f"Symbol:         {self.symbol}")
+        logger.info(f"Active TF:      {os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()}  (env BACKTEST_TIMEFRAME)")
+        logger.info(f"Data source:    {getattr(args, 'data_source', 'auto')}")
+        logger.info(f"Balance (.env): ${self.balance:,.2f}")
         if self.is_backtest:
             logger.info(f"Backtest mode: Sheets logging {'ENABLED' if args.log_sheets else 'DISABLED'}")
         logger.info("="*70)
 
-        # Initialize data connector (V4.3: auto-detect MT5 or TradingView)
-        logger.info(f"📡 Initializing data connector...")
+        # Initialize data connector — honor --data-source CLI arg (auto/mt5/yf/tv)
+        ds_mode = getattr(args, 'data_source', None) or 'auto'
+        logger.info(f"📡 Initializing data connector (requested: {ds_mode})...")
         self.connector = create_connector(
-            mode="auto",
+            mode=ds_mode,
             symbol=self.symbol
         )
 
@@ -467,6 +514,11 @@ class TraiderMainLoop:
             portfolio_state['active_plan_id'] = self.portfolio_state_cache.get('active_plan_id', '')
             portfolio_state['last_technical_price'] = self.portfolio_state_cache.get('last_technical_price', 0.0)
             portfolio_state['last_plan_chart_type'] = self.portfolio_state_cache.get('last_plan_chart_type', '')
+            portfolio_state['last_signal_bar'] = self.portfolio_state_cache.get('last_signal_bar', 0)
+            portfolio_state['current_bar'] = getattr(self, '_current_bar_idx', 0)
+            portfolio_state['active_plans_by_pattern'] = dict(
+                self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+            )
 
             # 4. Check if plan closed (clear cache if no pending orders)
             pending_count = len(self.position_monitor.get_open_orders())
@@ -474,6 +526,23 @@ class TraiderMainLoop:
                 logger.info(f"Plan {portfolio_state['active_plan_id']} fully closed → clearing cache")
                 portfolio_state['active_plan_id'] = ''
                 self.portfolio_state_cache['active_plan_id'] = ''
+
+            # 4b. Per-pattern slot cleanup — clear pattern slot whose orders all closed
+            open_orders = self.position_monitor.get_open_orders()
+            open_patterns = set()
+            for o in open_orders:
+                p = (o.get('pattern') or o.get('chart_type') or '').upper()
+                if p:
+                    open_patterns.add(p)
+            cleaned_pat_map = {
+                pat: pid for pat, pid in portfolio_state['active_plans_by_pattern'].items()
+                if pat in open_patterns
+            }
+            if len(cleaned_pat_map) != len(portfolio_state['active_plans_by_pattern']):
+                cleared = set(portfolio_state['active_plans_by_pattern']) - set(cleaned_pat_map)
+                logger.info(f"Per-pattern cache cleanup — cleared: {sorted(cleared)}")
+            portfolio_state['active_plans_by_pattern'] = cleaned_pat_map
+            self.portfolio_state_cache['active_plans_by_pattern'] = dict(cleaned_pat_map)
 
             # 5. Update cache with current state
             self.portfolio_state_cache = portfolio_state
@@ -565,7 +634,8 @@ class TraiderMainLoop:
                     break
 
         # Step 2: Signal Engine (replaces G1 Pattern Detection)
-        logger.info("\n[STEP 2] Signal Engine (M5 Single TF)...")
+        active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+        logger.info(f"\n[STEP 2] Signal Engine ({active_tf} Single TF)...")
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
             portfolio=self.balance,
@@ -748,8 +818,19 @@ class TraiderMainLoop:
                     f"lot={lot:.2f}, R:R={order['rr_ratio']:.2f}")
 
         # Determine mode for plan/trade ID prefix
-        id_mode = 'backtest' if self.is_backtest else 'simulate'
+        # PT- backtest | SM- simulate (paper broker, real-time data) | RT- live (real orders)
+        if self.trading_mode in ('micro', 'live'):
+            id_mode = 'live'
+        elif self.is_backtest:
+            id_mode = 'backtest'
+        else:
+            id_mode = 'simulate'
         plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
+
+        # Mountain trailing metadata — attach signal.details to orders for 3-stage trailing
+        # MAI_RUAY / others: trail_meta = None → position_monitor skips trailing (per user spec)
+        signal = world_state.get('signal')
+        is_mountain = signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN'
 
         # Generate trade IDs for each order and set initial state
         orders_with_ids = []
@@ -761,11 +842,20 @@ class TraiderMainLoop:
             order['sl_price'] = order['sl']
             order['tp_price'] = order['tp']
             order['lot_size'] = order['lot']
+            # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
+            if is_mountain:
+                d = signal.details or {}
+                order['trail_meta'] = {
+                    'stage':      0,
+                    'tp1':        float(d.get('tp1') or 0),
+                    'tp2_base':   float(d.get('tp2_base') or d.get('tp2') or 0),
+                    'tech_point': float(d.get('tech_point') or d.get('base_lo') or 0),
+                    'height':     float(d.get('height') or 0),  # pip
+                }
             orders_with_ids.append(order)
 
         # Prepare decision for Sheets (add 'technique' field from signal.pattern)
         decision_for_sheets = decision.copy()
-        signal = world_state.get('signal')
         decision_for_sheets['technique'] = (
             signal.pattern.lower()
             if signal and hasattr(signal, 'pattern')
@@ -806,6 +896,10 @@ class TraiderMainLoop:
         # Execute trades via broker (if paper mode)
         if self.broker is not None:
             logger.info(f"\n[Broker] Executing {len(orders_with_ids)} orders via PaperBroker...")
+            # Mountain trailing metadata (only Mountain BUY uses 3-stage trailing SL)
+            trail_meta = None
+            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
+                trail_meta = getattr(signal, 'details', None) or {}
             for order in orders_with_ids:
                 ticket = self.broker.open_position(
                     action=order['action'],
@@ -815,7 +909,8 @@ class TraiderMainLoop:
                     plan_id=plan_id,
                     candle_time=candle_time,
                     trade_id=order['trade_id'],
-                    entry_price=order.get('entry')  # For backtest mode
+                    entry_price=order.get('entry'),  # For backtest mode
+                    trail_meta=trail_meta,
                 )
                 if ticket:
                     order['broker_ticket'] = ticket  # Store ticket for tracking
@@ -851,7 +946,15 @@ class TraiderMainLoop:
             self.portfolio_state_cache['active_plan_id'] = plan_id
             self.portfolio_state_cache['last_technical_price'] = portfolio_state['last_technical_price']
             self.portfolio_state_cache['last_plan_chart_type'] = portfolio_state['last_plan_chart_type']
-            logger.info(f"✓ Cache updated: active_plan={plan_id}, last_tech={portfolio_state['last_technical_price']:.2f}")
+            self.portfolio_state_cache['last_signal_bar'] = getattr(self, '_current_bar_idx', 0)
+            # Per-pattern active plan map — แต่ละ strategy ถือ slot ของตัวเอง
+            sig = world_state.get('signal')
+            sig_pattern = sig.pattern if sig and hasattr(sig, 'pattern') else ''
+            if sig_pattern:
+                pat_map = dict(self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {})
+                pat_map[sig_pattern] = plan_id
+                self.portfolio_state_cache['active_plans_by_pattern'] = pat_map
+            logger.info(f"✓ Cache updated: active_plan={plan_id} (pattern={sig_pattern}), last_tech={portfolio_state['last_technical_price']:.2f}, last_signal_bar={self.portfolio_state_cache['last_signal_bar']}")
 
         # Update session stats (track total plans)
         update_session_stats(self.session_stats, llm_log, opened_plan=True)
@@ -876,10 +979,13 @@ class TraiderMainLoop:
             }
         """
         try:
-            # Use optimized method: fetch M5, resample to H4/H1/M30/M15
+            # Active TF follows env BACKTEST_TIMEFRAME (set by /api/start with user's TopBar selection)
+            active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+
+            # Use optimized method: fetch active TF directly (avoid resample mismatch)
             candles_by_tf = self.connector.get_all_timeframes_optimized(
                 self.symbol,
-                base_tf='M5',
+                base_tf=active_tf,
                 count=CANDLES_LOOKBACK
             )
 
@@ -1038,22 +1144,16 @@ class TraiderMainLoop:
 
         self.position_monitor.check_and_update(current_candle)
 
-    def _resample_m5_to_all_tf(self, m5_candles: List[Dict]) -> Dict[str, List[Dict]]:
+    def _resample_m5_to_all_tf(self, m5_candles: List[Dict], base_tf: str = 'M5') -> Dict[str, List[Dict]]:
         """
-        Resample M5 candles to all timeframes (for backtest)
+        Resample candles from base_tf → all larger timeframes (for backtest)
 
         Args:
-            m5_candles: List of M5 candles (at least 55 candles recommended)
+            m5_candles: List of candles at base_tf (at least 55 candles recommended)
+            base_tf: Source timeframe (M1, M5, etc.) — env BACKTEST_TIMEFRAME
 
         Returns:
-            {
-                'H4': [candles],
-                'H1': [candles],
-                'M30': [candles],
-                'M15': [candles],
-                'M5': [candles],
-                'M1': []  # Skip M1 in backtest
-            }
+            Dict {tf: [candles]} for base_tf and all larger TFs
         """
         import pandas as pd
 
@@ -1065,38 +1165,31 @@ class TraiderMainLoop:
         df['time'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('time')
 
-        # Resample to other timeframes
-        result = {}
-        TF_MINUTES = {'H4': 240, 'H1': 60, 'M30': 30, 'M15': 15, 'M5': 5}
+        TF_MINUTES = {'M1': 1, 'M5': 5, 'M15': 15, 'M30': 30, 'H1': 60, 'H4': 240}
+        base_min = TF_MINUTES.get(base_tf.upper(), 5)
+        result: Dict[str, List[Dict]] = {}
 
-        for tf in ['H4', 'H1', 'M30', 'M15', 'M5']:
-            if tf == 'M5':
-                # Use original M5 data
+        # Only resample to larger TFs (downsample), copy base as-is
+        for tf, mins in TF_MINUTES.items():
+            if mins < base_min:
+                # Smaller than base — can't downsample, leave empty
+                result[tf] = []
+                continue
+            if mins == base_min:
                 df_resampled = df.copy()
             else:
-                # Resample
-                freq = f'{TF_MINUTES[tf]}min'
+                freq = f'{mins}min'
                 df_resampled = df.resample(freq).agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum'
+                    'open': 'first', 'high': 'max', 'low': 'min',
+                    'close': 'last', 'volume': 'sum'
                 }).dropna()
 
-            # Take last 55 bars
             df_final = df_resampled.tail(CANDLES_LOOKBACK).reset_index()
-
-            # Convert back to list of dicts
             candles = df_final.to_dict('records')
             for candle in candles:
                 if 'time' in candle:
                     candle['timestamp'] = candle['time']
-
             result[tf] = candles
-
-        # Skip M1 in backtest (can't downsample from M5)
-        result['M1'] = []
 
         return result
 
@@ -1145,28 +1238,28 @@ class TraiderMainLoop:
         logger.info("\n📊 Fetching historical M5 candles...")
         logger.info(f"Using TradingView data ({self.symbol}/OANDA spot prices)")
 
+        # Active timeframe — env override (default M5)
+        backtest_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
         try:
-            # Fetch M5 candles for date range using start_date/end_date parameters
-            # This will fetch all candles in the range (not just recent candles)
-            logger.info(f"Fetching M5 candles for date range {start_date} → {end_date}...")
+            logger.info(f"Fetching {backtest_tf} candles for date range {start_date} → {end_date}...")
             all_m5_candles = self.connector.get_latest_candles(
                 self.symbol,
-                timeframe='M5',
+                timeframe=backtest_tf,
                 count=None,  # Not used when start_date/end_date provided
                 start_date=start,
                 end_date=end
             )
 
             if not all_m5_candles:
-                logger.error("❌ No M5 candles fetched for date range")
+                logger.error(f"❌ No {backtest_tf} candles fetched for date range")
                 return
 
-            logger.info(f"✓ Fetched {len(all_m5_candles)} M5 candles")
+            logger.info(f"✓ Fetched {len(all_m5_candles)} {backtest_tf} candles")
             logger.info(f"   First: {all_m5_candles[0]['timestamp']}")
             logger.info(f"   Last: {all_m5_candles[-1]['timestamp']}")
 
         except Exception as e:
-            logger.error(f"Failed to fetch M5 candles: {e}")
+            logger.error(f"Failed to fetch {backtest_tf} candles: {e}")
             import traceback
             traceback.print_exc()
             return
@@ -1199,6 +1292,7 @@ class TraiderMainLoop:
 
         for i, current_candle in enumerate(all_m5_candles):
             candle_time = current_candle.get('timestamp', datetime.now())
+            self._current_bar_idx = i  # for cooldown tracking in G2
 
             # Skip weekends (Saturday=5, Sunday=6)
             if candle_time.weekday() >= 5:
@@ -1214,8 +1308,8 @@ class TraiderMainLoop:
                 skipped_insufficient += 1
                 continue
 
-            # Resample M5 slice to all timeframes
-            candles_by_tf = self._resample_m5_to_all_tf(m5_slice)
+            # Resample base_tf slice to all larger timeframes
+            candles_by_tf = self._resample_m5_to_all_tf(m5_slice, base_tf=backtest_tf)
 
             if not candles_by_tf:
                 continue
@@ -1362,6 +1456,19 @@ def parse_args():
                         default='python',
                         help='Decision engine: claude (API) or python (rules-based, default)')
 
+    # Trading mode CLI args (used when spawned from api_server /api/start) —
+    # override bot_state values which are process-local and not shared across subprocesses.
+    parser.add_argument('--mode', type=str, choices=['paper', 'micro', 'live'],
+                        help='Trading mode: paper (sim) / micro (cent broker) / live (real broker)')
+    parser.add_argument('--symbol', type=str,
+                        help='Symbol e.g. XAUUSDc (override bot_state)')
+    parser.add_argument('--tf', type=str, choices=['M1', 'M5', 'M15', 'M30', 'H1', 'H4'],
+                        help='Timeframe (override bot_state)')
+    parser.add_argument('--data-source', type=str, choices=['auto', 'mt5', 'yf', 'tv'],
+                        default='auto', help='Data source for prices')
+    parser.add_argument('--no-confirm', action='store_true',
+                        help='Skip 2x real-money confirmation prompts (for headless / API-spawned runs)')
+
     return parser.parse_args()
 
 
@@ -1386,12 +1493,19 @@ def main():
             traider.run_once()
 
         else:
-            # Run continuously
-            logger.info("Running in continuous mode... (press Ctrl+C to stop)")
+            # Run continuously — poll interval = active TF duration (capped 1h)
+            # ตั้ง interval ตาม TF: M1=60s, M5=300s, M15=900s, M30=1800s, H1/H4=3600s
+            tf_seconds = {
+                'M1': 60, 'M5': 300, 'M15': 900,
+                'M30': 1800, 'H1': 3600, 'H4': 3600,
+            }
+            active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+            poll_secs = tf_seconds.get(active_tf, 300)
+            logger.info(f"Running in continuous mode... TF={active_tf}, poll every {poll_secs}s (Ctrl+C to stop)")
             while True:
                 traider.run_once()
                 traider.monitor_positions()
-                time.sleep(300)  # Wait 5 minutes (M5 candle close)
+                time.sleep(poll_secs)
 
     except KeyboardInterrupt:
         logger.info("\n\n👋 Shutting down gracefully...")

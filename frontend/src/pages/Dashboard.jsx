@@ -1,9 +1,16 @@
 import './Dashboard.css'
+import MT5LivePanel from '../components/MT5LivePanel'
 
-export default function Dashboard({ botState }) {
+export default function Dashboard({ botState, selection }) {
   return (
     <div className="dashboard">
       <div className="dashboard-grid">
+        {/* MT5 Live Data — uses TopBar selection so candles match what user picked */}
+        <MT5LivePanel
+          symbol={selection?.symbol || botState?.symbol || 'XAUUSDc'}
+          timeframe={selection?.timeframe || botState?.trading_tf || 'M5'}
+        />
+
         {/* Portfolio Stats */}
         <div className="card stats-card">
           <h2 className="card-title">Portfolio</h2>

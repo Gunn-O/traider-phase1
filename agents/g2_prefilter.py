@@ -17,6 +17,7 @@ import logging
 from typing import Dict
 
 from config import RISK_CONFIG
+from utils.strategy_loader import is_pattern_active
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -97,13 +98,16 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
             'chart_context': {}
         }
 
-    # Check 2: มี active plan อยู่
-    active_plan = portfolio_state.get('active_plan_id')
-    if active_plan and active_plan != 'ไม่มีแผนที่เปิดอยู่':
-        logger.info(f"SKIP: Active plan exists ({active_plan})")
+    # Check 2: มี active plan ของ pattern เดียวกันอยู่
+    # Per-pattern slot — Mountain + MAI_RUAY trade ขนานกันได้ ไม่บล็อกกัน
+    signal_pattern = world_state.get('signal').pattern if world_state.get('signal') else ''
+    active_plans = portfolio_state.get('active_plans_by_pattern', {}) or {}
+    pattern_plan = active_plans.get(signal_pattern, '')
+    if pattern_plan and pattern_plan != 'ไม่มีแผนที่เปิดอยู่':
+        logger.info(f"SKIP: {signal_pattern} active plan exists ({pattern_plan})")
         return {
             'pre_approved': False,
-            'skip_reason': f'มีแผนที่เปิดอยู่: {active_plan}',
+            'skip_reason': f'{signal_pattern} มีแผนที่เปิดอยู่: {pattern_plan}',
             'chart_context': {}
         }
 
@@ -150,12 +154,23 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
             'chart_context': {}
         }
 
-    # Validate R:R ratio (should be >= 1.0 from Signal Engine)
-    if signal.rr < 1.0:
-        logger.info(f"SKIP: R:R too low ({signal.rr:.2f} < 1.0)")
+    # Validate R:R ratio — config-driven (default 0.0 for Cent account data collection)
+    min_rr = RISK_CONFIG.get('min_rr_ratio', 0.0)
+    if min_rr > 0 and signal.rr < min_rr:
+        logger.info(f"SKIP: R:R too low ({signal.rr:.2f} < {min_rr})")
         return {
             'pre_approved': False,
-            'skip_reason': f'R:R ต่ำเกิน ({signal.rr:.2f} < 1.0)',
+            'skip_reason': f'R:R ต่ำเกิน ({signal.rr:.2f} < {min_rr})',
+            'chart_context': {}
+        }
+
+    # Check 5b: V65 Strategy active check
+    pattern_name = signal.pattern
+    if not is_pattern_active(pattern_name):
+        logger.info(f"SKIP: Pattern '{pattern_name}' is not active in strategy config")
+        return {
+            'pre_approved': False,
+            'skip_reason': f'Pattern {pattern_name} ปิดการใช้งาน (ดูที่ Strategy Manager)',
             'chart_context': {}
         }
 
@@ -169,8 +184,8 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
     logger.info(f"Duplicate check: pattern={signal.pattern}, current_entry={current_entry:.2f}, "
                 f"last_tech={last_tech_price:.2f}, current_chart={current_chart}, last_chart={last_chart}")
 
-    # Threshold: 0.30 USD (30 pip)
-    DUPLICATE_THRESHOLD = 0.30
+    # Threshold: config-driven (default 50 pip = 0.50 USD)
+    DUPLICATE_THRESHOLD = RISK_CONFIG.get('duplicate_pip_threshold', 50) / 100.0  # pip → USD
 
     # Block เมื่อ: ราคาใกล้กัน AND chart type เดิม
     if (current_entry > 0
@@ -185,17 +200,32 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
             'skip_reason': f'Setup เดิม entry={current_entry:.2f} ยังไม่เปลี่ยน (ห่าง {price_diff:.2f} < {DUPLICATE_THRESHOLD})',
             'chart_context': {}
         }
-    else:
-        # Log why it passed
-        if current_entry == 0:
-            logger.debug("No entry price → allow")
-        elif last_tech_price == 0:
-            logger.info("First plan (last_tech=0) → allow")
-        elif current_chart != last_chart:
-            logger.info(f"Chart type changed ({last_chart} → {current_chart}) → allow")
-        elif abs(current_entry - last_tech_price) >= DUPLICATE_THRESHOLD:
-            price_diff = abs(current_entry - last_tech_price)
-            logger.info(f"Entry moved enough (diff={price_diff:.2f} >= {DUPLICATE_THRESHOLD}) → allow")
+
+    # Log why duplicate-prevention passed
+    if current_entry == 0:
+        logger.debug("No entry price → allow")
+    elif last_tech_price == 0:
+        logger.info("First plan (last_tech=0) → allow")
+    elif current_chart != last_chart:
+        logger.info(f"Chart type changed ({last_chart} → {current_chart}) → allow")
+    elif abs(current_entry - last_tech_price) >= DUPLICATE_THRESHOLD:
+        price_diff = abs(current_entry - last_tech_price)
+        logger.info(f"Entry moved enough (diff={price_diff:.2f} >= {DUPLICATE_THRESHOLD}) → allow duplicate check")
+
+    # Check 6b: Cooldown — ห่างจาก signal ก่อนหน้า ≥ N bars (M5: 3 = 15 min, M1: 15)
+    cooldown_bars = RISK_CONFIG.get('cooldown_bars', 0)
+    if cooldown_bars > 0:
+        last_signal_bar = portfolio_state.get('last_signal_bar', 0) or 0
+        current_bar = portfolio_state.get('current_bar', 0) or 0
+        if last_signal_bar > 0 and current_bar > 0:
+            bars_diff = current_bar - last_signal_bar
+            if 0 < bars_diff < cooldown_bars:
+                logger.info(f"SKIP: Cooldown active ({bars_diff} < {cooldown_bars} bars)")
+                return {
+                    'pre_approved': False,
+                    'skip_reason': f'Cooldown: ห่าง signal ก่อน {bars_diff} bars (ต้อง ≥ {cooldown_bars})',
+                    'chart_context': {}
+                }
 
     # Check 7: Removed — Signal Engine handles touch validation internally
 

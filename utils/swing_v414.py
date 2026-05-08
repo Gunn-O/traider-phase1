@@ -62,14 +62,13 @@ def scan_swings(bars, R55,
     """
     thresh1  = R55 * 0.01  # 1%R55  â à¹à¸à¸·à¹à¸­à¸à¹à¸à¸à¸±à¹à¸à¸à¹à¸³à¹à¸à¹à¸à¸à¸¹à¹
     thresh5  = R55 * 0.10  # 10%R55  â à¹à¸à¹à¸à¸«à¸à¸² exception
-
     highs, lows = [], []
     seen_h, seen_l = set(), set()
 
     def try_sh(li, rj, c1, c3):
         key = (c1[0], c3[0])
         if key in seen_h: return
-        if abs(C(c1) - O(c3)) * 100 > 100: return
+        if abs(C(c1) - O(c3)) * 100 > pair_thresh: return
         if bsize(c1) < thresh1 or bsize(c3) < thresh1: return
         mid = (C(c1) + O(c3)) / 2
 
@@ -94,7 +93,7 @@ def scan_swings(bars, R55,
     def try_sl(li, rj, c1, c3):
         key = (c1[0], c3[0])
         if key in seen_l: return
-        if abs(C(c1) - O(c3)) * 100 > 100: return
+        if abs(C(c1) - O(c3)) * 100 > pair_thresh: return
         if bsize(c1) < thresh1 or bsize(c3) < thresh1: return
         mid = (C(c1) + O(c3)) / 2
 
@@ -119,7 +118,8 @@ def scan_swings(bars, R55,
     for i in range(len(bars) - 1):
         j = i + 1
         bi, bj = bars[i], bars[j]
-        if abs(C(bi) - O(bj)) * 100 > 50: continue
+        pair_thresh = max(R55 * 0.01, 100)   # 1%R55 หรือ 100pip แล้วแต่อันมากกว่า
+        if abs(C(bi) - O(bj)) * 100 > pair_thresh: continue
 
         bid = bsize(bi) < thresh1
         bjd = bsize(bj) < thresh1

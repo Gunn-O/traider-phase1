@@ -5,7 +5,7 @@ Paper Broker — Simulate MT5 order execution (v4.3)
 V4.3: รองรับ beauty_score, technique, session tracking
 
 Usage:
-    broker = PaperBroker(symbol="XAUUSDm")
+    broker = PaperBroker(symbol="XAUUSDc")
     ticket = broker.open_position("BUY", lot=0.01, sl=3230, tp=3275, ...)
     newly_closed = broker.update_positions(candle_time)
 """
@@ -38,7 +38,7 @@ class PaperBroker:
         Initialize Paper Broker
 
         Args:
-            symbol: Symbol name (e.g., "XAUUSDm", "XAUUSD")
+            symbol: Symbol name (e.g., "XAUUSDc", "XAUUSD")
         """
         self.symbol = symbol
         self.positions: Dict[int, dict] = {}  # ticket -> position dict
@@ -82,6 +82,7 @@ class PaperBroker:
         session: Optional[str] = None,    # V4.3
         beauty_score: Optional[int] = None,  # V4.3
         entry_price: Optional[float] = None,  # For backtest mode
+        trail_meta: Optional[dict] = None,    # Mountain trailing metadata
     ) -> Optional[int]:
         """
         เปิด virtual position (V4.3: รองรับ metadata เพิ่มเติม)
@@ -113,6 +114,17 @@ class PaperBroker:
             self.ticket_counter += 1
             ticket = self.ticket_counter
 
+            # Trailing state (Mountain only) — encode in position dict
+            trail = None
+            if trail_meta:
+                trail = {
+                    'stage':      0,
+                    'tp1':        float(trail_meta.get('tp1') or 0),
+                    'tp2':        float(trail_meta.get('tp2_base') or trail_meta.get('tp2') or 0),
+                    'tech_point': float(trail_meta.get('tech_point') or trail_meta.get('base_lo') or 0),
+                    'height_usd': float(trail_meta.get('height') or 0) / 100.0,
+                }
+
             self.positions[ticket] = {
                 "ticket": ticket,
                 "trade_id": trade_id or f"PAPER-{ticket}",
@@ -133,6 +145,8 @@ class PaperBroker:
                 "technique": technique or "unknown",
                 "session": session or "Unknown",
                 "beauty_score_used": beauty_score or 100,
+                # Trailing state (None for non-Mountain)
+                "trail": trail,
             }
 
             logger.info(
@@ -180,6 +194,41 @@ class PaperBroker:
             else:
                 pnl = (pos["entry"] - current) * pos["lot"] * 100
             pos["pnl"] = round(pnl, 2)
+
+            # Mountain 3-stage trailing SL (BUY only) — runs before SL/TP check
+            trail = pos.get("trail")
+            if trail and action == "BUY":
+                stage = int(trail.get("stage", 0))
+                tp1 = float(trail.get("tp1") or 0)
+                tp2 = float(trail.get("tp2") or 0)
+                tech = float(trail.get("tech_point") or 0)
+                h_usd = float(trail.get("height_usd") or 0)
+
+                new_sl = None
+                new_stage = stage
+
+                if stage == 0 and tp1 > 0 and current >= tp1:
+                    new_sl = tech + h_usd * 0.05
+                    new_stage = 1
+                elif stage == 1 and tp2 > 0 and current >= tp2:
+                    new_sl = tp1
+                    new_stage = 2
+                elif stage == 2 and tp2 > 0:
+                    tp2_plus20 = tp2 + h_usd * 0.20
+                    if current >= tp2_plus20:
+                        new_sl = tp2
+                        new_stage = 3
+
+                # Only move SL UP for BUY
+                if new_sl is not None and new_sl > pos["sl"]:
+                    old_sl = pos["sl"]
+                    pos["sl"] = new_sl
+                    pos["sl_price"] = new_sl
+                    trail["stage"] = new_stage
+                    logger.info(
+                        f"📄 Paper trailing | ticket={ticket} stage={stage}->{new_stage} "
+                        f"sl={old_sl:.2f}->{new_sl:.2f} price={current:.2f}"
+                    )
 
             # เช็ค SL/TP hit
             close_reason = None

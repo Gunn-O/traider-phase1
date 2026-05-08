@@ -273,7 +273,7 @@ class DataConnector:
         for attempt in range(max_retries):
             try:
                 # Get data from TradingView
-                # Gold symbols (XAUUSD/XAUUSDm) on OANDA exchange
+                # Gold symbols (XAUUSD/XAUUSDc) on OANDA exchange
                 if start_date and end_date:
                     # Date range mode for backtest
                     # Calculate number of bars needed
@@ -512,12 +512,12 @@ class MT5Connector:
     ใช้ได้ทุก mode: backtest/simulate/paper/live
     """
 
-    def __init__(self, symbol: str = "XAUUSDm"):
+    def __init__(self, symbol: str = "XAUUSDc"):
         """
         Initialize MT5 Connector
 
         Args:
-            symbol: Trading symbol (e.g., "XAUUSDm", "XAUUSD")
+            symbol: Trading symbol (e.g., "XAUUSDc", "XAUUSD")
         """
         if not MT5_AVAILABLE:
             raise RuntimeError("MetaTrader5 not available")
@@ -525,12 +525,15 @@ class MT5Connector:
         self.symbol = symbol
         self.connected = False
 
-        # Try to initialize MT5
-        if not mt5.initialize():
+        # Try to initialize MT5 (support MT5_TERMINAL_PATH env to pin a specific
+        # terminal when multiple MT5 instances are installed)
+        mt5_path = os.getenv('MT5_TERMINAL_PATH', '').strip()
+        init_ok = mt5.initialize(path=mt5_path) if mt5_path else mt5.initialize()
+        if not init_ok:
             raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
         self.connected = True
-        logger.info(f"✅ MT5 connected | symbol={symbol}")
+        logger.info(f"✅ MT5 connected | symbol={symbol}" + (f" | path={mt5_path}" if mt5_path else ""))
 
     def get_candles(
         self,
@@ -588,7 +591,7 @@ class MT5Connector:
                 "high": float(r["high"]),
                 "low": float(r["low"]),
                 "close": float(r["close"]),
-                "volume": int(r.get("tick_volume", 0))
+                "volume": int(r["tick_volume"])
             })
 
         return candles
@@ -628,55 +631,61 @@ class MT5Connector:
         count: int = 55
     ) -> Dict[str, List[Dict]]:
         """
-        Fetch M5 and resample to all requested timeframes
-        (matches old DataConnector API)
+        Fetch base_tf candles directly + resample only to TFs that are >= base_tf.
 
         Args:
             symbol: Symbol (ignored, uses self.symbol)
-            base_tf: Base timeframe (default M5)
+            base_tf: Base timeframe to fetch from broker (M1/M5/M15/...)
             count: Number of candles per TF
 
         Returns:
-            {
-                'M5': [candles],
-                'M15': [candles],
-                ...
-            }
+            { base_tf: [candles], <higher TFs in TIMEFRAMES>: [resampled] }
+            Lower TFs than base_tf are returned as [] (cannot downsample).
         """
-        # Fetch M5 candles (enough to resample)
-        # For M5 → H4, need more candles (48x multiplier)
-        m5_needed = count * 48  # Conservative: enough for H4
+        order = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4']
+        if base_tf not in order:
+            base_tf = 'M5'
+        base_idx = order.index(base_tf)
 
-        m5_candles = self.get_candles('M5', m5_needed)
+        # Need enough base candles to resample to the largest TF in TIMEFRAMES
+        max_target_minutes = max(TF_MINUTES.get(tf, 5) for tf in TIMEFRAMES)
+        base_minutes = TF_MINUTES.get(base_tf, 5)
+        multiplier = max(1, max_target_minutes // base_minutes)
+        # Fetch enough for resampling + buffer
+        base_needed = max(count * multiplier, count + 50)
 
-        # Resample to all timeframes in TIMEFRAMES
+        base_candles = self.get_candles(base_tf, base_needed)
+
         result = {}
         for tf in TIMEFRAMES:
-            if tf == 'M5':
-                result[tf] = m5_candles[-count:] if len(m5_candles) >= count else m5_candles
-            elif tf == 'M1':
-                # Can't downsample M5 to M1
+            if tf == base_tf:
+                result[tf] = base_candles[-count:] if len(base_candles) >= count else base_candles
+            elif order.index(tf) < base_idx:
+                # Lower TF than base — cannot downsample
                 result[tf] = []
             else:
-                # Resample M5 → M15/M30/H1/H4
-                result[tf] = self._resample_m5(m5_candles, tf, count)
+                # Higher TF — resample up
+                result[tf] = self._resample_to_higher(base_candles, base_tf, tf, count)
 
         return result
 
     def _resample_m5(self, m5_candles: List[Dict], target_tf: str, count: int) -> List[Dict]:
-        """Resample M5 candles to higher timeframe"""
+        """Backward-compat: assumes base=M5"""
+        return self._resample_to_higher(m5_candles, 'M5', target_tf, count)
+
+    def _resample_to_higher(self, base_candles: List[Dict], base_tf: str,
+                              target_tf: str, count: int) -> List[Dict]:
+        """Resample base_tf candles UP to a higher target_tf"""
         import pandas as pd
 
-        if not m5_candles:
+        if not base_candles:
             return []
 
-        # Convert to DataFrame
-        df = pd.DataFrame(m5_candles)
+        df = pd.DataFrame(base_candles)
         df.set_index('time', inplace=True)
 
-        # Resample
-        tf_map = {'M15': '15T', 'M30': '30T', 'H1': '1H', 'H4': '4H'}
-        freq = tf_map.get(target_tf)
+        tf_freq = {'M5': '5T', 'M15': '15T', 'M30': '30T', 'H1': '1H', 'H4': '4H'}
+        freq = tf_freq.get(target_tf)
         if freq is None:
             return []
 
@@ -688,7 +697,6 @@ class MT5Connector:
             'volume': 'sum'
         }).dropna()
 
-        # Convert back to dict
         candles = []
         for idx, row in resampled.iterrows():
             candles.append({
@@ -1211,7 +1219,7 @@ class TVConnector:
 # Auto-Detection Factory Function
 # ============================================================================
 
-def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
+def create_connector(mode: str = "auto", symbol: str = "XAUUSDc"):
     """
     Auto-detect data source and create appropriate connector
 
@@ -1228,9 +1236,9 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDm"):
               - "tv": Force TradingView
               - "backtest": Same as auto (for backward compatibility)
         symbol: Trading symbol
-                - MT5: use "XAUUSDm" (cent) or "XAUUSD" (standard)
+                - MT5: use "XAUUSDc" (cent) or "XAUUSD" (standard)
                 - yfinance: use "XAUUSD" (converts to GC=F internally)
-                - TV: use "XAUUSD" (OANDA doesn't have XAUUSDm)
+                - TV: use "XAUUSD" (OANDA doesn't have XAUUSDc)
 
     Returns:
         MT5Connector, YFinanceConnector, or TVConnector instance
@@ -1341,7 +1349,7 @@ if __name__ == "__main__":
 
     for tf in timeframes:
         try:
-            candles = connector.get_latest_candles("XAUUSDm", timeframe=tf, count=55)
+            candles = connector.get_latest_candles("XAUUSDc", timeframe=tf, count=55)
             print(f"✓ {tf}: {len(candles)} candles")
 
             if candles:

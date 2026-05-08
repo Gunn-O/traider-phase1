@@ -1,0 +1,110 @@
+{
+  "version": "65",
+  "last_updated": "2026-05-06",
+  "patterns": {
+    "MOUNTAIN": {
+      "active": true,
+      "implemented": true,
+      "name": "Mountain Round 1",
+      "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 10%height",
+      "direction": "BUY",
+      "version": "4.45",
+      "validations": [
+        "ขนาดภูเขา >= 10 แท่ง",
+        "ห้ามมี Low ทะลุ thresh_10 ในช่วง 20-80%",
+        "ฐาน→entry ไม่เกิน 42 แท่ง",
+        "SH หลัง peak <= 2 อัน (ถ้า > 25 แท่ง)"
+      ],
+      "priority": 2
+    },
+    "MOUNTAIN_R2": {
+      "active": false,
+      "implemented": false,
+      "name": "Mountain Round 2",
+      "description": "ภูเขารอบ 2 (เลิกใช้ใน v4.45/v67) — state tracking ปิดใน signal_engine; เก็บไว้ใน config เพื่อ backward compatibility",
+      "direction": "BUY",
+      "version": "4.45",
+      "validations": [],
+      "priority": 1,
+      "deprecated": true
+    },
+    "DOWNTREND": {
+      "active": false,
+      "implemented": true,
+      "name": "Downtrend (Legacy)",
+      "description": "เทรนด์ลง — ใช้ _detect_downtrend() (V4.20 backward compatibility)",
+      "direction": "SELL",
+      "version": "4.20",
+      "validations": [],
+      "priority": 3,
+      "deprecated": true
+    },
+    "DOWNTREND_IMPULSE": {
+      "active": false,
+      "implemented": true,
+      "name": "Downtrend Impulse",
+      "description": "เทรนด์ลงแบบ impulse — Twin Candle SELL",
+      "direction": "SELL",
+      "version": "4.25",
+      "validations": [],
+      "priority": 3,
+      "deprecated": false
+    },
+    "UPTREND": {
+      "active": false,
+      "implemented": true,
+      "name": "Uptrend (Legacy)",
+      "description": "เทรนด์ขึ้น — ใช้ _detect_uptrend() (V4.20 backward compatibility)",
+      "direction": "BUY",
+      "version": "4.20",
+      "validations": [],
+      "priority": 4,
+      "deprecated": true
+    },
+    "UPTREND_IMPULSE": {
+      "active": false,
+      "implemented": true,
+      "name": "Uptrend Impulse",
+      "description": "เทรนด์ขึ้นแบบ impulse — Twin Candle BUY",
+      "direction": "BUY",
+      "version": "4.25",
+      "validations": [],
+      "priority": 4,
+      "deprecated": false
+    },
+    "MAI_RUAY": {
+      "active": true,
+      "implemented": true,
+      "name": "ไม้รวย (Branch F)",
+      "description": "Father/Mother candle — พ่อ 1-5 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ",
+      "direction": "BOTH",
+      "version": "1.0",
+      "validations": [
+        "พ่อ 1-5 แท่ง สีเดียวกัน body 60-100% R55",
+        "แม่สวนทิศพ่อ body 4-30% ของพ่อ",
+        "Anti-trend filter (ไม่เทรดสวนเทรนด์ใหญ่)",
+        "Lot = portfolio × 10% / SL (pip)"
+      ],
+      "priority": 5,
+      "deprecated": false
+    }
+  },
+  "global_settings": {
+    "min_rr_ratio": 0.0,
+    "cooldown_bars": 3,
+    "duplicate_pip_threshold": 50,
+    "risk_per_plan_pct": 0.1,
+    "max_consecutive_loss": 3,
+    "max_loss_30pct": 0.3,
+    "max_loss_50pct": 0.5,
+    "winrate_test_lot": 0.01,
+    "time_filter": {
+      "enabled": true,
+      "close_hour_utc": 21,
+      "buffer_minutes": 120,
+      "weekdays_only": [
+        4
+      ]
+    }
+  }
+}

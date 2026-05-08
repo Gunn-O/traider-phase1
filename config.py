@@ -29,8 +29,15 @@ RISK_CONFIG = {
     'trailing_sl_target': 500,   # pip — ตั้ง SL ที่ +500 pip
     'trailing_sl_step': 1000,    # pip — เลื่อนทุก 1000 pip
 
-    # R:R
-    'min_rr_ratio': 1.0,
+    # R:R — Cent account: ลด threshold ต่ำสุดเพื่อเก็บข้อมูล
+    # Mountain: R:R เฉลี่ย 1.24 → ผ่านสบาย
+    # MAI_RUAY: R:R เฉลี่ย 0.73 → ต้องลด threshold ถึงผ่าน
+    # Trade-off: WR ต้องสูงพอชดเชย (MAI_RUAY 66.7% > break-even 57.8% → profitable)
+    'min_rr_ratio': 0.0,         # ลดเป็น 0 (เก็บข้อมูล Cent account)
+
+    # Anti-overtrade — Cooldown หลัง signal เปิด
+    'cooldown_bars': 3,          # ห่างจาก signal ก่อน ≥ N candles ใหม่ (M5: 3 = 15 min, M1: 15 = 15 min)
+    'duplicate_pip_threshold': 50,  # ห่าง entry < 50 pip + same chart_type → SKIP (เปลี่ยนจาก 30)
 
     # Winrate Test
     'winrate_test_lot': 0.01
@@ -98,11 +105,14 @@ def calc_lot(balance: float, sl_pip: int, winrate_test: bool = False) -> dict:
 # TIMEFRAME CONFIG
 # ============================================================================
 
-# Single TF mode: ง่าย, เร็ว, reliable กว่า MTF
-# M1: signal เยอะ (20-50/day) เหมาะสำหรับ testing
-# M5: balanced quality (5-15/day) เหมาะสำหรับ production
-TIMEFRAMES = ['M5']  # Balanced: quality + frequency (DEFAULT)
-# TIMEFRAMES = ['M1']  # Uncomment for more signals per day
+# Single TF mode — auto-driven by env BACKTEST_TIMEFRAME (set by api_server /api/start
+# or by /api/backtest/run). Fallback M5 when no env var (e.g. one-off CLI runs).
+# Valid: M1, M5, M15, M30, H1, H4
+import os as _os
+_active_tf_env = _os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+if _active_tf_env not in ('M1', 'M5', 'M15', 'M30', 'H1', 'H4'):
+    _active_tf_env = 'M5'
+TIMEFRAMES = [_active_tf_env]
 
 TF_SIZE = {
     'H4': 6,

@@ -54,12 +54,17 @@ _backtest_state = {
     "pid": None,
 }
 
-def _run_backtest_thread(start: str, end: str):
+# ── Live trading subprocess handle (started via /api/start) ──────────────
+# main.py spawned with --simulate + --mode/--symbol/--tf flags
+_bot_proc: Optional[subprocess.Popen] = None
+
+def _run_backtest_thread(start: str, end: str, timeframe: str = "M5"):
     """รัน backtest ใน background thread"""
     global _backtest_state
     try:
         _backtest_state["is_running"] = True
         _backtest_state["error"] = None
+        _backtest_state["timeframe"] = timeframe
 
         # หา project root (ที่มี main.py)
         project_root = Path(__file__).parent
@@ -73,12 +78,29 @@ def _run_backtest_thread(start: str, end: str):
             "--decision-engine", "python"
         ]
 
+        # Pass BACKTEST_TIMEFRAME via env to subprocess
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["BACKTEST_TIMEFRAME"] = timeframe
+
+        # Hide console window when launched from .exe launcher (Windows)
+        creationflags = 0
+        startupinfo = None
+        if sys.platform == 'win32':
+            creationflags = subprocess.CREATE_NO_WINDOW
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(project_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            env=env,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
         )
         _backtest_state["pid"] = proc.pid
 
@@ -105,7 +127,7 @@ def _run_backtest_thread(start: str, end: str):
 bot_state = {
     "status": "stopped",           # stopped / running / error
     "mode": "paper",               # paper / micro / live
-    "symbol": "XAUUSDm",           # Trading symbol (XAUUSDm=Cent, XAUUSD=Real)
+    "symbol": "XAUUSDc",           # Trading symbol (XAUUSDc=Cent, XAUUSD=Real)
     "trading_tf": "M5",            # Selected timeframe
     "data_source_mode": "auto",    # V4.3: auto / mt5 / tv (user selected)
     "data_source_actual": "TradingView",  # V4.3: MT5 / TradingView (after connect)
@@ -201,7 +223,7 @@ manager = ConnectionManager()
 
 class StartRequest(BaseModel):
     tf: str = "M5"           # Timeframe to trade
-    symbol: str = "XAUUSDm"  # Symbol to trade (XAUUSDm=Cent, XAUUSD=Real)
+    symbol: str = "XAUUSDc"  # Symbol to trade (XAUUSDc=Cent, XAUUSD=Real)
     mode: str = "paper"      # Trading mode (paper/micro/live)
     data_source: str = "auto"  # Data source (auto/mt5/tv)
 
@@ -228,8 +250,20 @@ async def serve_dashboard():
 
 @app.get("/api/status")
 async def get_status():
-    """Get current bot status"""
-    # Update timestamp
+    """Get current bot status — also verifies subprocess is still alive."""
+    global _bot_proc
+    # If subprocess died unexpectedly, reflect in state
+    if bot_state["status"] == "running" and _bot_proc is not None:
+        rc = _bot_proc.poll()
+        if rc is not None:  # process exited
+            logger.warning(f"Bot subprocess died (exit code {rc}) — resetting state to stopped")
+            bot_state["status"] = "stopped"
+            bot_state["bot_pid"] = None
+            bot_state["logs"].append(
+                f"{datetime.now().strftime('%H:%M:%S')} - Bot subprocess died (exit {rc})"
+            )
+            bot_state["logs"] = bot_state["logs"][-50:]
+            _bot_proc = None
     bot_state["last_updated"] = datetime.now().isoformat()
     return bot_state
 
@@ -240,10 +274,10 @@ async def start_bot(request: StartRequest):
     Start bot with selected timeframe and symbol
 
     Args:
-        request: {"tf": "M5", "symbol": "XAUUSDm"}
+        request: {"tf": "M5", "symbol": "XAUUSDc"}
 
     Returns:
-        {"status": "started", "tf": "M5", "symbol": "XAUUSDm"}
+        {"status": "started", "tf": "M5", "symbol": "XAUUSDc"}
     """
     if bot_state["status"] == "running":
         raise HTTPException(status_code=400, detail="Bot already running")
@@ -254,7 +288,7 @@ async def start_bot(request: StartRequest):
         raise HTTPException(status_code=400, detail=f"Invalid TF. Must be one of {valid_tfs}")
 
     # Validate Symbol
-    valid_symbols = ["XAUUSDm", "XAUUSD"]
+    valid_symbols = ["XAUUSDc", "XAUUSDm", "XAUUSD"]
     if request.symbol not in valid_symbols:
         raise HTTPException(status_code=400, detail=f"Invalid symbol. Must be one of {valid_symbols}")
 
@@ -264,17 +298,12 @@ async def start_bot(request: StartRequest):
         raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of {valid_modes}")
 
     # Validate Data Source
-    valid_data_sources = ["auto", "mt5", "tv"]
+    valid_data_sources = ["auto", "mt5", "yf", "tv"]
     if request.data_source not in valid_data_sources:
         raise HTTPException(status_code=400, detail=f"Invalid data_source. Must be one of {valid_data_sources}")
 
-    # Auto-set symbol based on mode (paper always uses XAUUSDm for price data)
-    if request.mode == "paper":
-        actual_symbol = "XAUUSDm"
-    elif request.mode == "micro":
-        actual_symbol = "XAUUSDm"
-    else:  # live
-        actual_symbol = "XAUUSD"
+    # Use symbol as selected by user (no auto-override)
+    actual_symbol = request.symbol
 
     # Update state
     bot_state["status"] = "running"
@@ -282,7 +311,10 @@ async def start_bot(request: StartRequest):
     bot_state["symbol"] = actual_symbol
     bot_state["trading_tf"] = request.tf
     bot_state["data_source_mode"] = request.data_source
-    # data_source_actual will be updated by main.py after connector initialization
+    # Reflect requested data source immediately — subprocess runs in a separate process
+    # and can't write back to api_server's bot_state. Map request value → display label.
+    ds_actual_map = {"mt5": "MT5", "yf": "yfinance", "tv": "TradingView", "auto": "Auto"}
+    bot_state["data_source_actual"] = ds_actual_map.get(request.data_source, request.data_source)
 
     mode_labels = {
         "paper": "Paper Trade (Simulate)",
@@ -299,6 +331,53 @@ async def start_bot(request: StartRequest):
 
     logger.info(f"Bot started with Mode: {request.mode}, Symbol: {actual_symbol}, TF: {request.tf}")
 
+    # ── Spawn main.py subprocess (actual trading loop) ──────────────
+    global _bot_proc
+    if _bot_proc is not None and _bot_proc.poll() is None:
+        # Old subprocess still alive — kill before spawning new one
+        try:
+            _bot_proc.terminate()
+            _bot_proc.wait(timeout=3)
+        except Exception:
+            try: _bot_proc.kill()
+            except Exception: pass
+
+    project_root = Path(__file__).parent
+    cmd = [
+        sys.executable, str(project_root / "main.py"),
+        "--simulate",
+        "--mode", request.mode,
+        "--symbol", actual_symbol,
+        "--tf", request.tf,
+        "--data-source", request.data_source,
+        "--no-confirm",  # caller already confirmed via UI; subprocess has no stdin
+        "--decision-engine", "python",
+    ]
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["BACKTEST_TIMEFRAME"] = request.tf  # signal_engine reads this
+
+    creationflags = 0
+    startupinfo = None
+    if sys.platform == 'win32':
+        creationflags = subprocess.CREATE_NO_WINDOW
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+
+    try:
+        _bot_proc = subprocess.Popen(
+            cmd, cwd=str(project_root), env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=creationflags, startupinfo=startupinfo,
+        )
+        logger.info(f"Bot subprocess spawned: pid={_bot_proc.pid}")
+        bot_state["bot_pid"] = _bot_proc.pid
+    except Exception as e:
+        logger.error(f"Failed to spawn bot subprocess: {e}")
+        bot_state["status"] = "stopped"
+        raise HTTPException(status_code=500, detail=f"Failed to start bot: {e}")
+
     # Broadcast to WebSocket clients
     await manager.broadcast({
         "event": "bot_started",
@@ -311,7 +390,8 @@ async def start_bot(request: StartRequest):
         "status": "started",
         "mode": request.mode,
         "tf": request.tf,
-        "symbol": actual_symbol
+        "symbol": actual_symbol,
+        "pid": _bot_proc.pid,
     }
 
 
@@ -328,8 +408,30 @@ async def stop_bot(request: Optional[StopRequest] = None):
 
     reason = request.reason if request else "User requested stop"
 
+    # Kill the bot subprocess if alive — uses taskkill /F /T on Windows to clean up tree
+    global _bot_proc
+    killed_pid = None
+    if _bot_proc is not None and _bot_proc.poll() is None:
+        killed_pid = _bot_proc.pid
+        try:
+            if sys.platform == 'win32':
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(_bot_proc.pid)],
+                    capture_output=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                _bot_proc.terminate()
+                try: _bot_proc.wait(timeout=5)
+                except Exception: _bot_proc.kill()
+            logger.info(f"Bot subprocess killed: pid={killed_pid}")
+        except Exception as e:
+            logger.error(f"Failed to kill bot subprocess pid={killed_pid}: {e}")
+    _bot_proc = None
+
     # Update state
     bot_state["status"] = "stopped"
+    bot_state["bot_pid"] = None
     bot_state["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - Bot stopped: {reason}")
     bot_state["logs"] = bot_state["logs"][-50:]
 
@@ -338,7 +440,7 @@ async def stop_bot(request: Optional[StopRequest] = None):
     # Broadcast to WebSocket clients
     await manager.broadcast({"event": "bot_stopped", "reason": reason})
 
-    return {"status": "stopped", "reason": reason}
+    return {"status": "stopped", "reason": reason, "killed_pid": killed_pid}
 
 
 @app.post("/api/emergency-stop")
@@ -540,48 +642,69 @@ async def get_agent_costs():
 
 
 @app.get("/api/candles")
-async def get_candles(tf: str = "M5", limit: int = 100):
+async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
     """
-    Get latest OHLC candles for chart
+    Get latest OHLC candles for chart — fetches directly from MT5 Desktop via Python IPC.
+
+    Works whether or not main.py is running (api_server has its own MT5 connection).
 
     Args:
         tf: Timeframe (M1/M5/M15/M30/H1/H4)
         limit: Number of candles (default: 100)
+        symbol: Symbol (default: bot_state.symbol)
 
     Returns:
         List of candle dicts: [{"time": unix_ts, "open": float, ...}, ...]
     """
-    global connector
-
-    if not connector:
-        logger.warning("Connector not initialized yet")
-        # Return mock data for testing
-        return [
-            {"time": 1700000000, "open": 2000.0, "high": 2010.0, "low": 1995.0, "close": 2005.0},
-            {"time": 1700000300, "open": 2005.0, "high": 2015.0, "low": 2000.0, "close": 2012.0},
-            {"time": 1700000600, "open": 2012.0, "high": 2020.0, "low": 2008.0, "close": 2018.0},
-            {"time": 1700000900, "open": 2018.0, "high": 2025.0, "low": 2015.0, "close": 2022.0},
-        ]
+    sym = symbol or bot_state.get("symbol", "XAUUSDc")
 
     try:
-        # Fetch candles from connector
-        candles = connector.get_candles(timeframe=tf, count=limit)
+        import MetaTrader5 as mt5
+    except ImportError:
+        logger.error("MetaTrader5 module not installed")
+        return []
 
-        if not candles:
+    # Map TF string → mt5 timeframe constant
+    tf_map = {
+        "M1":  mt5.TIMEFRAME_M1,  "M5":  mt5.TIMEFRAME_M5,
+        "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
+        "H1":  mt5.TIMEFRAME_H1,  "H4":  mt5.TIMEFRAME_H4,
+    }
+    mt5_tf = tf_map.get(tf.upper())
+    if mt5_tf is None:
+        return []
+
+    try:
+        if not mt5.initialize():
+            logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
             return []
 
-        # Transform to lightweight-charts format (unix timestamp)
-        result = []
-        for c in candles:
-            result.append({
-                "time": c["time"],  # Already unix timestamp
-                "open": c["open"],
-                "high": c["high"],
-                "low": c["low"],
-                "close": c["close"]
-            })
+        # Ensure symbol is in Market Watch
+        si = mt5.symbol_info(sym)
+        if si is None:
+            logger.warning(f"Symbol {sym} not found")
+            return []
+        if not si.visible:
+            mt5.symbol_select(sym, True)
 
-        return result
+        # copy_rates_from_pos(symbol, tf, start, count) — start=0 = most recent
+        rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, limit)
+        if rates is None or len(rates) == 0:
+            logger.warning(f"copy_rates_from_pos returned no data for {sym} {tf}")
+            return []
+
+        # Transform to lightweight-charts format
+        return [
+            {
+                "time":  int(r["time"]),     # unix timestamp (seconds)
+                "open":  float(r["open"]),
+                "high":  float(r["high"]),
+                "low":   float(r["low"]),
+                "close": float(r["close"]),
+                "volume": int(r["tick_volume"]),
+            }
+            for r in rates
+        ]
 
     except Exception as e:
         logger.error(f"Failed to fetch candles: {e}")
@@ -596,6 +719,88 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "bot_status": bot_state["status"]
     }
+
+
+@app.get("/api/mt5-status")
+async def mt5_status():
+    """
+    Live MT5 connectivity check — queries terminal/account/symbol on demand.
+    UI polls this to verify MT5 connection + see real-time tick.
+
+    Returns:
+        {
+            connected: bool,
+            terminal: {connected, trade_allowed, build},
+            account: {login, server, balance, currency, leverage} | null,
+            symbol: {name, bid, ask, spread_pip, time} | null,
+            error: str | null
+        }
+    """
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        return {"connected": False, "error": "MetaTrader5 module not installed"}
+
+    sym_name = bot_state.get("symbol", "XAUUSDc")
+    out = {"connected": False, "terminal": None, "account": None, "symbol": None, "error": None}
+
+    try:
+        # Initialize if not already (idempotent — returns True if already connected)
+        if not mt5.initialize():
+            out["error"] = f"mt5.initialize() failed: {mt5.last_error()}"
+            return out
+
+        ti = mt5.terminal_info()
+        if ti is None:
+            out["error"] = "terminal_info() returned None"
+            return out
+        out["terminal"] = {
+            "connected": ti.connected,
+            "trade_allowed": ti.trade_allowed,
+            "build": ti.build,
+        }
+        if not ti.connected:
+            out["error"] = "MT5 terminal not connected to broker"
+            return out
+
+        ai = mt5.account_info()
+        if ai is None:
+            out["error"] = "account_info() returned None — not logged in"
+            return out
+        out["account"] = {
+            "login": ai.login,
+            "server": ai.server,
+            "balance": float(ai.balance),
+            "equity": float(ai.equity),
+            "currency": ai.currency,
+            "leverage": ai.leverage,
+            "trade_mode": ai.trade_mode,  # 0=demo, 2=real
+        }
+
+        si = mt5.symbol_info(sym_name)
+        if si is None:
+            out["error"] = f"symbol {sym_name} not found"
+            return out
+        if not si.visible:
+            mt5.symbol_select(sym_name, True)
+
+        tick = mt5.symbol_info_tick(sym_name)
+        if tick is None:
+            out["error"] = f"no tick for {sym_name}"
+            return out
+        out["symbol"] = {
+            "name": sym_name,
+            "bid": float(tick.bid),
+            "ask": float(tick.ask),
+            "spread_pip": round((tick.ask - tick.bid) * 100, 1),
+            "time": datetime.fromtimestamp(tick.time).isoformat(),
+        }
+        out["connected"] = True
+        return out
+
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
 
 
 # ============================================================================
@@ -648,8 +853,15 @@ async def run_backtest(request: Request):
                 "message": "Backtest กำลังรันอยู่"}
 
     body = await request.json()
-    start = body.get("start", "2026-04-01")
-    end   = body.get("end",   "2026-04-21")
+    start     = body.get("start", "2026-04-01")
+    end       = body.get("end",   "2026-04-21")
+    timeframe = body.get("timeframe", "M5").upper()
+
+    # Validate timeframe
+    valid_tfs = ["M1", "M5", "M15", "M30", "H1", "H4"]
+    if timeframe not in valid_tfs:
+        return {"status": "error",
+                "message": f"Timeframe ต้องเป็นหนึ่งใน {valid_tfs}"}
 
     # Validate date format
     try:
@@ -686,18 +898,19 @@ async def run_backtest(request: Request):
         logger.error(f"LocalDB clear failed: {e}")
 
     # อัปเดต state
-    _backtest_state["start"] = start
-    _backtest_state["end"]   = end
+    _backtest_state["start"]     = start
+    _backtest_state["end"]       = end
+    _backtest_state["timeframe"] = timeframe
 
     # รันใน background thread
     t = threading.Thread(
         target=_run_backtest_thread,
-        args=(start, end),
+        args=(start, end, timeframe),
         daemon=True
     )
     t.start()
 
-    return {"status": "started", "start": start, "end": end}
+    return {"status": "started", "start": start, "end": end, "timeframe": timeframe}
 
 
 @app.get("/api/backtest/results")
@@ -770,6 +983,93 @@ async def get_backtest_status():
         "end":           _backtest_state.get("end"),
         "error":         _backtest_state.get("error"),
     }
+
+
+# ============================================================================
+# STRATEGY MANAGER ENDPOINTS (V65)
+# ============================================================================
+
+@app.get("/api/strategies")
+async def get_strategies():
+    """
+    Get all strategy patterns with their active status
+
+    Returns:
+        {
+            "version": str,
+            "patterns": {
+                "MOUNTAIN": {"active": bool, "name": str, ...},
+                ...
+            },
+            "active_count": int
+        }
+    """
+    from utils.strategy_loader import load_config, get_active_patterns
+
+    try:
+        config = load_config()
+        active = get_active_patterns()
+
+        return {
+            "version": config.get("version", "?"),
+            "patterns": config.get("patterns", {}),
+            "active_count": len(active),
+            "active_patterns": active,
+            "last_updated": config.get("last_updated", "")
+        }
+    except Exception as e:
+        logger.error(f"Failed to load strategies: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+
+@app.post("/api/strategies")
+async def update_strategies(request: Request):
+    """
+    Update active pattern list
+
+    Body:
+        {
+            "active": ["MOUNTAIN", "MOUNTAIN_R2"]
+        }
+
+    Returns:
+        {
+            "success": bool,
+            "active_patterns": List[str]
+        }
+    """
+    from utils.strategy_loader import save_active, get_active_patterns
+
+    try:
+        body = await request.json()
+        active_list = body.get("active", [])
+
+        if not isinstance(active_list, list):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "active must be a list of pattern names"}
+            )
+
+        # Save updated active list
+        save_active(active_list)
+
+        # Verify
+        updated = get_active_patterns()
+
+        logger.info(f"Strategy patterns updated: {updated}")
+        return {
+            "success": True,
+            "active_patterns": updated
+        }
+    except Exception as e:
+        logger.error(f"Failed to update strategies: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 
 # ============================================================================

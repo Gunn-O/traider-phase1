@@ -4,7 +4,7 @@ import { useWebSocket } from './useWebSocket'
 const DEFAULT_STATE = {
   status: 'stopped',
   mode: 'paper',
-  symbol: 'XAUUSDm',
+  symbol: 'XAUUSDc',
   trading_tf: 'M5',
   data_source_actual: '',
   current_price: 0,

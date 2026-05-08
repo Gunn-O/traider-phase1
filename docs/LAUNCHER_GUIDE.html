@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>Tra(i)der Launcher — คู่มือใช้งาน</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #1a1d24;
+    --text: #e6e8eb;
+    --muted: #9aa0aa;
+    --accent: #4ade80;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --border: #2b2f3a;
+    --code-bg: #0a0c10;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Sarabun", sans-serif;
+    line-height: 1.7;
+  }
+  .container { max-width: 920px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 {
+    font-size: 28px;
+    margin: 0 0 8px;
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 12px;
+  }
+  h2 {
+    font-size: 20px;
+    margin: 32px 0 12px;
+    color: var(--accent);
+    border-left: 4px solid var(--accent);
+    padding-left: 10px;
+  }
+  h3 { font-size: 16px; margin: 20px 0 8px; color: #fbbf24; }
+  .subtitle { color: var(--muted); margin: 0 0 24px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+  }
+  .warn {
+    border-left: 4px solid var(--warn);
+    background: rgba(245, 158, 11, 0.08);
+  }
+  .danger {
+    border-left: 4px solid var(--danger);
+    background: rgba(239, 68, 68, 0.08);
+  }
+  .ok {
+    border-left: 4px solid var(--accent);
+    background: rgba(74, 222, 128, 0.08);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: rgba(74, 222, 128, 0.06);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    color: #fbbf24;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    padding: 14px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+  }
+  ol, ul { padding-left: 24px; }
+  li { margin: 6px 0; }
+  .step {
+    display: inline-block;
+    background: var(--accent);
+    color: #0f1115;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 26px;
+    font-weight: 700;
+    margin-right: 8px;
+  }
+  .level-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0 6px;
+    font-weight: 600;
+  }
+  .lvl1 { color: #4ade80; }
+  .lvl2 { color: #fbbf24; }
+  .lvl3 { color: #f59e0b; }
+  .lvl4 { color: #f87171; }
+  .lvl5 { color: #ef4444; }
+  kbd {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-family: monospace;
+    font-size: 12px;
+    box-shadow: 0 1px 0 var(--border);
+  }
+  hr { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+  .footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 40px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Tra(i)der Launcher — คู่มือใช้งาน</h1>
+<p class="subtitle">XAUUSDc trading bot · MT5 + Backend API + Frontend UI · Phase II</p>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>ขั้นตอน 1 — เตรียม MT5 ก่อนเปิด Launcher</h2>
+
+<div class="card warn">
+<strong>⚠️ สำคัญ:</strong> ต้องทำใน MT5 ทุกครั้ง <em>ก่อน</em> เปิด Launcher
+</div>
+
+<ol>
+  <li>เปิด <strong>MT5 EXNESS</strong> (Launcher จะเปิดให้อัตโนมัติถ้ายังไม่เปิด)</li>
+  <li><strong>Login</strong> เข้า account (Cent หรือ Real ตาม mode ที่จะใช้)</li>
+  <li>กดปุ่ม <strong>"Algo Trading"</strong> บน toolbar ให้เป็น <strong style="color:#4ade80">สีเขียว ▶</strong>
+    <ul>
+      <li>ถ้าเป็นสีเทา/แดง → bot ส่ง order ไม่ได้ (จะ raise <code>RuntimeError: trade_allowed=False</code>)</li>
+    </ul>
+  </li>
+  <li>ตรวจ <strong>Market Watch</strong> ต้องมี symbol <code>XAUUSDc</code> (Cent) — คลิกขวา → Show</li>
+  <li>ตรวจ <strong>Tools → Options → Expert Advisors</strong> → ✅ Allow algorithmic trading</li>
+</ol>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>ขั้นตอน 2 — เปิด Launcher</h2>
+
+<p><strong>วิธีที่ 1:</strong> ดับเบิ้ลคลิก <code>Tra(i)der</code> บน Desktop (shortcut)</p>
+<p><strong>วิธีที่ 2:</strong> ดับเบิ้ลคลิก <code>TraiderLauncher.exe</code> ที่ root โปรเจกต์</p>
+
+<p>หน้าต่าง Launcher จะแสดง 3 บรรทัด status:</p>
+
+<table>
+  <thead><tr><th>Service</th><th>สิ่งที่ launcher ทำ</th></tr></thead>
+  <tbody>
+    <tr><td>MT5 Terminal</td><td>ตรวจ → ถ้าไม่เปิด → start อัตโนมัติ</td></tr>
+    <tr><td>Backend API (8080)</td><td>เริ่ม <code>api_server.py</code> ผ่าน venv python</td></tr>
+    <tr><td>Frontend UI (3000)</td><td>เริ่ม <code>npm run dev</code> ใน <code>frontend/</code></td></tr>
+  </tbody>
+</table>
+
+<div class="card ok">
+กดปุ่ม <strong>▶ Start All</strong> → รอจนทั้ง 3 ขึ้น <strong>✅</strong> → browser เปิดอัตโนมัติที่
+<a href="http://localhost:3000">http://localhost:3000</a>
+</div>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>ขั้นตอน 3 — ใช้งาน Dashboard</h2>
+
+<div class="card warn">
+Launcher <strong>ไม่ start bot อัตโนมัติ</strong> — มันแค่เตรียม infrastructure. ต้องไป dashboard เอง.
+</div>
+
+<ul>
+  <li><strong>เปิด trade:</strong> TopBar → เลือก mode (Paper/Sim/Live) → Symbol → Timeframe → กด <strong>▶ Start Bot</strong></li>
+  <li><strong>Backtest:</strong> เมนู Backtest → เลือก start/end/timeframe → Run</li>
+  <li><strong>ดู open orders:</strong> หน้า Dashboard</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>ขั้นตอน 4 — Emergency Stop (เรียงลำดับจากเบาไปแรง)</h2>
+
+<div class="card">
+<div class="level-bar lvl1">🟢 Level 1 — Graceful Stop (จากหน้าเว็บ)</div>
+<ul>
+  <li>ปุ่ม <strong>⏹ Stop Bot</strong> ใน TopBar → POST <code>/api/stop</code></li>
+  <li>Bot หยุดรับ signal ใหม่ — <strong>order ที่เปิดอยู่ยังอยู่</strong> (broker ปิดเองเมื่อ SL/TP hit)</li>
+  <li><em>ใช้เมื่อ:</em> อยากหยุดเทรดต่อ แต่ปล่อย position ปัจจุบันรันต่อ</li>
+</ul>
+</div>
+
+<div class="card">
+<div class="level-bar lvl2">🟡 Level 2 — Emergency Stop (จากหน้าเว็บ)</div>
+<ul>
+  <li>ปุ่ม <strong>🚨 Emergency Stop</strong> → POST <code>/api/emergency-stop</code></li>
+  <li><strong>⚠️ implementation ปัจจุบันยังไม่ปิด position จริงที่ broker</strong> — แค่ clear state ใน memory</li>
+  <li><strong>ต้องไปปิด manual ใน MT5 Desktop ด้วย</strong></li>
+</ul>
+</div>
+
+<div class="card">
+<div class="level-bar lvl3">🟠 Level 3 — ปิดทุกอย่างทาง Launcher</div>
+<ul>
+  <li>กดปุ่ม <strong>⏹ Stop All</strong> ใน Launcher → kill backend + frontend processes</li>
+  <li>MT5 Terminal <strong>ไม่ถูกปิด</strong> — TP/SL ที่ broker ยังทำงานปกติ (server-side)</li>
+</ul>
+</div>
+
+<div class="card danger">
+<div class="level-bar lvl4">🔴 Level 4 — ปิด Order ฉุกเฉินทั้งหมดใน MT5</div>
+<ol>
+  <li>MT5 → tab <strong>Trade</strong> → <strong>Right-click</strong> ที่ position → <strong>Close Position</strong> (ทีละไม้)</li>
+  <li>หรือ: tab Trade → <kbd>Ctrl</kbd>+<kbd>A</kbd> → Right-click → Close — ปิดทุกตัวพร้อมกัน</li>
+  <li><strong>ปิดปุ่ม Algo Trading</strong> (กดให้เป็นสีแดง) → bot ส่ง order ใหม่ไม่ได้</li>
+</ol>
+</div>
+
+<div class="card danger">
+<div class="level-bar lvl5">⛔ Level 5 — Kill ทุกอย่างจาก Task Manager</div>
+<p>ถ้า launcher ค้าง: Task Manager → kill <code>terminal64.exe</code> + <code>python.exe</code> + <code>node.exe</code></p>
+</div>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>สิ่งที่ Launcher ทำ vs ไม่ทำ</h2>
+
+<table>
+  <thead><tr><th style="width:50%;color:#4ade80">✅ ทำ</th><th style="color:#f87171">❌ ไม่ทำ</th></tr></thead>
+  <tbody>
+    <tr><td>start MT5 ถ้ายังไม่เปิด</td><td>login MT5 ให้</td></tr>
+    <tr><td>start backend + frontend</td><td>start bot ให้</td></tr>
+    <tr><td>health-check ทุก 5 วินาที</td><td>restart service ที่ตาย (แค่แสดง OFF)</td></tr>
+    <tr><td>ปิด process เมื่อกด Stop All</td><td>ปิด position ที่ broker</td></tr>
+  </tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>ปัญหาที่เจอบ่อย</h2>
+
+<table>
+  <thead><tr><th>ปัญหา</th><th>สาเหตุ</th><th>แก้</th></tr></thead>
+  <tbody>
+    <tr><td><code>MT5 path not found</code></td><td>path ไม่ตรง</td><td>ตั้ง env <code>MT5_TERMINAL_PATH</code> ชี้ไปที่ <code>terminal64.exe</code></td></tr>
+    <tr><td><code>venv python not found</code></td><td>รัน .exe จาก folder ผิด</td><td>วาง .exe ที่ root โปรเจกต์</td></tr>
+    <tr><td>Backend ❌ OFF</td><td>port 8080 ถูกใช้</td><td><code>netstat -ano | findstr 8080</code> แล้วฆ่า PID นั้น</td></tr>
+    <tr><td>Frontend ❌ OFF</td><td>npm install ไม่ครบ</td><td><code>cd frontend &amp;&amp; npm install</code></td></tr>
+    <tr><td>Bot ส่ง order ไม่ได้</td><td>Algo Trading ปิด</td><td>กดปุ่ม Algo Trading ใน MT5 ให้เขียว</td></tr>
+    <tr><td>Spread &gt; 100 pip</td><td>ตลาดผิดปกติ</td><td>broker reject อัตโนมัติ — ถูกต้องแล้ว ไม่ต้องแก้</td></tr>
+  </tbody>
+</table>
+
+<!-- ═══════════════════════════════════════════════ -->
+<h2>Logs</h2>
+
+<ul>
+  <li><strong>Launcher:</strong> หน้าต่าง log ใน GUI</li>
+  <li><strong>Backend:</strong> console เดิม / <code>data/logs/</code></li>
+  <li><strong>Trades:</strong> <code>data/local.db</code> (SQLite) + Google Sheets (ถ้า enabled)</li>
+</ul>
+
+<div class="card ok">
+<strong>✅ TP/SL ที่ broker เป็น server-side</strong> — ปิด program / ปิดเครื่อง / ไฟดับ → broker ยังเช็ค SL/TP ให้ตามปกติ.<br>
+<strong>⚠️ Trailing SL ที่ขยับ stage</strong> ต้องการ Python ทำงานอยู่.
+</div>
+
+<hr>
+
+<div class="footer">
+Tra(i)der Phase II · v4.26 · Cent Account (XAUUSDc) · Exness MT5
+</div>
+
+</div>
+</body>
+</html>

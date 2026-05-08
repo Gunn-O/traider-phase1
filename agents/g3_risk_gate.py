@@ -57,13 +57,21 @@ def guardian_check(decision: Dict, lot_info: Dict,
     if decision.get('action') == 'SKIP':
         return {'approved': False, 'block_reason': 'Decision is SKIP', 'blocked_by': 'decision'}
 
-    # ============ Rule 1: มี Active Plan อยู่ ============
-    active_plan = portfolio_state.get('active_plan_id')
-    if active_plan and active_plan != 'ไม่มีแผนที่เปิดอยู่':
-        logger.warning(f"BLOCK: Active plan exists ({active_plan})")
+    # ============ Rule 1: มี Active Plan ของ pattern เดียวกัน ============
+    # Per-pattern slot — Mountain + MAI_RUAY trade ขนานกันได้
+    decision_pattern = (decision.get('setup') or '').upper()
+    # Map setup string from main.py decision dict to pattern name
+    if 'mountain' in decision_pattern.lower():
+        decision_pattern = 'MOUNTAIN'
+    elif 'mai_ruay' in decision_pattern.lower() or 'mairuay' in decision_pattern.lower():
+        decision_pattern = 'MAI_RUAY'
+    active_plans = portfolio_state.get('active_plans_by_pattern', {}) or {}
+    pattern_plan = active_plans.get(decision_pattern, '')
+    if pattern_plan and pattern_plan != 'ไม่มีแผนที่เปิดอยู่':
+        logger.warning(f"BLOCK: {decision_pattern} active plan exists ({pattern_plan})")
         return {
             'approved': False,
-            'block_reason': f'มีแผนที่เปิดอยู่: {active_plan}',
+            'block_reason': f'{decision_pattern} มีแผนที่เปิดอยู่: {pattern_plan}',
             'blocked_by': 'active_plan'
         }
 
@@ -96,13 +104,15 @@ def guardian_check(decision: Dict, lot_info: Dict,
             'blocked_by': 'loss_50pct_permanent'
         }
 
-    # ============ Rule 5: R:R < 1.0 ============
+    # ============ Rule 5: R:R below threshold ============
+    # Config-driven (default 0.0 — disable for Cent account data collection)
     rr_ratio = decision.get('rr_ratio', 0)
-    if rr_ratio > 0 and rr_ratio < 1.0:
-        logger.warning(f"BLOCK: R:R {rr_ratio:.2f} < 1.0")
+    min_rr = RISK_CONFIG.get('min_rr_ratio', 0.0)
+    if min_rr > 0 and rr_ratio > 0 and rr_ratio < min_rr:
+        logger.warning(f"BLOCK: R:R {rr_ratio:.2f} < {min_rr}")
         return {
             'approved': False,
-            'block_reason': f'R:R = {rr_ratio:.2f} ต่ำกว่า 1.0',
+            'block_reason': f'R:R = {rr_ratio:.2f} ต่ำกว่า {min_rr}',
             'blocked_by': 'rr_ratio'
         }
 

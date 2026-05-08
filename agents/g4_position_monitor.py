@@ -132,59 +132,74 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> Li
 def check_trailing_sl(order: dict, candle: dict) -> Optional[float]:
     """
     ตรวจและคำนวณ Trailing SL ใหม่
-    เงื่อนไข: TP > 3000 pip และราคาไป > 2000 pip แล้ว
+
+    Branches:
+    - Mountain (order has 'trail_meta'): 3-stage v67 trailing (TP1/TP2/TP2+20%H)
+    - Other patterns (MAI_RUAY, etc.): no trailing (returns None)
 
     Args:
-        order: Order dict with entry_price, tp_price, action, trailing_sl (optional)
-        candle: Current candle with close price
+        order: Order dict
+        candle: Current candle with high/low/close
 
     Returns:
         new_sl (float) ถ้าต้อง update, None ถ้าไม่ต้อง
     """
-    entry = order['entry_price']
-    tp = order.get('tp_price', order.get('tp'))
-    action = order['action']
-    current_price = candle['close']
+    trail_meta = order.get('trail_meta')
+    if trail_meta:
+        return _check_mountain_trailing(order, candle, trail_meta)
+    return None  # Per spec: only Mountain has trailing
 
-    # คำนวณ TP distance (pip)
-    tp_pip = abs(tp - entry) * 100
 
-    # เงื่อนไขที่ 1: TP > 3000 pip
-    if tp_pip <= RISK_CONFIG['trailing_sl_min_tp']:
+def _check_mountain_trailing(order: dict, candle: dict, trail_meta: dict) -> Optional[float]:
+    """
+    Mountain v67 3-stage trailing — BUY only.
+
+    Stages:
+        0 → 1: high ≥ TP1       → SL = tech + 5%H
+        1 → 2: high ≥ TP2_base  → SL = TP1
+        2 → 3: high ≥ TP2+20%H  → SL = TP2
+
+    Mutates trail_meta['stage'] in-place when stage transition fires.
+    Returns new SL (rounded) or None if no transition.
+    """
+    if order.get('action') != 'BUY':
+        return None  # Mountain is BUY only
+
+    high = candle.get('high', candle.get('close', 0))
+    if high <= 0:
         return None
 
-    # คำนวณ current profit (pip)
-    if action == 'BUY':
-        current_profit_pip = (current_price - entry) * 100
-    elif action == 'SELL':
-        current_profit_pip = (entry - current_price) * 100
-    else:
+    stage = int(trail_meta.get('stage', 0))
+    tp1   = float(trail_meta.get('tp1') or 0)
+    tp2   = float(trail_meta.get('tp2_base') or trail_meta.get('tp2') or 0)
+    tech  = float(trail_meta.get('tech_point') or trail_meta.get('base_lo') or 0)
+    h_usd = float(trail_meta.get('height') or 0) / 100.0  # pip → USD
+
+    new_sl = None
+    new_stage = stage
+
+    if stage == 0 and tp1 > 0 and high >= tp1:
+        new_sl = tech + h_usd * 0.05    # tech + 5%H
+        new_stage = 1
+    elif stage == 1 and tp2 > 0 and high >= tp2:
+        new_sl = tp1                     # SL = TP1
+        new_stage = 2
+    elif stage == 2 and tp2 > 0:
+        tp2_plus20 = tp2 + h_usd * 0.20  # TP2 + 20%H
+        if high >= tp2_plus20:
+            new_sl = tp2                 # SL = TP2
+            new_stage = 3
+
+    if new_sl is None:
         return None
 
-    # เงื่อนไขที่ 2: ราคาไป > 2000 pip แล้ว
-    if current_profit_pip < RISK_CONFIG['trailing_sl_trigger']:
+    # Only move SL UP for BUY (never tighten worse)
+    current_sl = order.get('trailing_sl', order.get('sl_price', order.get('sl')))
+    if new_sl <= current_sl:
         return None
 
-    # คำนวณ trailing SL ใหม่
-    current_trailing = order.get('trailing_sl', order.get('sl_price', order.get('sl')))
-
-    # คำนวณ SL ใหม่: entry + (500 + n×1000) pip
-    # n = จำนวน step ที่ราคาไปเกิน 2000 pip
-    steps = int((current_profit_pip - RISK_CONFIG['trailing_sl_trigger']) / RISK_CONFIG['trailing_sl_step'])
-    new_sl_profit_pip = RISK_CONFIG['trailing_sl_target'] + (steps * RISK_CONFIG['trailing_sl_step'])
-
-    if action == 'BUY':
-        new_sl = entry + (new_sl_profit_pip / 100)
-        # เลื่อนแค่ขาขึ้นเท่านั้น (ไม่ลด SL)
-        if new_sl > current_trailing:
-            return round(new_sl, 2)
-    elif action == 'SELL':
-        new_sl = entry - (new_sl_profit_pip / 100)
-        # เลื่อนแค่ขาลงเท่านั้น (ไม่เพิ่ม SL)
-        if new_sl < current_trailing:
-            return round(new_sl, 2)
-
-    return None
+    trail_meta['stage'] = new_stage  # advance state
+    return round(new_sl, 2)
 
 
 def calc_pnl(action: str, entry: float, close: float, lot: float) -> float:
@@ -213,38 +228,49 @@ def calc_pnl(action: str, entry: float, close: float, lot: float) -> float:
     return round(pnl, 2)
 
 
+# ID prefix per mode (user spec):
+#   PT- = Paper Trade (backtest)
+#   SM- = Simulation Trade (live data, no real orders)
+#   RT- = Real Trade (live order to broker)
+_MODE_PREFIX = {
+    'backtest': 'PT',
+    'simulate': 'SM',
+    'live':     'RT',
+}
+
+
 def generate_trade_id(plan_id: str, order_num: int, candle_time=None, mode='simulate') -> str:
     """
     สร้าง unique trade_id
-    Format: TRD-YYYYMMDD-HHMMSS-uuuuuu-N (simulate)
-            BT-TRD-YYYYMMDD-HHMMSS-uuuuuu-N (backtest)
+    Format: {prefix}-YYYYMMDD-HHMMSS-uuuuuu-N
+    prefix: PT (backtest) | SM (simulate) | RT (live)
     uuuuuu = microsecond เพื่อป้องกัน duplicate
 
     Args:
-        plan_id: PLAN-YYYYMMDD-XXX or BT-PLAN-YYYYMMDD-XXX
+        plan_id: e.g. PT-PLAN-...  / SM-PLAN-...  / RT-PLAN-...
         order_num: 1, 2, 3
-        candle_time: Optional datetime (for backtest), defaults to now
-        mode: 'simulate' or 'backtest'
+        candle_time: Optional datetime, defaults to now
+        mode: 'backtest' | 'simulate' | 'live'
 
     Returns:
         trade_id (str)
     """
     dt = candle_time if candle_time else datetime.now()
     timestamp = dt.strftime('%Y%m%d-%H%M%S')
-    microsec = str(dt.microsecond).zfill(6)[:6]  # 6 digits
-    prefix = 'BT-TRD' if mode == 'backtest' else 'TRD'
+    microsec = str(dt.microsecond).zfill(6)[:6]
+    prefix = _MODE_PREFIX.get(mode, 'SM')
     return f"{prefix}-{timestamp}-{microsec}-{order_num}"
 
 
 def generate_plan_id(candle_time=None, mode='simulate') -> str:
     """
     สร้าง unique plan_id
-    Format: PLAN-YYYYMMDD-HHMMSS-uuuuuu (simulate)
-            BT-PLAN-YYYYMMDD-HHMMSS-uuuuuu (backtest)
+    Format: {prefix}-PLAN-YYYYMMDD-HHMMSS-uuuuuu
+    prefix: PT (backtest) | SM (simulate) | RT (live)
 
     Args:
-        candle_time: Optional datetime (for backtest), defaults to now
-        mode: 'simulate' or 'backtest' (default: 'simulate')
+        candle_time: Optional datetime, defaults to now
+        mode: 'backtest' | 'simulate' | 'live'
 
     Returns:
         plan_id (str)
@@ -252,8 +278,8 @@ def generate_plan_id(candle_time=None, mode='simulate') -> str:
     dt = candle_time if candle_time else datetime.now()
     timestamp = dt.strftime('%Y%m%d-%H%M%S')
     microsec = str(dt.microsecond).zfill(6)[:6]
-    prefix = 'BT-PLAN' if mode == 'backtest' else 'PLAN'
-    return f"{prefix}-{timestamp}-{microsec}"
+    prefix = _MODE_PREFIX.get(mode, 'SM')
+    return f"{prefix}-PLAN-{timestamp}-{microsec}"
 
 
 class PositionMonitor:
