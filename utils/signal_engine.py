@@ -1,17 +1,15 @@
 """
-Signal Engine Wrapper — v4.25
-Integrates xauusd_signal.py as the main Signal Engine (replaces G1 pattern detection)
+Signal Engine Wrapper
 
-Changes:
-- G1 (pattern_detector.py) → Signal Engine (xauusd_signal.py)
-- Claude API role: Decision maker → Reviewer only
-- Mountain state tracking for round 2 detection
-- Single TF mode: M5 only
+Active strategies (per config/strategies.json + 3 reference notebooks under strategy/):
+  - MOUNTAIN              (notebook v4.61 — strategies/mountain.py)
+  - MAI_RUAY              (Father/Mother — strategies/mai_ruay.py)
+  - UPTREND_SCANNER       (notebook v3.4 — strategies/uptrend_downtrend_scanner.py)
+  - DOWNTREND_SCANNER     (notebook v3.4 — strategies/uptrend_downtrend_scanner.py)
 
-V4.25 Updates:
-- Time filter: Block trades 60min before market close (21:00 UTC)
-- Gap filter: Wait 80 bars after opening gap > 20% R55
-- Pattern names: DOWNTREND_IMPULSE, UPTREND_IMPULSE
+Each strategy runs independently on M5 bars; signal_engine picks the best by R:R.
+Time filter: block trades 60min before market close (21:00 UTC).
+Gap filter: wait 80 bars after opening gap > 20% R55.
 """
 
 import logging
@@ -181,7 +179,7 @@ def run_signal_engine(
         world_state dict compatible with G2/G3 pipeline:
         {
             'selected_tf': 'M5',
-            'chart_type': 'DOWNTREND' | 'UPTREND' | 'MOUNTAIN' | 'MOUNTAIN_R2' | 'unclear',
+            'chart_type': 'mountain' | 'mai_ruay' | 'uptrend' | 'downtrend' | 'unclear',
             'quality': float,
             'chart_detail': dict,
             'technique_candidate': str,
@@ -231,28 +229,41 @@ def run_signal_engine(
     ohlc_bars = convert_candles_to_ohlc(candles)
     logger.debug(f"Converted {len(ohlc_bars)} M5 candles to OHLC format")
 
-    # Run each enabled strategy and collect candidates
-    # Strategies in strategies/ each expose find_signal(bars, portfolio[, ...])
-    # is_pattern_active() reads config/strategies.json so toggles take effect immediately
-    from utils.strategy_loader import is_pattern_active
+    # Run each enabled strategy and collect candidates.
+    # is_pattern_active_for_tf() reads config/strategies.json so toggles take
+    # effect on the next cycle without restart. The current TF comes from the
+    # subprocess env var the api_server sets when spawning each bot.
+    import os as _os
+    from utils.strategy_loader import is_pattern_active_for_tf
     from strategies import mountain as _mountain_strat
     from strategies import mai_ruay as _mai_ruay_strat
 
+    current_tf = _os.getenv("BACKTEST_TIMEFRAME", "M5").upper()
+
     candidates: list = []
 
-    # MOUNTAIN / MOUNTAIN_R2 — single call returns either pattern; gate by both flags
-    if is_pattern_active('MOUNTAIN') or is_pattern_active('MOUNTAIN_R2'):
+    # MOUNTAIN — Mountain Round 1 (notebook v4.61). MOUNTAIN_R2 deprecated.
+    if is_pattern_active_for_tf('MOUNTAIN', current_tf):
         sig_mtn = _mountain_strat.find_signal(
             bars=ohlc_bars, portfolio=portfolio, mountain_state=mountain_state
         )
-        if sig_mtn is not None and is_pattern_active(sig_mtn.pattern):
+        if sig_mtn is not None and sig_mtn.pattern == 'MOUNTAIN':
             candidates.append(sig_mtn)
 
-    # MAI_RUAY
-    if is_pattern_active('MAI_RUAY'):
+    # MAI_RUAY — Father/Mother candle (notebook engine 1-8 / 60-100% / 4-30%)
+    if is_pattern_active_for_tf('MAI_RUAY', current_tf):
         sig_mr = _mai_ruay_strat.find_signal(bars=ohlc_bars, portfolio=portfolio)
         if sig_mr is not None:
             candidates.append(sig_mr)
+
+    # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v3.4) — wrapper picks BUY
+    # first, falls back to SELL. Each variant gated by its own (pattern, TF) flag.
+    if (is_pattern_active_for_tf('UPTREND_SCANNER', current_tf)
+            or is_pattern_active_for_tf('DOWNTREND_SCANNER', current_tf)):
+        from strategies import uptrend_downtrend_scanner as _ud_scanner
+        sig_ud = _ud_scanner.find_signal(bars=ohlc_bars, portfolio=portfolio)
+        if sig_ud is not None and is_pattern_active_for_tf(sig_ud.pattern, current_tf):
+            candidates.append(sig_ud)
 
     # Pick best by R:R (matches existing xauusd_signal selection logic)
     signal = max(candidates, key=lambda s: s.rr) if candidates else None
@@ -300,15 +311,12 @@ def run_signal_engine(
     logger.info(f"Signal Engine: {signal.pattern} {signal.direction} "
                 f"(quality={signal.quality}, R:R={signal.rr:.2f})")
 
-    # Map pattern to chart_type
+    # Map pattern to chart_type — only the 3 active strategies
     chart_type_mapping = {
-        'DOWNTREND': 'downtrend',           # V4.20 backward compatibility
-        'DOWNTREND_IMPULSE': 'downtrend',   # V4.25
-        'UPTREND': 'uptrend',               # V4.20 backward compatibility
-        'UPTREND_IMPULSE': 'uptrend',       # V4.25
         'MOUNTAIN': 'mountain',
-        'MOUNTAIN_R2': 'mountain_r2',
         'MAI_RUAY': 'mai_ruay',             # Branch F (Father/Mother candle)
+        'UPTREND_SCANNER': 'uptrend',       # v3.4 scanner (BUY)
+        'DOWNTREND_SCANNER': 'downtrend',   # v3.4 scanner (SELL)
     }
     chart_type = chart_type_mapping.get(signal.pattern, 'unclear')
 
@@ -316,15 +324,12 @@ def run_signal_engine(
     quality = _parse_quality(signal.quality)
 
     # Determine technique based on pattern
-    # Signal Engine always provides Entry/SL/TP, so technique is based on pattern type
-    if signal.pattern in ['DOWNTREND', 'DOWNTREND_IMPULSE', 'UPTREND', 'UPTREND_IMPULSE']:
-        # Check if it's twin candle or breakout based on signal details
-        # For now, default to twin_candle (xauusd_signal focuses on twin candle setups)
-        technique = signal.details.get('technique', 'twin_candle')
-    elif signal.pattern in ['MOUNTAIN', 'MOUNTAIN_R2']:
+    if signal.pattern == 'MOUNTAIN':
         technique = 'mountain'
     elif signal.pattern == 'MAI_RUAY':
         technique = 'mai_ruay'
+    elif signal.pattern in ['UPTREND_SCANNER', 'DOWNTREND_SCANNER']:
+        technique = 'scanner_v34'
     else:
         technique = 'skip'
 
@@ -354,8 +359,6 @@ def run_signal_engine(
 
     if signal.pattern == 'MOUNTAIN':
         logger.info("Mountain Round 1 detected (state tracking disabled in Phase 1)")
-    elif signal.pattern == 'MOUNTAIN_R2':
-        logger.info("Mountain Round 2 detected (state tracking disabled in Phase 1)")
 
     # Build world_state
     world_state = {

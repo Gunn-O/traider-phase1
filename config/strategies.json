@@ -1,92 +1,83 @@
 {
-  "version": "65",
-  "last_updated": "2026-05-06",
+  "version": "66",
+  "last_updated": "2026-05-11",
   "patterns": {
     "MOUNTAIN": {
       "active": true,
       "implemented": true,
       "name": "Mountain Round 1",
-      "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 10%height",
+      "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 5%height (notebook v4.61)",
       "direction": "BUY",
-      "version": "4.45",
+      "version": "4.61",
       "validations": [
-        "ขนาดภูเขา >= 10 แท่ง",
-        "ห้ามมี Low ทะลุ thresh_10 ในช่วง 20-80%",
+        "ขนาดภูเขา (X+Y) >= 10 แท่ง",
+        "ห้ามมี Low ทะลุ thresh_10 (base_lo + 20%height) ในช่วง 20-80%",
         "ฐาน→entry ไม่เกิน 42 แท่ง",
-        "SH หลัง peak <= 2 อัน (ถ้า > 25 แท่ง)"
+        "SH หลัง peak <= 2 อัน (ถ้า > 25 แท่ง)",
+        "Buffer zone = 5% × height (เก่า 10%)",
+        "TP3 = base_lo + 80% × height (เก่า 100%)",
+        "SL = entry - 60% × height"
       ],
-      "priority": 2
-    },
-    "MOUNTAIN_R2": {
-      "active": false,
-      "implemented": false,
-      "name": "Mountain Round 2",
-      "description": "ภูเขารอบ 2 (เลิกใช้ใน v4.45/v67) — state tracking ปิดใน signal_engine; เก็บไว้ใน config เพื่อ backward compatibility",
-      "direction": "BUY",
-      "version": "4.45",
-      "validations": [],
-      "priority": 1,
-      "deprecated": true
-    },
-    "DOWNTREND": {
-      "active": false,
-      "implemented": true,
-      "name": "Downtrend (Legacy)",
-      "description": "เทรนด์ลง — ใช้ _detect_downtrend() (V4.20 backward compatibility)",
-      "direction": "SELL",
-      "version": "4.20",
-      "validations": [],
-      "priority": 3,
-      "deprecated": true
-    },
-    "DOWNTREND_IMPULSE": {
-      "active": false,
-      "implemented": true,
-      "name": "Downtrend Impulse",
-      "description": "เทรนด์ลงแบบ impulse — Twin Candle SELL",
-      "direction": "SELL",
-      "version": "4.25",
-      "validations": [],
-      "priority": 3,
-      "deprecated": false
-    },
-    "UPTREND": {
-      "active": false,
-      "implemented": true,
-      "name": "Uptrend (Legacy)",
-      "description": "เทรนด์ขึ้น — ใช้ _detect_uptrend() (V4.20 backward compatibility)",
-      "direction": "BUY",
-      "version": "4.20",
-      "validations": [],
-      "priority": 4,
-      "deprecated": true
-    },
-    "UPTREND_IMPULSE": {
-      "active": false,
-      "implemented": true,
-      "name": "Uptrend Impulse",
-      "description": "เทรนด์ขึ้นแบบ impulse — Twin Candle BUY",
-      "direction": "BUY",
-      "version": "4.25",
-      "validations": [],
-      "priority": 4,
-      "deprecated": false
+      "priority": 2,
+      "allowed_tfs": ["M1", "M5"]
     },
     "MAI_RUAY": {
       "active": true,
       "implemented": true,
       "name": "ไม้รวย (Branch F)",
-      "description": "Father/Mother candle — พ่อ 1-5 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ",
+      "description": "Father/Mother candle — พ่อ 1-8 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ (ตาม notebook engine)",
       "direction": "BOTH",
       "version": "1.0",
       "validations": [
-        "พ่อ 1-5 แท่ง สีเดียวกัน body 60-100% R55",
+        "พ่อ 1-8 แท่ง สีเดียวกัน body 60-100% R55 (MAX_FATHER=8 ใน engine)",
+        "พ่อ all-same length=5 ต้องมี trio open→close > 60% R55",
         "แม่สวนทิศพ่อ body 4-30% ของพ่อ",
-        "Anti-trend filter (ไม่เทรดสวนเทรนด์ใหญ่)",
+        "Entry rule: <10% close แม่ / 10-30% midpoint / >30% tech_point",
+        "SL = tech ± 70% body พ่อ (หรือ obs_dist ถ้ามีอุปสรรค)",
+        "TP3 default = 75% body พ่อ (หรือ obstacle ± 6% R55)",
+        "Anti-trend filter (ไม่เทรดสวน slope 20 แท่ง)",
         "Lot = portfolio × 10% / SL (pip)"
       ],
       "priority": 5,
-      "deprecated": false
+      "allowed_tfs": ["M1", "M5", "M15", "M30"]
+    },
+    "UPTREND_SCANNER": {
+      "active": true,
+      "implemented": true,
+      "name": "Uptrend Scanner v3.4",
+      "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric.",
+      "direction": "BUY",
+      "version": "3.4",
+      "validations": [
+        "C1: Close >= 60% R55",
+        "C2: Recent Low (5 bars) >= 55% R55",
+        "C3: Drop from HH <= 30% R55",
+        "C4: Bullish impulse 2-8 bars >= 25% R55",
+        "C5: No bearish bar > 30% R55 in 25-bar lookback",
+        "C6: max close in (lookback + first 5) <= L55 + 40% R55",
+        "Anti-trend: father bar 40-100% R55 in 1-8 bars blocks signal"
+      ],
+      "priority": 6,
+      "allowed_tfs": ["M5"]
+    },
+    "DOWNTREND_SCANNER": {
+      "active": true,
+      "implemented": true,
+      "name": "Downtrend Scanner v3.4",
+      "description": "Mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric.",
+      "direction": "SELL",
+      "version": "3.4",
+      "validations": [
+        "C1D: Close <= 40% R55 (top-down)",
+        "C2D: Recent High (5 bars) <= 45% R55 (top-down)",
+        "C3D: Rise from LL <= 30% R55",
+        "C4D: Bearish impulse 2-8 bars >= 25% R55",
+        "C5D: No bullish bar > 30% R55 in 25-bar lookback",
+        "C6D: min close in (lookback + first 5) >= H55 - 40% R55",
+        "Anti-trend: father bar 40-100% R55 (mirror) blocks signal"
+      ],
+      "priority": 7,
+      "allowed_tfs": ["M5"]
     }
   },
   "global_settings": {
@@ -102,9 +93,7 @@
       "enabled": true,
       "close_hour_utc": 21,
       "buffer_minutes": 120,
-      "weekdays_only": [
-        4
-      ]
+      "weekdays_only": [4]
     }
   }
 }

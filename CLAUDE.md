@@ -8,23 +8,40 @@
 
 ## ⚠️ ไฟล์ที่ใช้งาน (Phase II)
 
+### 🎯 Strategy Reference Notebooks (Source of Truth — 3 ไฟล์)
+
+| Notebook | Strategy | Python |
+|----------|----------|--------|
+| `strategy/XAUUSD_Backtest_Mountain.md` | **ภูเขา** (Mountain v4.61) | `strategies/mountain.py` |
+| `strategy/XAUUSD_Backtest_MaiRuay.md` | **ไม้รวย** (Father/Mother) | `strategies/mai_ruay.py` |
+| `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v3.4.md` | **Uptrend/Downtrend Scanner v3.4** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
+
+**กฎเหล็ก:** Python ต้องตรงกับ **engine code ใน notebook** เสมอ (markdown header ใน notebook อาจล้าสมัย — engine code คือ source of truth)
+**Strategies ทั้ง 3 ทำงานแยกกัน** — ไม่มีการ share state ข้าม strategy
+
+### Supporting Files
+
 | ไฟล์ | สถานะ |
 |------|-------|
-| `strategy/XAUUSD_System_Prompt_Reviewer.md` | ✅ **ใช้งาน** — Claude Reviewer (SIM/LIVE only) |
+| `strategy/XAUUSD_System_Prompt_Reviewer.md` | ✅ Claude Reviewer (SIM/LIVE only) |
 | `docs/TRAIDER_MASTER_PLAN_v2.1.md` | ✅ Architecture reference |
-| `utils/xauusd_signal.py` | ✅ **Signal Engine** — คำนวณ Entry/SL/TP/Lot (ห้ามแก้) |
-| `utils/swing_v414.py` | ✅ **Swing Logic** — ตรวจจับ swing points (ห้ามแก้) |
+| `utils/xauusd_signal.py` | ✅ Signal helpers + Scanner v3.4 detectors |
+| `utils/swing_v414.py` | ✅ Swing detection (pair_thresh = max(R55×1%, 100pip)) |
+| `config/strategies.json` | ✅ Pattern toggle + per-TF allowlist (4 active patterns = 3 strategies) |
 
 ---
 
-## ⚠️ V4.20 Architecture Change (2026-04-23)
+## ⚠️ V4.20 Architecture Change (2026-04-23, refreshed 2026-05-11)
 
 **Signal Engine Integration:**
-- **Signal Engine:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
-  - คำนวณ Entry/SL/TP/Lot ทั้งหมด
-  - **ห้ามแก้ไข** xauusd_signal.py และ swing_v414.py
-  - Single TF: M5 only
-  - Phase II: ใช้ใน BACKTEST, SIM, LIVE ทั้งหมด
+- **Strategy modules:** `strategies/mountain.py`, `strategies/mai_ruay.py`, `strategies/uptrend_downtrend_scanner.py`
+  - คำนวณ Entry/SL/TP/Lot ทั้งหมด — ตรงกับ engine code ใน notebook 3 ไฟล์
+  - แก้ได้เมื่อ notebook engine update (อย่าแก้ตามใจ — ต้อง diff กับ notebook ก่อน)
+- **Signal helpers:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
+  - แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing_v414 pair_thresh 0.5%→1%)
+  - ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec ของ notebook
+- **Single TF:** M5 (MaiRuay เปิด M1/M15/M30 ด้วย; Mountain เปิด M1+M5)
+- Phase II: ใช้ใน BACKTEST, SIM, LIVE ทั้งหมด
 
 **Claude Role (Phase II):**
 - **BACKTEST mode:** ไม่ใช้ Claude เลย → AUTO_APPROVE
@@ -56,10 +73,15 @@
 - **SIM/LIVE mode:** Signal Engine → G2 → Claude Reviewer → Execute → Log → Notify
 
 ```
-Market Data (M5 Single TF)
+Market Data (M5 Single TF, MaiRuay M1/M5/M15/M30, Mountain M1/M5)
     ↓
-Signal Engine: xauusd_signal.py
-    Entry/SL/TP/Lot คำนวณเสร็จ → Signal object
+Signal Engine: utils/signal_engine.py — รัน 3 strategy แบบ parallel
+    MOUNTAIN          → strategies/mountain.py             (ภูเขา v4.61)
+    MAI_RUAY          → strategies/mai_ruay.py             (พ่อ-แม่)
+    UPTREND_SCANNER   ┐
+                      ├→ strategies/uptrend_downtrend_scanner.py (v3.4)
+    DOWNTREND_SCANNER ┘
+    เลือก best by R:R → Signal object (Entry/SL/TP/Lot คำนวณเสร็จ)
     ↓ world_state + signal
 G2: Pre-filter
     ตรวจ signal validity, R:R ≥ 1.0, duplicate
@@ -108,12 +130,18 @@ winrate_test_lot = 0.01
 
 ### Checklist (Phase II):
 
-**Signal Engine — utils/xauusd_signal.py + utils/swing_v414.py:**
-- [ ] **ห้ามแก้ไข** ทั้ง 2 ไฟล์ (พัฒนาใน TradingView ก่อน)
-- [ ] Single TF: M5 only
-- [ ] Output: signal object พร้อม entry/sl/tp/lot
-- [ ] Swing detection ใช้ swing_v414.py
-- [ ] ถ้าต้องการแก้: ทำใน TradingView → backtest ให้ match > 90% → แปลงเป็น Python
+**Strategy Modules — strategies/{mountain,mai_ruay,uptrend_downtrend_scanner}.py:**
+- [ ] **ตรวจ diff กับ notebook engine** ก่อนทุกครั้งที่แก้ — ถือว่า notebook = source of truth
+- [ ] Mountain: pair_thresh = max(R55×1%, 100pip), buffer 5%×height, TP3=80%×height, SL=60%×height (notebook v4.61)
+- [ ] MaiRuay: MAX_FATHER=8, father body 60-100%R55, mother body 4-30% ของพ่อ (engine; markdown header ของ notebook ระบุไม่ตรง — ใช้ engine)
+- [ ] Scanner: C1≥60%, C2≥55% (5bars), C3≤30%, C4≥25%, C5≤30%, C6≤40% (start 5 bars)
+- [ ] ทั้ง 3 strategy ทำงานแยกกัน — ไม่มี state แชร์
+- [ ] Output: Signal object พร้อม entry/sl/tp/lot/rr
+
+**Signal Helpers — utils/xauusd_signal.py + utils/swing_v414.py:**
+- [ ] แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing pair_thresh)
+- [ ] ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec notebook
+- [ ] Workflow: TradingView/Colab → backtest match > 90% → port to Python → run audit
 
 **G2 Pre-filter — agents/g2_prefilter.py:**
 - [ ] Block ก่อน G3: มี active_plan_id อยู่แล้ว (1 plan ต่อครั้ง)
@@ -300,14 +328,16 @@ SKIP rate = [X]% ปกติควรไม่เกิน 30%
 
 ### กฎเหล็ก Phase II
 
-1. ห้ามแก้ `utils/xauusd_signal.py` และ `utils/swing_v414.py`
-2. BACKTEST mode ไม่เรียก Claude API เลย
-3. Claude Reviewer ใช้เฉพาะ SIM/LIVE mode
-4. System Prompt = `strategy/XAUUSD_System_Prompt_Reviewer.md`
-5. Timestamp = candle time เสมอ (ไม่ใช่ datetime.now())
-6. G2 ต้อง block duplicate plan (same entry ± 50pip)
-7. Position monitor ต้อง close position ทุก candle close
-8. host = 127.0.0.1 เสมอ
+1. **3 Strategy เท่านั้น:** Mountain, MaiRuay, Uptrend/Downtrend Scanner (อิง 3 notebook ใน `strategy/`)
+2. ทุก strategy ทำงานแยกกัน — ห้าม share state ข้าม strategy
+3. แก้ Python strategy/helpers ได้เฉพาะเพื่อ sync กับ notebook engine code (ห้ามปรับเอง)
+4. BACKTEST mode ไม่เรียก Claude API เลย
+5. Claude Reviewer ใช้เฉพาะ SIM/LIVE mode
+6. System Prompt = `strategy/XAUUSD_System_Prompt_Reviewer.md`
+7. Timestamp = candle time เสมอ (ไม่ใช่ datetime.now())
+8. G2 ต้อง block duplicate plan (same entry ± 50pip)
+9. Position monitor ต้อง close position ทุก candle close
+10. host = 127.0.0.1 เสมอ
 
 ---
 
@@ -325,7 +355,6 @@ cp .env.example .env
 ANTHROPIC_API_KEY=sk-ant-...
 LINE_NOTIFY_ENABLED=false      # ปิดระหว่าง backtest
 SHEETS_ENABLED=false           # ปิดระหว่าง backtest
-DATA_MODE=backtest
 ACCOUNT_BALANCE=500
 WINRATE_TEST=true              # 0.01 lot ทุกไม้
 ```
@@ -360,7 +389,9 @@ python main.py --live
 
 **Phase II (ใหม่):**
 - ❌ Run backtest โดยไม่ใช้ `--no-ai` flag
-- ❌ แก้ไข `utils/xauusd_signal.py` หรือ `utils/swing_v414.py`
+- ❌ แก้ Python strategy/helpers โดยไม่ตรวจ diff กับ notebook 3 ไฟล์ก่อน
+- ❌ เพิ่ม strategy ใหม่นอกเหนือจาก 3 อันใน `strategy/` (Mountain / MaiRuay / Scanner)
+- ❌ Activate pattern legacy (DOWNTREND, UPTREND, MOUNTAIN_R2 ฯลฯ) — ลบจาก config แล้ว
 - ❌ ใช้ Claude API ใน backtest loop
 - ❌ Run production ก่อน Auditor ผ่าน
 - ❌ Block duplicate signal โดยไม่เช็ค entry ± 50pip

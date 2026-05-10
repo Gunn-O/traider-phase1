@@ -780,3 +780,374 @@ def format_signal(sig: Signal, cur_time: str = "") -> str:
         f"{'═'*52}",
     ]
     return "\n".join(lines)
+
+
+# ════════════════════════════════════════════════════════════════════
+# XAUUSD Uptrend + Downtrend Scanner v3.4
+# Ported from notebook XAUUSD_Uptrend_Downtrend_Scanner_v3.4.md
+# These are ADDITIVE — no existing function above is modified.
+# Public detectors:
+#     _detect_uptrend_scanner(bars, portfolio)   -> Optional[Signal]
+#     _detect_downtrend_scanner(bars, portfolio) -> Optional[Signal]
+# ════════════════════════════════════════════════════════════════════
+
+# ── Scanner constants (notebook v3.4) ─────────────────────────────
+_SCAN_WINDOW          = 55
+_SCAN_LOOKBACK        = 25
+_SCAN_C1_MIN          = 0.60   # Close in upper 60% of R55
+_SCAN_C2_MIN          = 0.55   # min Low of last 5 bars in upper 55% of R55
+_SCAN_C3_MAX          = 0.30   # Close drop from HH ≤ 30% R55
+_SCAN_C4_MIN          = 0.25   # 2-8 consecutive bullish body sum ≥ 25% R55
+_SCAN_C5_MAX          = 0.30   # no bearish body > 30% R55 in lookback
+_SCAN_C6_MAX_START    = 0.40   # max close in (lookback + first 5) ≤ L55 + 40% R55
+_SCAN_C6_START_BARS   = 5
+_SCAN_MIN_R55_USD     = 3.0    # skip flat windows
+_SCAN_SL_MIN_BODY_PCT = 0.04   # swing pair must each have body > 4% R55
+_SCAN_ZONE_UP_LO      = 0.65   # BUY entry zone bottom (% R55 above L55)
+_SCAN_ZONE_UP_HI      = 0.85
+_SCAN_ZONE_DOWN_LO    = 0.15   # SELL entry zone bottom (% R55 above L55)
+_SCAN_ZONE_DOWN_HI    = 0.35
+_SCAN_FATHER_MAX_BARS = 8
+_SCAN_FATHER_MIN_PCT  = 40.0   # anti-trend kill threshold (% R55, pip basis)
+_SCAN_FATHER_MAX_PCT  = 100.0
+
+
+def _scan_lookback_tuples(bars: list, lookback_bars: int = _SCAN_LOOKBACK) -> list:
+    """Last `lookback_bars` bars BEFORE the 55-bar window. Empty list if not enough history."""
+    if len(bars) <= _SCAN_WINDOW:
+        return []
+    end = len(bars) - _SCAN_WINDOW
+    start = max(0, end - lookback_bars)
+    return _bars_to_tuples(bars[start:end])
+
+
+# ── Uptrend criteria (return bool) ────────────────────────────────
+
+def _scan_c1_up(window_t, L55, R55):
+    return (_C(window_t[-1]) - L55) / R55 >= _SCAN_C1_MIN
+
+def _scan_c2_up(window_t, L55, R55, n: int = 5):
+    return (min(_L(b) for b in window_t[-n:]) - L55) / R55 >= _SCAN_C2_MIN
+
+def _scan_c3_up(window_t, R55):
+    H = max(_H(b) for b in window_t)
+    return (H - _C(window_t[-1])) / R55 <= _SCAN_C3_MAX
+
+def _scan_c4_up(window_t, R55):
+    """Find any 2-8 consecutive bullish bars whose body sum ≥ C4_MIN × R55."""
+    n = len(window_t)
+    for start in range(n):
+        bsum = 0.0
+        cnt = 0
+        for end in range(start, min(start + 8, n)):
+            body = _C(window_t[end]) - _O(window_t[end])
+            if body <= 0:
+                break
+            bsum += body
+            cnt += 1
+            if cnt >= 2 and (bsum / R55) >= _SCAN_C4_MIN:
+                return True
+    return False
+
+def _scan_c5_up(lookback_t, R55):
+    if not lookback_t or R55 <= 1e-6:
+        return True
+    for b in lookback_t:
+        body = _O(b) - _C(b)            # bearish > 0
+        if body > 0 and (body / R55) >= _SCAN_C5_MAX:
+            return False
+    return True
+
+def _scan_c6_up(window_t, lookback_t, L55, R55):
+    """Combined check: max close in (lookback + first 5 of window) must stay below
+    L55 + C6_MAX_START × R55. This enforces 'starts low' for an uptrend."""
+    level = L55 + _SCAN_C6_MAX_START * R55
+    closes = [_C(b) for b in window_t[: _SCAN_C6_START_BARS]]
+    if lookback_t:
+        closes += [_C(b) for b in lookback_t]
+    return (max(closes) <= level) if closes else True
+
+
+# ── Downtrend criteria (mirror of uptrend) ────────────────────────
+
+def _scan_c1_down(window_t, H55, R55):
+    return (H55 - _C(window_t[-1])) / R55 >= _SCAN_C1_MIN
+
+def _scan_c2_down(window_t, H55, R55, n: int = 5):
+    return (H55 - max(_H(b) for b in window_t[-n:])) / R55 >= _SCAN_C2_MIN
+
+def _scan_c3_down(window_t, R55):
+    L = min(_L(b) for b in window_t)
+    return (_C(window_t[-1]) - L) / R55 <= _SCAN_C3_MAX
+
+def _scan_c4_down(window_t, R55):
+    n = len(window_t)
+    for start in range(n):
+        bsum = 0.0
+        cnt = 0
+        for end in range(start, min(start + 8, n)):
+            body = _O(window_t[end]) - _C(window_t[end])
+            if body <= 0:
+                break
+            bsum += body
+            cnt += 1
+            if cnt >= 2 and (bsum / R55) >= _SCAN_C4_MIN:
+                return True
+    return False
+
+def _scan_c5_down(lookback_t, R55):
+    if not lookback_t or R55 <= 1e-6:
+        return True
+    for b in lookback_t:
+        body = _C(b) - _O(b)            # bullish > 0
+        if body > 0 and (body / R55) >= _SCAN_C5_MAX:
+            return False
+    return True
+
+def _scan_c6_down(window_t, lookback_t, H55, R55):
+    """Mirror of C6 — min close in (lookback + first 5) must stay ABOVE H55 - 40% R55."""
+    level = H55 - _SCAN_C6_MAX_START * R55
+    closes = [_C(b) for b in window_t[: _SCAN_C6_START_BARS]]
+    if lookback_t:
+        closes += [_C(b) for b in lookback_t]
+    return (min(closes) >= level) if closes else True
+
+
+# ── Anti-trend "father" filter ────────────────────────────────────
+
+def _scan_detect_father(window_t, R55_pip: float, direction: str) -> bool:
+    """direction='down' kills uptrends (looks for bearish father bars).
+    direction='up'   kills downtrends (looks for bullish father bars).
+    Triggers when 1-8 most-recent bars accumulate 40-100% R55 against the trend."""
+    if R55_pip <= 0 or not window_t:
+        return False
+    cur_close = _C(window_t[-1])
+    for n in range(1, _SCAN_FATHER_MAX_BARS + 1):
+        if n > len(window_t):
+            break
+        first_open = _O(window_t[-n])
+        if direction == 'down':
+            move_pip = (first_open - cur_close) * 100
+        else:
+            move_pip = (cur_close - first_open) * 100
+        pct = (move_pip / R55_pip) * 100
+        if _SCAN_FATHER_MIN_PCT <= pct <= _SCAN_FATHER_MAX_PCT:
+            return True
+    return False
+
+
+def _scan_lot(risk_pip: float, portfolio: float) -> float:
+    """Lot = portfolio × 10% / SL(pip) — matches notebook + Mountain helper."""
+    if risk_pip <= 0:
+        return 0.0
+    return round((portfolio * 0.10) / risk_pip, 2)
+
+
+def _scan_swing_pair_min_body_ok(window_t, swing, thresh_body_pip: float) -> bool:
+    """Both bars of a swing pair must have body > 4% R55 (notebook SL_MIN_BODY_PCT)."""
+    bar_nums = swing.get('bar_nums') or []
+    if len(bar_nums) < 2:
+        return False
+    base = window_t[0][0]
+    bodies = []
+    for bn in bar_nums:
+        idx = bn - base
+        if 0 <= idx < len(window_t):
+            t = window_t[idx]
+            bodies.append(abs(_C(t) - _O(t)) * 100)
+    return bool(bodies) and min(bodies) > thresh_body_pip
+
+
+# ── Public detectors ──────────────────────────────────────────────
+
+def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
+    """Scanner v3.4 BUY detector. Returns Signal or None.
+
+    Pipeline:
+      1. C1-C6 on the trailing 55-bar window (with 25-bar lookback for C5/C6)
+      2. Anti-trend "father" filter on the latest 1-8 bars
+      3. Pick a swing low whose body_lo sits in the 65-85% R55 entry zone
+      4. Trigger only when the current bar's Low has reached the swing low
+      5. TP = entry + 50% × (highest swing high body_hi - entry)  (R:R=1.0 symmetric SL)"""
+    from utils.swing_v414 import scan_swings
+
+    if len(bars) < _SCAN_WINDOW:
+        return None
+
+    window = bars[-_SCAN_WINDOW:]
+    window_t = _bars_to_tuples(window)
+    lookback_t = _scan_lookback_tuples(bars)
+
+    H55 = max(_H(b) for b in window_t)
+    L55 = min(_L(b) for b in window_t)
+    R55 = H55 - L55
+    R55_pip = R55 * 100
+
+    if R55 < _SCAN_MIN_R55_USD:
+        return None
+
+    if not (_scan_c1_up(window_t, L55, R55)
+            and _scan_c2_up(window_t, L55, R55)
+            and _scan_c3_up(window_t, R55)
+            and _scan_c4_up(window_t, R55)
+            and _scan_c5_up(lookback_t, R55)
+            and _scan_c6_up(window_t, lookback_t, L55, R55)):
+        return None
+
+    if _scan_detect_father(window_t, R55_pip, direction='down'):
+        return None
+
+    cur = window_t[-1]
+    cur_low = _L(cur)
+
+    zone_lo = L55 + R55 * _SCAN_ZONE_UP_LO
+    zone_hi = L55 + R55 * _SCAN_ZONE_UP_HI
+
+    highs, lows = scan_swings(window_t, R55_pip)
+    if not lows or not highs:
+        return None
+
+    thresh_body_pip = _SCAN_SL_MIN_BODY_PCT * R55_pip
+    triggered = []
+    for sl in lows:
+        body_lo = sl['body_lo']
+        if not (zone_lo <= body_lo <= zone_hi):
+            continue
+        if not _scan_swing_pair_min_body_ok(window_t, sl, thresh_body_pip):
+            continue
+        if cur_low <= body_lo:
+            triggered.append(sl)
+    if not triggered:
+        return None
+    sl_pick = max(triggered, key=lambda s: s['body_lo'])
+
+    sh_body_hi = max(h['body_hi'] for h in highs)
+    if sh_body_hi <= sl_pick['body_lo']:
+        return None
+
+    entry   = sl_pick['body_lo']
+    reward  = sh_body_hi - entry
+    tp_dist = 0.50 * reward
+    tp      = entry + tp_dist
+    sl      = entry - tp_dist
+    risk_pip = tp_dist * 100
+    if risk_pip <= 0:
+        return None
+
+    return Signal(
+        pattern='UPTREND_SCANNER',
+        direction='BUY',
+        quality='✓',
+        entry=round(entry, 3),
+        sl=round(sl, 3),
+        sl_name='SL=50%(SH-Entry)',
+        tp_order=round(tp, 3),
+        tp_ref=round(tp, 3),
+        tp_name='TP=50%(SH-Entry)',
+        rr=1.0,
+        risk_pip=round(risk_pip, 1),
+        reward_pip=round(tp_dist * 100, 1),
+        lot=_scan_lot(risk_pip, portfolio),
+        R55=round(R55_pip, 1),
+        details={
+            'L55': round(L55, 3), 'H55': round(H55, 3),
+            'sl_body_lo': round(sl_pick['body_lo'], 3),
+            'sl_bar_nums': sl_pick.get('bar_nums', []),
+            'sh_body_hi': round(sh_body_hi, 3),
+            'zone_lo': round(zone_lo, 3),
+            'zone_hi': round(zone_hi, 3),
+        },
+    )
+
+
+def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
+    """Scanner v3.4 SELL detector. Mirror of the BUY path."""
+    from utils.swing_v414 import scan_swings
+
+    if len(bars) < _SCAN_WINDOW:
+        return None
+
+    window = bars[-_SCAN_WINDOW:]
+    window_t = _bars_to_tuples(window)
+    lookback_t = _scan_lookback_tuples(bars)
+
+    H55 = max(_H(b) for b in window_t)
+    L55 = min(_L(b) for b in window_t)
+    R55 = H55 - L55
+    R55_pip = R55 * 100
+
+    if R55 < _SCAN_MIN_R55_USD:
+        return None
+
+    if not (_scan_c1_down(window_t, H55, R55)
+            and _scan_c2_down(window_t, H55, R55)
+            and _scan_c3_down(window_t, R55)
+            and _scan_c4_down(window_t, R55)
+            and _scan_c5_down(lookback_t, R55)
+            and _scan_c6_down(window_t, lookback_t, H55, R55)):
+        return None
+
+    if _scan_detect_father(window_t, R55_pip, direction='up'):
+        return None
+
+    cur = window_t[-1]
+    cur_high = _H(cur)
+
+    zone_lo = L55 + R55 * _SCAN_ZONE_DOWN_LO
+    zone_hi = L55 + R55 * _SCAN_ZONE_DOWN_HI
+
+    highs, lows = scan_swings(window_t, R55_pip)
+    if not highs or not lows:
+        return None
+
+    thresh_body_pip = _SCAN_SL_MIN_BODY_PCT * R55_pip
+    triggered = []
+    for sh in highs:
+        body_hi = sh['body_hi']
+        if not (zone_lo <= body_hi <= zone_hi):
+            continue
+        if not _scan_swing_pair_min_body_ok(window_t, sh, thresh_body_pip):
+            continue
+        if cur_high >= body_hi:
+            triggered.append(sh)
+    if not triggered:
+        return None
+    sh_pick = min(triggered, key=lambda s: s['body_hi'])
+
+    sl_body_lo = min(s['body_lo'] for s in lows)
+    if sl_body_lo >= sh_pick['body_hi']:
+        return None
+
+    entry   = sh_pick['body_hi']
+    reward  = entry - sl_body_lo
+    tp_dist = 0.50 * reward
+    tp      = entry - tp_dist
+    sl      = entry + tp_dist
+    risk_pip = tp_dist * 100
+    if risk_pip <= 0:
+        return None
+
+    return Signal(
+        pattern='DOWNTREND_SCANNER',
+        direction='SELL',
+        quality='✓',
+        entry=round(entry, 3),
+        sl=round(sl, 3),
+        sl_name='SL=50%(Entry-SL)',
+        tp_order=round(tp, 3),
+        tp_ref=round(tp, 3),
+        tp_name='TP=50%(Entry-SL)',
+        rr=1.0,
+        risk_pip=round(risk_pip, 1),
+        reward_pip=round(tp_dist * 100, 1),
+        lot=_scan_lot(risk_pip, portfolio),
+        R55=round(R55_pip, 1),
+        details={
+            'L55': round(L55, 3), 'H55': round(H55, 3),
+            'sh_body_hi': round(sh_pick['body_hi'], 3),
+            'sh_bar_nums': sh_pick.get('bar_nums', []),
+            'sl_body_lo': round(sl_body_lo, 3),
+            'zone_lo': round(zone_lo, 3),
+            'zone_hi': round(zone_hi, 3),
+        },
+    )
