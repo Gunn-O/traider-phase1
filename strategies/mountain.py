@@ -68,13 +68,22 @@ def _detect_mountain_r1(
     R55: float,
     cur: tuple,
     used_swing_bars: Optional[set] = None,
+    debug: Optional[dict] = None,
 ) -> Optional[Signal]:
     """
     ตรวจภูเขารอบ 1 → BUY (port v67 ตรง ๆ)
+
+    debug: optional dict — เมื่อให้มา จะเขียน 'skip' = '<reason>' ทุก return None
+           เพื่อให้ signal_engine surface reason ใน heartbeat (Tier 2).
     """
+    def _skip(reason: str):
+        if debug is not None:
+            debug['skip'] = reason
+        return None
+
     hs, ls = scan_swings(window_t, R55)
     if not hs or not ls:
-        return None
+        return _skip("ไม่เจอ swing high/low")
 
     # Base = LL ต่ำสุด (filter ตัวที่ใช้ entry แล้วถ้ามี)
     candidates = ls if not used_swing_bars else [
@@ -82,13 +91,13 @@ def _detect_mountain_r1(
         if not any(bn in used_swing_bars for bn in s['bar_nums'])
     ]
     if not candidates:
-        return None
+        return _skip("base swings ใช้หมดแล้ว")
     base_sw = min(candidates, key=lambda s: s['body_lo'])
 
     # Peak = highest swing AFTER base — by body_hi (ไม่ใช่ bar_nums)
     peaks_after = [s for s in hs if s['bar_nums'][0] > base_sw['bar_nums'][-1]]
     if not peaks_after:
-        return None
+        return _skip("ไม่เจอ peak หลัง base")
     peak_sw = max(peaks_after, key=lambda s: s['body_hi'])
 
     base_lo = base_sw['body_lo']
@@ -109,7 +118,7 @@ def _detect_mountain_r1(
 
     height_thresh = R55 * 0.55 if is_adjacent else R55 * 0.60
     if height < height_thresh:
-        return None
+        return _skip(f"height {height:.0f}p < {height_thresh:.0f}p (ภูเขาเล็ก)")
 
     # Entry zone: base_lo ± buffer (5% ของ height หรือ 100 pip)
     buf = min(height * 0.05, 100)
@@ -120,7 +129,7 @@ def _detect_mountain_r1(
     X = peak_sw['bar_nums'][0] - base_sw['bar_nums'][-1]
     Y = cur[0] - peak_sw['bar_nums'][-1]
     if (X + Y) < 10:
-        return None
+        return _skip(f"ภูเขา {X+Y} bars < 10")
 
     # ห้ามมี Low ทะลุ thresh_10 ในช่วง 20-80% ของภูเขา
     thresh_10 = base_lo + (peak_hi - base_lo) * 0.20
@@ -134,12 +143,12 @@ def _detect_mountain_r1(
         hi80 = int(total_bars * 0.80)
         for b in all_mid[lo20:hi80 + 1]:
             if _L(b) <= thresh_10:
-                return None
+                return _skip("Low ทะลุ thresh_10 ใน 20-80%")
 
     # ฐาน → entry ไม่เกิน 42 แท่ง
     bars_base_to_entry = cur[0] - base_sw['bar_nums'][-1]
     if bars_base_to_entry > 42:
-        return None
+        return _skip(f"base→entry {bars_base_to_entry} > 42 bars")
 
     # SH check — ถ้า > 25 แท่ง ต้องไม่มี SH หลัง peak มากกว่า 2 อัน
     if bars_base_to_entry > 25:
@@ -149,7 +158,7 @@ def _detect_mountain_r1(
             if peak_bar_last < s['bar_nums'][0] <= cur[0]
         ]
         if len(sh_after_peak) > 2:
-            return None
+            return _skip(f"SH หลัง peak {len(sh_after_peak)} > 2")
 
     # Spike check — descent bars: ห้ามมี O > 50%line และ L ≤ zone_hi
     H55_m = max(_H(b) for b in window_t)
@@ -161,11 +170,11 @@ def _detect_mountain_r1(
     ]
     for b in descent_bars2:
         if _O(b) > line_50 and _L(b) <= zone_hi:
-            return None
+            return _skip("spike ตอนลง (O>50% & L แตะ zone)")
 
     # Cur bar ต้องแตะ zone (low ≤ zone_hi และ high ≥ zone_lo)
     if not (_L(cur) <= zone_hi and _H(cur) >= zone_lo):
-        return None
+        return _skip(f"แท่งปัจจุบันยังไม่แตะ zone [{zone_lo:.2f}, {zone_hi:.2f}]")
 
     # Prev bar ห้าม break zone (ป้องกันราคาวิ่งผ่าน zone จากด้านบน)
     cur_idx = next(
@@ -174,7 +183,7 @@ def _detect_mountain_r1(
     if cur_idx is not None and cur_idx > 0:
         prev_bar = window_t[cur_idx - 1]
         if _L(prev_bar) < zone_lo:
-            return None
+            return _skip("prev bar เจาะ zone จากบน")
 
     bars_since = cur[0] - peak_sw['bar_nums'][-1]
     entry = min(_H(cur), zone_hi)
@@ -307,16 +316,19 @@ def find_signal(
     bars: List[OHLC],
     portfolio: float = 1000.0,
     mountain_state: Optional[dict] = None,  # accepted for API compat; ignored (R2 deprecated)
+    debug: Optional[dict] = None,
 ) -> Optional[Signal]:
     """
     หาสัญญาณ MOUNTAIN R1 จาก 55 แท่งล่าสุด
 
     mountain_state: รับเข้าเพื่อ backward-compat กับ xauusd_signal.find_signal
                     แต่ไม่ใช้ — Round 2 deprecated ใน v67
+    debug:          optional dict — ถ้าให้มา จะเก็บ skip reason สำหรับ Tier 2
 
     Returns: Signal หรือ None
     """
     if len(bars) < 55:
+        if debug is not None: debug['skip'] = f"bars {len(bars)} < 55"
         return None
 
     # assign bar_num ถ้ายังไม่มี
@@ -334,9 +346,10 @@ def find_signal(
     R55 = (H55 - L55) * 100
 
     if R55 == 0:
+        if debug is not None: debug['skip'] = "R55=0 (flat market)"
         return None
 
-    sig = _detect_mountain_r1(window_t, all_t, R55, cur_t)
+    sig = _detect_mountain_r1(window_t, all_t, R55, cur_t, debug=debug)
     if sig is not None:
         sig.lot = _calc_lot(sig.risk_pip, portfolio)
     return sig

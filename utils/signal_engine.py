@@ -242,28 +242,46 @@ def run_signal_engine(
 
     candidates: list = []
 
+    # Tier 2: each strategy writes its skip reason into a per-strategy debug
+    # dict, surfaced in world_state['skip_reasons']. UI shows them in the Live
+    # Snapshot panel so the user knows WHY no signal fired this cycle.
+    skip_reasons: dict = {}
+
     # MOUNTAIN — Mountain Round 1 (notebook v4.61). MOUNTAIN_R2 deprecated.
     if is_pattern_active_for_tf('MOUNTAIN', current_tf):
+        _dbg_mtn: dict = {}
         sig_mtn = _mountain_strat.find_signal(
-            bars=ohlc_bars, portfolio=portfolio, mountain_state=mountain_state
+            bars=ohlc_bars, portfolio=portfolio, mountain_state=mountain_state, debug=_dbg_mtn
         )
         if sig_mtn is not None and sig_mtn.pattern == 'MOUNTAIN':
             candidates.append(sig_mtn)
+        elif _dbg_mtn.get('skip'):
+            skip_reasons['MOUNTAIN'] = _dbg_mtn['skip']
 
     # MAI_RUAY — Father/Mother candle (notebook engine 1-8 / 60-100% / 4-30%)
     if is_pattern_active_for_tf('MAI_RUAY', current_tf):
-        sig_mr = _mai_ruay_strat.find_signal(bars=ohlc_bars, portfolio=portfolio)
+        _dbg_mr: dict = {}
+        sig_mr = _mai_ruay_strat.find_signal(bars=ohlc_bars, portfolio=portfolio, debug=_dbg_mr)
         if sig_mr is not None:
             candidates.append(sig_mr)
+        elif _dbg_mr.get('skip'):
+            skip_reasons['MAI_RUAY'] = _dbg_mr['skip']
 
     # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v3.4) — wrapper picks BUY
     # first, falls back to SELL. Each variant gated by its own (pattern, TF) flag.
     if (is_pattern_active_for_tf('UPTREND_SCANNER', current_tf)
             or is_pattern_active_for_tf('DOWNTREND_SCANNER', current_tf)):
         from strategies import uptrend_downtrend_scanner as _ud_scanner
-        sig_ud = _ud_scanner.find_signal(bars=ohlc_bars, portfolio=portfolio)
+        # Use nested dict so we capture both BUY and SELL skip reasons separately.
+        _dbg_ud: dict = {'buy': {}, 'sell': {}}
+        sig_ud = _ud_scanner.find_signal(bars=ohlc_bars, portfolio=portfolio, debug=_dbg_ud)
         if sig_ud is not None and is_pattern_active_for_tf(sig_ud.pattern, current_tf):
             candidates.append(sig_ud)
+        else:
+            if _dbg_ud['buy'].get('skip'):
+                skip_reasons['UPTREND_SCANNER'] = _dbg_ud['buy']['skip']
+            if _dbg_ud['sell'].get('skip'):
+                skip_reasons['DOWNTREND_SCANNER'] = _dbg_ud['sell']['skip']
 
     # Pick best by R:R (matches existing xauusd_signal selection logic)
     signal = max(candidates, key=lambda s: s.rr) if candidates else None
@@ -304,7 +322,8 @@ def run_signal_engine(
                 'candles_checked': len(candles),
                 'range_55': round(range_usd, 2)
             },
-            'mountain_state': mountain_state  # Return unchanged
+            'mountain_state': mountain_state,  # Return unchanged
+            'skip_reasons': skip_reasons,       # Tier 2: per-strategy SKIP reasons
         }
 
     # Signal found — convert to world_state format
@@ -382,7 +401,8 @@ def run_signal_engine(
             'range_55': round(range_usd, 2),
             'signal_engine_version': '4.25'
         },
-        'mountain_state': updated_mountain_state  # Return updated state
+        'mountain_state': updated_mountain_state,  # Return updated state
+        'skip_reasons': skip_reasons,                # Tier 2: SKIPs from non-firing strategies
     }
 
     return world_state

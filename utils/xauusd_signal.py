@@ -960,8 +960,12 @@ def _scan_swing_pair_min_body_ok(window_t, swing, thresh_body_pip: float) -> boo
 
 # ── Public detectors ──────────────────────────────────────────────
 
-def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
+def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, debug: dict = None):
     """Scanner v3.4 BUY detector. Returns Signal or None.
+
+    debug: optional dict — when supplied, writes 'skip' = '<reason>' on each
+           early-exit so signal_engine can surface a per-pattern SKIP reason
+           in the heartbeat (Tier 2). Strategy logic is unchanged.
 
     Pipeline:
       1. C1-C6 on the trailing 55-bar window (with 25-bar lookback for C5/C6)
@@ -971,8 +975,13 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
       5. TP = entry + 50% × (highest swing high body_hi - entry)  (R:R=1.0 symmetric SL)"""
     from utils.swing_v414 import scan_swings
 
-    if len(bars) < _SCAN_WINDOW:
+    def _skip(reason: str):
+        if debug is not None:
+            debug['skip'] = reason
         return None
+
+    if len(bars) < _SCAN_WINDOW:
+        return _skip(f"bars {len(bars)} < {_SCAN_WINDOW}")
 
     window = bars[-_SCAN_WINDOW:]
     window_t = _bars_to_tuples(window)
@@ -984,18 +993,23 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
     R55_pip = R55 * 100
 
     if R55 < _SCAN_MIN_R55_USD:
-        return None
+        return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
 
-    if not (_scan_c1_up(window_t, L55, R55)
-            and _scan_c2_up(window_t, L55, R55)
-            and _scan_c3_up(window_t, R55)
-            and _scan_c4_up(window_t, R55)
-            and _scan_c5_up(lookback_t, R55)
-            and _scan_c6_up(window_t, lookback_t, L55, R55)):
-        return None
+    if not _scan_c1_up(window_t, L55, R55):
+        return _skip("C1 fail (close < 60% R55)")
+    if not _scan_c2_up(window_t, L55, R55):
+        return _skip("C2 fail (recent Low 5bars < 55% R55)")
+    if not _scan_c3_up(window_t, R55):
+        return _skip("C3 fail (drop from HH > 30% R55)")
+    if not _scan_c4_up(window_t, R55):
+        return _skip("C4 fail (no bullish impulse 25% R55)")
+    if not _scan_c5_up(lookback_t, R55):
+        return _skip("C5 fail (bearish bar > 30% R55 in lookback)")
+    if not _scan_c6_up(window_t, lookback_t, L55, R55):
+        return _skip("C6 fail (early closes > 40% R55)")
 
     if _scan_detect_father(window_t, R55_pip, direction='down'):
-        return None
+        return _skip("anti-trend: bearish father bar")
 
     cur = window_t[-1]
     cur_low = _L(cur)
@@ -1005,7 +1019,7 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
 
     highs, lows = scan_swings(window_t, R55_pip)
     if not lows or not highs:
-        return None
+        return _skip("ไม่เจอ swing high/low")
 
     thresh_body_pip = _SCAN_SL_MIN_BODY_PCT * R55_pip
     triggered = []
@@ -1018,12 +1032,12 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
         if cur_low <= body_lo:
             triggered.append(sl)
     if not triggered:
-        return None
+        return _skip(f"ไม่มี swing low ใน zone [{zone_lo:.2f}, {zone_hi:.2f}] ที่ price แตะ")
     sl_pick = max(triggered, key=lambda s: s['body_lo'])
 
     sh_body_hi = max(h['body_hi'] for h in highs)
     if sh_body_hi <= sl_pick['body_lo']:
-        return None
+        return _skip("SH body_hi <= entry")
 
     entry   = sl_pick['body_lo']
     reward  = sh_body_hi - entry
@@ -1032,7 +1046,7 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
     sl      = entry - tp_dist
     risk_pip = tp_dist * 100
     if risk_pip <= 0:
-        return None
+        return _skip("risk_pip <= 0")
 
     return Signal(
         pattern='UPTREND_SCANNER',
@@ -1060,12 +1074,19 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
     )
 
 
-def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
-    """Scanner v3.4 SELL detector. Mirror of the BUY path."""
+def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, debug: dict = None):
+    """Scanner v3.4 SELL detector. Mirror of the BUY path.
+
+    debug: optional dict — same usage as _detect_uptrend_scanner."""
     from utils.swing_v414 import scan_swings
 
-    if len(bars) < _SCAN_WINDOW:
+    def _skip(reason: str):
+        if debug is not None:
+            debug['skip'] = reason
         return None
+
+    if len(bars) < _SCAN_WINDOW:
+        return _skip(f"bars {len(bars)} < {_SCAN_WINDOW}")
 
     window = bars[-_SCAN_WINDOW:]
     window_t = _bars_to_tuples(window)
@@ -1077,18 +1098,23 @@ def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
     R55_pip = R55 * 100
 
     if R55 < _SCAN_MIN_R55_USD:
-        return None
+        return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
 
-    if not (_scan_c1_down(window_t, H55, R55)
-            and _scan_c2_down(window_t, H55, R55)
-            and _scan_c3_down(window_t, R55)
-            and _scan_c4_down(window_t, R55)
-            and _scan_c5_down(lookback_t, R55)
-            and _scan_c6_down(window_t, lookback_t, H55, R55)):
-        return None
+    if not _scan_c1_down(window_t, H55, R55):
+        return _skip("C1D fail (close > 40% R55 top-down)")
+    if not _scan_c2_down(window_t, H55, R55):
+        return _skip("C2D fail (recent High 5bars > 45% R55 top-down)")
+    if not _scan_c3_down(window_t, R55):
+        return _skip("C3D fail (rise from LL > 30% R55)")
+    if not _scan_c4_down(window_t, R55):
+        return _skip("C4D fail (no bearish impulse 25% R55)")
+    if not _scan_c5_down(lookback_t, R55):
+        return _skip("C5D fail (bullish bar > 30% R55 in lookback)")
+    if not _scan_c6_down(window_t, lookback_t, H55, R55):
+        return _skip("C6D fail (early closes < 60% R55)")
 
     if _scan_detect_father(window_t, R55_pip, direction='up'):
-        return None
+        return _skip("anti-trend: bullish father bar")
 
     cur = window_t[-1]
     cur_high = _H(cur)
@@ -1098,7 +1124,7 @@ def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
 
     highs, lows = scan_swings(window_t, R55_pip)
     if not highs or not lows:
-        return None
+        return _skip("ไม่เจอ swing high/low")
 
     thresh_body_pip = _SCAN_SL_MIN_BODY_PCT * R55_pip
     triggered = []
@@ -1111,12 +1137,12 @@ def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
         if cur_high >= body_hi:
             triggered.append(sh)
     if not triggered:
-        return None
+        return _skip(f"ไม่มี swing high ใน zone [{zone_lo:.2f}, {zone_hi:.2f}] ที่ price แตะ")
     sh_pick = min(triggered, key=lambda s: s['body_hi'])
 
     sl_body_lo = min(s['body_lo'] for s in lows)
     if sl_body_lo >= sh_pick['body_hi']:
-        return None
+        return _skip("SL body_lo >= entry")
 
     entry   = sh_pick['body_hi']
     reward  = entry - sl_body_lo
@@ -1125,7 +1151,7 @@ def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0):
     sl      = entry + tp_dist
     risk_pip = tp_dist * 100
     if risk_pip <= 0:
-        return None
+        return _skip("risk_pip <= 0")
 
     return Signal(
         pattern='DOWNTREND_SCANNER',

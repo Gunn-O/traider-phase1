@@ -199,6 +199,8 @@ function LiveSnapshotPanel({ bots }) {
                 ? `${hb.signal_pattern} ${hb.signal_direction || ''}${hb.signal_rr ? ` R:R=${fmt(hb.signal_rr, 2)}` : ''}`
                 : (hb.skip_reason || hb.chart_type || '—')
               const stateClass = hb.signal_pattern ? 'success' : (hb.chart_type === 'unclear' ? 'text-muted' : 'warning')
+              const skipReasons = hb.skip_reasons || {}
+              const skipPairs = Object.entries(skipReasons)
               return (
                 <tr key={b.bot_id}>
                   <td className="text-mono">{b.bot_id}</td>
@@ -207,7 +209,19 @@ function LiveSnapshotPanel({ bots }) {
                   <td className="text-mono">{fmt(hb.candle_close)}</td>
                   <td className="text-mono">{fmt(hb.R55_pip, 0)}</td>
                   <td className="text-mono text-muted">{hb.session || '—'}</td>
-                  <td className={stateClass}>{state}</td>
+                  <td className={stateClass}>
+                    {state}
+                    {skipPairs.length > 0 && (
+                      <div className="skip-reasons">
+                        {skipPairs.map(([pat, reason]) => (
+                          <div key={pat} className="skip-reason-row">
+                            <span className="skip-pattern text-muted">{pat}:</span>{' '}
+                            <span className="skip-text">{reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   <td className="text-mono text-muted">{shortPlanId(hb.active_plan) || '—'}</td>
                 </tr>
               )

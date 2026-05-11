@@ -322,31 +322,43 @@ def _find_obstacle(
 # Core analyzer (1 bar)
 # ════════════════════════════════════════════════════════════════
 
-def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float) -> Optional[Signal]:
-    """Wrapper analyze_bar จาก notebook → Signal"""
-    if bar_idx < RANGE_WINDOW - 1:
+def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float, debug: Optional[dict] = None) -> Optional[Signal]:
+    """Wrapper analyze_bar จาก notebook → Signal
+
+    debug: optional dict — เก็บ skip reason สำหรับ Tier 2.
+    """
+    def _skip(reason: str):
+        if debug is not None:
+            debug['skip'] = reason
         return None
+
+    if bar_idx < RANGE_WINDOW - 1:
+        return _skip(f"bar_idx {bar_idx} < {RANGE_WINDOW-1}")
     mother_idx = bar_idx - 1
     father_end = bar_idx - 2
     if father_end < 0:
-        return None
+        return _skip("father_end < 0")
 
     r55 = _calc_range55(bars, bar_idx)
     if r55 <= 0:
-        return None
+        return _skip("R55 <= 0")
 
     fr = _find_father(bars, father_end, r55)
-    if fr is None: return None
+    if fr is None:
+        return _skip("ไม่เจอ father (1-8 bars สีเดียว body 60-100% R55)")
     f_start, f_end, f_dir, f_body = fr
 
     mr = _validate_mother(bars, mother_idx, f_dir, f_body)
-    if mr is None: return None
+    if mr is None:
+        return _skip("mother ไม่ผ่าน (สวนทิศ + body 4-30% ของพ่อ)")
     m_body, m_pct, m_quality = mr
 
     trend = _detect_trend(bars, bar_idx)
     direction = 'BUY' if f_dir == 'DOWN' else 'SELL'
-    if trend == 'UP'   and direction == 'SELL': return None
-    if trend == 'DOWN' and direction == 'BUY':  return None
+    if trend == 'UP'   and direction == 'SELL':
+        return _skip("anti-trend: trend UP แต่ signal SELL")
+    if trend == 'DOWN' and direction == 'BUY':
+        return _skip("anti-trend: trend DOWN แต่ signal BUY")
 
     m_row        = bars[mother_idx]
     father_close = bars[f_end].close
@@ -372,11 +384,11 @@ def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float) -> Optional[S
     if direction == 'BUY':
         entry = entry_price + buf_price
         if child.low > entry:
-            return None
+            return _skip(f"BUY: child low {child.low:.2f} > entry {entry:.2f}")
     else:
         entry = entry_price - buf_price
         if child.high < entry:
-            return None
+            return _skip(f"SELL: child high {child.high:.2f} < entry {entry:.2f}")
 
     tp1, tp2, tp3 = _calc_tp(tech_point, f_body, direction)
 
@@ -415,7 +427,7 @@ def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float) -> Optional[S
 
     sl_pips = abs(entry - sl) / PIP
     if sl_pips < 1:
-        return None
+        return _skip(f"SL pip {sl_pips:.1f} < 1")
 
     # TP selection
     if obs is not None:
@@ -494,13 +506,15 @@ def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float) -> Optional[S
 # Public API — ตรงรูปแบบกับ xauusd_signal.find_signal
 # ════════════════════════════════════════════════════════════════
 
-def find_signal(bars: List[OHLC], portfolio: float = 1000.0) -> Optional[Signal]:
+def find_signal(bars: List[OHLC], portfolio: float = 1000.0, debug: Optional[dict] = None) -> Optional[Signal]:
     """
     หาสัญญาณ MAI_RUAY ที่แท่งสุดท้าย (bars[-1]) เท่านั้น
 
+    debug: optional dict — ถ้าให้มาจะเก็บ skip reason สำหรับ Tier 2.
     Returns: Signal หรือ None
     """
     if len(bars) < RANGE_WINDOW:
+        if debug is not None: debug['skip'] = f"bars {len(bars)} < {RANGE_WINDOW}"
         return None
 
     # assign bar_num ถ้ายังไม่มี
@@ -508,4 +522,4 @@ def find_signal(bars: List[OHLC], portfolio: float = 1000.0) -> Optional[Signal]
         if b.bar_num == 0:
             b.bar_num = i + 1
 
-    return _analyze_bar(bars, len(bars) - 1, portfolio)
+    return _analyze_bar(bars, len(bars) - 1, portfolio, debug=debug)

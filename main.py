@@ -765,6 +765,10 @@ class TraiderMainLoop:
             "session": world_state.get('session'),
             "chart_type": chart_type_hb,
             "skip_reason": world_state.get('skip_reason'),
+            # Tier 2: per-strategy SKIP reasons (only present when that
+            # strategy ran and didn't fire a signal). Empty dict = a signal
+            # fired (or no strategy was active for this TF).
+            "skip_reasons": world_state.get('skip_reasons', {}),
             "signal_pattern": signal_obj.pattern if signal_obj else None,
             "signal_direction": signal_obj.direction if signal_obj else None,
             "signal_rr": round(signal_obj.rr, 2) if signal_obj else None,
