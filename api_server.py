@@ -100,6 +100,76 @@ def _add_event(bot_id: str, ev_type: str, msg: str = "", data: Optional[dict] = 
     bots[bot_id]["last_updated"] = datetime.now().isoformat()
 
 
+def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
+    """Replace bots[bot_id]['open_orders'] + ['closed_orders'] with whatever
+    LocalDB shows for this bot_id right now. Called on /api/start and also
+    exposed via POST /api/bots/{id}/sync so the UI can be refreshed after
+    `reconcile_pending.py` without having to restart anything.
+
+    Best-effort: any DB error is swallowed (returns with the in-memory state
+    untouched). Trades older than `MAX_CLOSED_LOOKBACK` are not loaded so the
+    Dashboard's "Recently Closed" panel stays focused on recent activity."""
+    if bot_id not in bots:
+        return
+    if not os.path.exists(db_path):
+        return
+    try:
+        import sqlite3
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        # Open = anything still PENDING for this bot
+        open_rows = con.execute(
+            "SELECT trade_id, plan_id, action, entry_price, sl_price, tp_price, "
+            "lot_size, rr_ratio FROM trades "
+            "WHERE bot_id = ? AND result = 'PENDING' "
+            "ORDER BY timestamp_open",
+            (bot_id,),
+        ).fetchall()
+        bots[bot_id]["open_orders"] = [
+            {
+                "plan_id":   r["plan_id"],
+                "trade_id":  r["trade_id"],
+                "action":    r["action"],
+                "entry":     r["entry_price"],
+                "sl":        r["sl_price"],
+                "tp":        r["tp_price"],
+                "lot":       r["lot_size"],
+                "lot_size":  r["lot_size"],
+                "rr":        r["rr_ratio"],
+            }
+            for r in open_rows
+        ]
+        # Closed = last 50 WIN/LOSS/CANCELLED for this bot, newest last
+        closed_rows = con.execute(
+            "SELECT trade_id, plan_id, action, result, close_reason, close_price, "
+            "pnl_usd, timestamp_close FROM trades "
+            "WHERE bot_id = ? AND result IN ('WIN','LOSS','CANCELLED') "
+            "ORDER BY timestamp_close ASC LIMIT 50",
+            (bot_id,),
+        ).fetchall()
+        bots[bot_id]["closed_orders"] = [
+            {
+                "plan_id":      r["plan_id"],
+                "trade_id":     r["trade_id"],
+                "action":       r["action"],
+                "result":       r["result"],
+                "close_reason": r["close_reason"],
+                "close_price":  r["close_price"],
+                "pnl":          r["pnl_usd"],
+                "close_time":   r["timestamp_close"],
+            }
+            for r in closed_rows
+        ]
+        con.close()
+        logger.info(
+            f"Hydrated {bot_id} from DB: "
+            f"open={len(bots[bot_id]['open_orders'])} "
+            f"closed={len(bots[bot_id]['closed_orders'])}"
+        )
+    except Exception as e:
+        logger.warning(f"_hydrate_bot_from_db({bot_id}): {e}")
+
+
 def _sweep_dead() -> List[str]:
     """Detect bot subprocesses that exited; flip their status to 'stopped'.
     Returns the list of bot_ids that just transitioned."""
@@ -391,6 +461,28 @@ async def post_bot_event(bot_id: str, event: BotEvent):
     return {"ok": True}
 
 
+@app.post("/api/bots/{bot_id}/sync")
+async def sync_bot_from_db(bot_id: str):
+    """Reload open_orders + closed_orders for a bot directly from LocalDB.
+    Useful right after `scripts/reconcile_pending.py` runs while the bot is
+    stopped — the Dashboard then reflects the new state without having to
+    restart anything. Also broadcasts so connected UIs refresh immediately."""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    _hydrate_bot_from_db(bot_id)
+    await manager.broadcast({
+        "event": "bot_synced",
+        "bot_id": bot_id,
+        "bot": _serialize_bot(bots[bot_id]),
+    })
+    return {
+        "ok": True,
+        "bot_id": bot_id,
+        "open": len(bots[bot_id]["open_orders"]),
+        "closed": len(bots[bot_id]["closed_orders"]),
+    }
+
+
 @app.post("/api/bots/{bot_id}/heartbeat")
 async def post_bot_heartbeat(bot_id: str, request: Request):
     """Bot subprocess (main.py) POSTs a per-cycle snapshot here so the UI can
@@ -503,6 +595,11 @@ async def start_bot(request: StartRequest):
         raise HTTPException(status_code=500, detail=f"Failed to start bot: {e}")
 
     bots[bot_id] = _new_bot_state(request, proc.pid)
+    # Pre-populate open_orders + closed_orders from LocalDB so the Dashboard
+    # immediately shows history that lives in the DB but not in api_server's
+    # in-memory ring buffer (e.g. after an api_server restart, or after
+    # `scripts/reconcile_pending.py` adjusts trades while the bot was stopped).
+    _hydrate_bot_from_db(bot_id)
     _bot_procs[bot_id] = proc
     _add_event(bot_id, "started", f"Bot {bot_id} started (pid={proc.pid})")
     _save_sessions()

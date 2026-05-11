@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ComposedChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Cell,
+  ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 
 const TF_OPTIONS = ['M1', 'M5', 'M15', 'M30']
@@ -9,10 +9,20 @@ const DEFAULT_TF = 'M5'
 const DEFAULT_SYMBOL = 'XAUUSDc'
 const BARS = 55
 
+const BULL_COLOR = '#26a69a'
+const BEAR_COLOR = '#ef5350'
+
 /**
- * 55-bar candlestick chart (recharts ComposedChart with a custom Shape per bar
- * — no extra dep). Polls /api/candles?limit=55. Default tf/symbol come from
- * the first running bot, but the user can override via the dropdowns.
+ * 55-bar candlestick chart for the symbol/tf the bots are watching.
+ *
+ * Implementation note: recharts has no native candlestick, so each bar is
+ * drawn with a custom SVG `shape` that uses the row's full OHLC payload:
+ * one vertical line for the wick (low..high) + one centered rect for the
+ * body (open..close). The Bar's `dataKey="range"` array `[low, high]` only
+ * gives recharts the y-bounds so it can pick the axis scale.
+ *
+ * Polls /api/candles?limit=55. Default tf/symbol come from the first
+ * running bot; user can override via the dropdown/buttons.
  */
 export default function ChartPanel({ bots = [] }) {
   const runningBots = useMemo(() => bots.filter(b => b.status === 'running'), [bots])
@@ -42,33 +52,34 @@ export default function ChartPanel({ bots = [] }) {
       }
     }
     poll()
-    // M1 → 30s, M5+ → 60s. Cache TTL on backend handles dedup across UI clients.
     const intervalMs = tf === 'M1' ? 30000 : 60000
     const t = setInterval(poll, intervalMs)
     return () => { alive = false; clearInterval(t) }
   }, [tf, symbol])
 
-  // Symbols from running bots (so user can pick what each bot is watching)
   const symbols = useMemo(() => {
     const s = new Set(runningBots.map(b => b.symbol))
     s.add(symbol)
     return Array.from(s)
   }, [runningBots, symbol])
 
-  // Pre-compute series for recharts: keep raw OHLC and add helper fields
-  // for the bar shape. recharts needs a numeric "value" array for the bar.
-  const data = useMemo(() => candles.map(c => ({
+  // Use a sequential index for x so weekends/gaps don't visually distort spacing.
+  // We still expose the original unix `time` for the tooltip/axis label.
+  const data = useMemo(() => candles.map((c, i) => ({
+    idx: i,
     time: c.time,
     open: c.open,
     high: c.high,
     low: c.low,
     close: c.close,
-    range: [c.low, c.high],   // wick range
-    body: [Math.min(c.open, c.close), Math.max(c.open, c.close)],
-    bullish: c.close >= c.open,
+    range: [c.low, c.high],
   })), [candles])
 
   const lastClose = candles.length > 0 ? candles[candles.length - 1].close : null
+  const tickFormatterIdx = (i) => {
+    const c = data[i]
+    return c ? fmtTimeShort(c.time) : ''
+  }
 
   return (
     <div className="card chart-card">
@@ -110,10 +121,13 @@ export default function ChartPanel({ bots = [] }) {
             <ComposedChart data={data} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
               <XAxis
-                dataKey="time"
-                tickFormatter={t => fmtTimeShort(t)}
+                dataKey="idx"
+                type="number"
+                domain={[-0.5, data.length - 0.5]}
                 tick={{ fill: '#9aa0aa', fontSize: 10 }}
+                tickFormatter={tickFormatterIdx}
                 interval={Math.max(0, Math.floor(BARS / 8))}
+                allowDecimals={false}
               />
               <YAxis
                 domain={['dataMin - 0.5', 'dataMax + 0.5']}
@@ -129,23 +143,72 @@ export default function ChartPanel({ bots = [] }) {
               {lastClose != null && (
                 <ReferenceLine y={lastClose} stroke="rgba(150,150,255,0.4)" strokeDasharray="3 3" />
               )}
-              {/* Wick: thin range bar */}
-              <Bar dataKey="range" barSize={1} isAnimationActive={false}>
-                {data.map((d, i) => (
-                  <Cell key={`wick-${i}`} fill={d.bullish ? '#26a69a' : '#ef5350'} />
-                ))}
-              </Bar>
-              {/* Body: thicker open-close bar */}
-              <Bar dataKey="body" barSize={6} isAnimationActive={false}>
-                {data.map((d, i) => (
-                  <Cell key={`body-${i}`} fill={d.bullish ? '#26a69a' : '#ef5350'} />
-                ))}
-              </Bar>
+              <Bar
+                dataKey="range"
+                shape={<CandleShape />}
+                isAnimationActive={false}
+              />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Custom SVG candle:
+ *   - x/y/width/height come from recharts (y/height map the [low, high] range
+ *     into the y-axis scale of the chart, so y = pixel y of `high`, y+height
+ *     = pixel y of `low`).
+ *   - Wick: single vertical line at the bar's horizontal center, spanning the
+ *     full y..y+height (= high..low).
+ *   - Body: rect centered on the wick, from open's y-pixel to close's y-pixel.
+ *     Uses linear interpolation within [low, high] → [y, y+height].
+ */
+function CandleShape(props) {
+  const { x, y, width, height, payload } = props
+  if (!payload || width <= 0 || height <= 0) return null
+  const { open, high, low, close } = payload
+  if (!Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) return null
+
+  const range = high - low
+  if (range <= 0) return null
+
+  const xCenter = x + width / 2
+  // Map a price (between low and high) to its pixel y. Higher price → smaller y.
+  const yFor = (price) => y + ((high - price) / range) * height
+
+  const openY = yFor(open)
+  const closeY = yFor(close)
+  const bodyTop = Math.min(openY, closeY)
+  const bodyBottom = Math.max(openY, closeY)
+  const bodyHeight = Math.max(1, bodyBottom - bodyTop)
+  const bodyWidth = Math.max(2, width * 0.7)
+
+  const isBull = close >= open
+  const color = isBull ? BULL_COLOR : BEAR_COLOR
+
+  return (
+    <g>
+      {/* Wick: full high-to-low vertical line */}
+      <line
+        x1={xCenter}
+        x2={xCenter}
+        y1={y}
+        y2={y + height}
+        stroke={color}
+        strokeWidth={1}
+      />
+      {/* Body: open-to-close rect centered on the wick */}
+      <rect
+        x={xCenter - bodyWidth / 2}
+        y={bodyTop}
+        width={bodyWidth}
+        height={bodyHeight}
+        fill={color}
+      />
+    </g>
   )
 }
 

@@ -59,6 +59,9 @@ export function useBots() {
         }
         return { ...b, events, open_orders, closed_orders }
       }))
+    } else if (wsData.event === 'bot_synced' && wsData.bot_id && wsData.bot) {
+      // Reconcile-driven hydration from LocalDB — replace open/closed lists wholesale.
+      setBots(prev => prev.map(b => b.bot_id === wsData.bot_id ? wsData.bot : b))
     } else if (wsData.event === 'bot_heartbeat' && wsData.bot_id) {
       // Per-cycle snapshot from main.py — overwrites previous, doesn't add to events.
       setBots(prev => prev.map(b => b.bot_id === wsData.bot_id
