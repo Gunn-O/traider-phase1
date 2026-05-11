@@ -18,6 +18,7 @@ DB_PATH = os.getenv('LOCAL_DB_PATH', 'traider_backtest.db')
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
     trade_id        TEXT PRIMARY KEY,
+    bot_id          TEXT,
     plan_id         TEXT,
     order_num       INTEGER DEFAULT 1,
     timestamp_open  TEXT,
@@ -45,11 +46,17 @@ CREATE TABLE IF NOT EXISTS trades (
     trailing_sl     REAL,
     human_action    TEXT,
     human_agree     TEXT,
-    created_at      TEXT DEFAULT (datetime('now'))
+    created_at      TEXT DEFAULT (datetime('now')),
+    -- Data-collection extras (2026-05-11): feed Risk/Money-mgmt design
+    mae_pip            REAL DEFAULT 0,   -- max adverse excursion while open (pip)
+    mfe_pip            REAL DEFAULT 0,   -- max favorable excursion while open (pip)
+    r55_pip_at_open    REAL,             -- 55-bar range at entry (volatility context)
+    pattern_details_json TEXT            -- json.dumps(signal.details) for pattern tuning
 );
 
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id          TEXT,
     snapshot_time   TEXT,
     active_plan_id  TEXT,
     balance         REAL,
@@ -57,6 +64,20 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     consecutive_loss INTEGER,
     total_loss_pct  REAL,
     raw_json        TEXT
+);
+
+-- One row per bot — survives launcher restarts (used to restore consecutive_loss,
+-- total_loss_pct, today_pnl, last_signal_time after WU reboot or crash).
+CREATE TABLE IF NOT EXISTS bot_state_snapshots (
+    bot_id              TEXT PRIMARY KEY,
+    snapshot_time       TEXT NOT NULL,
+    consecutive_loss    INTEGER DEFAULT 0,
+    total_loss_pct      REAL DEFAULT 0,
+    today_pnl           REAL DEFAULT 0,
+    realized_pnl_usd    REAL DEFAULT 0,
+    last_signal_time    TEXT,
+    last_candle_time    TEXT,
+    state_json          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -75,10 +96,48 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     finished_at TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_trades_result ON trades(result);
-CREATE INDEX IF NOT EXISTS idx_trades_plan_id ON trades(plan_id);
-CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp_open);
 """
+
+# Indexes are applied AFTER `_ensure_bot_id_column` so an upgrade from the
+# pre-bot_id schema doesn't fail trying to create idx_trades_bot_id before the
+# column exists.
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_trades_result    ON trades(result);
+CREATE INDEX IF NOT EXISTS idx_trades_plan_id   ON trades(plan_id);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp_open);
+CREATE INDEX IF NOT EXISTS idx_trades_bot_id    ON trades(bot_id);
+CREATE INDEX IF NOT EXISTS idx_psnap_bot_id     ON portfolio_snapshots(bot_id);
+"""
+
+
+def _ensure_bot_id_column(conn: sqlite3.Connection, table: str) -> None:
+    """Idempotent ALTER for existing DBs created before bot_id was introduced."""
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    cols = {row[1] for row in cur.fetchall()}
+    if "bot_id" not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN bot_id TEXT")
+        logger.info(f"✓ LocalDB: ALTER {table} ADD COLUMN bot_id")
+
+
+# Columns added 2026-05-11 for richer trade analytics. Existing DBs will get
+# them via idempotent ALTER, so the live SIM/LIVE DB doesn't need to be
+# recreated. Pair `(col_name, ddl_fragment)` so the ALTER reproduces the type.
+_EXTRA_TRADE_COLUMNS = [
+    ("mae_pip",              "REAL DEFAULT 0"),
+    ("mfe_pip",              "REAL DEFAULT 0"),
+    ("r55_pip_at_open",      "REAL"),
+    ("pattern_details_json", "TEXT"),
+]
+
+
+def _ensure_extra_trade_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent ALTERs for the analytics columns added 2026-05-11."""
+    cur = conn.execute("PRAGMA table_info(trades)")
+    existing = {row[1] for row in cur.fetchall()}
+    for name, ddl in _EXTRA_TRADE_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {ddl}")
+            logger.info(f"✓ LocalDB: ALTER trades ADD COLUMN {name}")
 
 
 class LocalDB:
@@ -101,11 +160,22 @@ class LocalDB:
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        # 30s timeout for the SQLite-level lock retry; WAL gives us readers/writers
+        # in parallel so two bots writing concurrently don't trip "database is locked".
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        # Backfill bot_id column for DBs created before this refactor, THEN
+        # create indexes (one of them references bot_id).
+        _ensure_bot_id_column(self.conn, "trades")
+        _ensure_bot_id_column(self.conn, "portfolio_snapshots")
+        _ensure_extra_trade_columns(self.conn)
+        self.conn.executescript(SCHEMA_INDEXES)
         self.conn.commit()
-        logger.info(f"✓ LocalDB initialized: {db_path}")
+        logger.info(f"✓ LocalDB initialized: {db_path} (WAL, busy_timeout=5000)")
 
     # ══════════════════════════════════════════════════════════════
     # Trade operations
@@ -116,21 +186,24 @@ class LocalDB:
         Insert new trade (PENDING)
 
         Args:
-            trade: Trade dict with all required fields
+            trade: Trade dict. `bot_id` is optional (legacy backtest paths omit it).
         """
         self.conn.execute("""
             INSERT OR REPLACE INTO trades
-            (trade_id, plan_id, order_num, timestamp_open, timeframe, chart_type,
+            (trade_id, bot_id, plan_id, order_num, timestamp_open, timeframe, chart_type,
              technique, action, entry_price, sl_price, tp_price,
              lot_size, lot_total_plan, rr_ratio, confidence, rsi_14,
-             session, ai_reason, llm_tokens, llm_cost_usd, result, trailing_sl)
+             session, ai_reason, llm_tokens, llm_cost_usd, result, trailing_sl,
+             r55_pip_at_open, pattern_details_json)
             VALUES
-            (:trade_id, :plan_id, :order_num, :timestamp_open, :timeframe, :chart_type,
+            (:trade_id, :bot_id, :plan_id, :order_num, :timestamp_open, :timeframe, :chart_type,
              :technique, :action, :entry_price, :sl_price, :tp_price,
              :lot_size, :lot_total_plan, :rr_ratio, :confidence, :rsi_14,
-             :session, :ai_reason, :llm_tokens, :llm_cost_usd, :result, :trailing_sl)
+             :session, :ai_reason, :llm_tokens, :llm_cost_usd, :result, :trailing_sl,
+             :r55_pip_at_open, :pattern_details_json)
         """, {
             'trade_id': trade['trade_id'],
+            'bot_id': trade.get('bot_id'),
             'plan_id': trade['plan_id'],
             'order_num': trade.get('order_num', 1),
             'timestamp_open': trade['timestamp_open'],
@@ -151,13 +224,17 @@ class LocalDB:
             'llm_tokens': trade.get('llm_tokens', 0),
             'llm_cost_usd': trade.get('llm_cost_usd', 0),
             'result': trade.get('result', 'PENDING'),
-            'trailing_sl': trade.get('trailing_sl', trade['sl_price'])
+            'trailing_sl': trade.get('trailing_sl', trade['sl_price']),
+            'r55_pip_at_open': trade.get('r55_pip_at_open'),
+            'pattern_details_json': trade.get('pattern_details_json'),
         })
         self.conn.commit()
 
     def update_trade_result(self, trade_id: str, result: str,
                            pnl: float, close_price: float,
-                           close_time, close_reason: str):
+                           close_time, close_reason: str,
+                           mae_pip: Optional[float] = None,
+                           mfe_pip: Optional[float] = None):
         """
         Update trade when closed
 
@@ -168,17 +245,42 @@ class LocalDB:
             close_price: Close price
             close_time: Close timestamp (datetime or str)
             close_reason: 'SL_HIT' | 'TP_HIT' | 'BACKTEST_END'
+            mae_pip: max adverse excursion in pips (optional — for analytics)
+            mfe_pip: max favorable excursion in pips (optional — for analytics)
         """
         if isinstance(close_time, datetime):
             close_time = close_time.isoformat()
 
+        if mae_pip is not None or mfe_pip is not None:
+            self.conn.execute("""
+                UPDATE trades SET
+                    result = ?, pnl_usd = ?, close_reason = ?,
+                    close_price = ?, timestamp_close = ?,
+                    mae_pip = COALESCE(?, mae_pip),
+                    mfe_pip = COALESCE(?, mfe_pip)
+                WHERE trade_id = ?
+            """, (result, pnl, close_reason,
+                  close_price, str(close_time),
+                  mae_pip, mfe_pip, trade_id))
+        else:
+            self.conn.execute("""
+                UPDATE trades SET
+                    result = ?, pnl_usd = ?, close_reason = ?,
+                    close_price = ?, timestamp_close = ?
+                WHERE trade_id = ?
+            """, (result, pnl, close_reason,
+                  close_price, str(close_time), trade_id))
+        self.conn.commit()
+
+    def update_mae_mfe(self, trade_id: str, mae_pip: float, mfe_pip: float):
+        """Bump the running MAE/MFE for an open trade. No-op if either value
+        is less than what's already stored (we want max-so-far)."""
         self.conn.execute("""
             UPDATE trades SET
-                result = ?, pnl_usd = ?, close_reason = ?,
-                close_price = ?, timestamp_close = ?
+                mae_pip = MAX(COALESCE(mae_pip, 0), ?),
+                mfe_pip = MAX(COALESCE(mfe_pip, 0), ?)
             WHERE trade_id = ?
-        """, (result, pnl, close_reason,
-              close_price, str(close_time), trade_id))
+        """, (mae_pip, mfe_pip, trade_id))
         self.conn.commit()
 
     def update_trailing_sl(self, trade_id: str, new_sl: float):
@@ -189,61 +291,61 @@ class LocalDB:
         )
         self.conn.commit()
 
-    def get_pending_trades(self) -> List[dict]:
-        """Get all PENDING trades"""
-        cur = self.conn.execute(
-            "SELECT * FROM trades WHERE result = 'PENDING' ORDER BY timestamp_open"
-        )
+    def get_pending_trades(self, bot_id: Optional[str] = None) -> List[dict]:
+        """Get PENDING trades, optionally filtered by bot_id."""
+        if bot_id:
+            cur = self.conn.execute(
+                "SELECT * FROM trades WHERE result='PENDING' AND bot_id=? ORDER BY timestamp_open",
+                (bot_id,),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM trades WHERE result='PENDING' ORDER BY timestamp_open"
+            )
         return [dict(r) for r in cur.fetchall()]
 
-    def get_all_trades(self, run_id: str = None) -> List[dict]:
-        """Get all trades"""
-        cur = self.conn.execute("SELECT * FROM trades ORDER BY timestamp_open")
+    def get_all_trades(self, bot_id: Optional[str] = None) -> List[dict]:
+        if bot_id:
+            cur = self.conn.execute(
+                "SELECT * FROM trades WHERE bot_id=? ORDER BY timestamp_open", (bot_id,),
+            )
+        else:
+            cur = self.conn.execute("SELECT * FROM trades ORDER BY timestamp_open")
         return [dict(r) for r in cur.fetchall()]
 
-    def get_recent_trades(self, limit: int = 100) -> List[dict]:
-        """Get recent trades (newest first)"""
-        cur = self.conn.execute(
-            "SELECT * FROM trades ORDER BY timestamp_open DESC LIMIT ?",
-            (limit,)
-        )
+    def get_recent_trades(self, limit: int = 100, bot_id: Optional[str] = None) -> List[dict]:
+        if bot_id:
+            cur = self.conn.execute(
+                "SELECT * FROM trades WHERE bot_id=? ORDER BY timestamp_open DESC LIMIT ?",
+                (bot_id, limit),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM trades ORDER BY timestamp_open DESC LIMIT ?", (limit,),
+            )
         return [dict(r) for r in cur.fetchall()]
 
     # ══════════════════════════════════════════════════════════════
     # Summary & Analytics
     # ══════════════════════════════════════════════════════════════
 
-    def get_summary(self) -> dict:
-        """
-        Get overall backtest summary
-
-        Returns:
-            {
-                'total': int,
-                'wins': int,
-                'losses': int,
-                'pending': int,
-                'expired': int,
-                'net_pnl': float,
-                'avg_win': float,
-                'avg_loss': float,
-                'wr_pct': float
-            }
-        """
-        cur = self.conn.execute("""
+    def get_summary(self, bot_id: Optional[str] = None) -> dict:
+        """Aggregate stats. Filter to one bot via bot_id, or return cross-bot total."""
+        where = "WHERE bot_id=?" if bot_id else ""
+        params = (bot_id,) if bot_id else ()
+        cur = self.conn.execute(f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN result='WIN'  THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) as losses,
                 SUM(CASE WHEN result='PENDING' THEN 1 ELSE 0 END) as pending,
                 SUM(CASE WHEN result='PENDING_EXPIRED' THEN 1 ELSE 0 END) as expired,
-                -- net_pnl นับเฉพาะ WIN/LOSS เท่านั้น (ไม่รวม PENDING_EXPIRED)
                 SUM(CASE WHEN result IN ('WIN','LOSS')
                     THEN pnl_usd ELSE 0 END) as net_pnl,
                 AVG(CASE WHEN result='WIN' THEN pnl_usd END) as avg_win,
                 AVG(CASE WHEN result='LOSS' THEN pnl_usd END) as avg_loss
-            FROM trades
-        """)
+            FROM trades {where}
+        """, params)
         row = dict(cur.fetchone())
         wins = row['wins'] or 0
         losses = row['losses'] or 0
@@ -275,26 +377,26 @@ class LocalDB:
         """)
         return [dict(r) for r in cur.fetchall()]
 
-    def get_equity_curve(self, initial_balance: float = 1000.0) -> List[dict]:
-        """
-        Get equity curve (balance over time)
-
-        Args:
-            initial_balance: Starting balance
-
-        Returns:
-            List of {'timestamp': str, 'balance': float}
-        """
-        cur = self.conn.execute("""
-            SELECT timestamp_close, pnl_usd, result
-            FROM trades
-            WHERE result IN ('WIN','LOSS')
-            ORDER BY timestamp_close
-        """)
+    def get_equity_curve(self, initial_balance: float = 1000.0,
+                         bot_id: Optional[str] = None) -> List[dict]:
+        """Equity curve over WIN/LOSS rows. Filter to one bot via bot_id."""
+        if bot_id:
+            cur = self.conn.execute("""
+                SELECT timestamp_close, pnl_usd, result
+                FROM trades
+                WHERE result IN ('WIN','LOSS') AND bot_id=?
+                ORDER BY timestamp_close
+            """, (bot_id,))
+        else:
+            cur = self.conn.execute("""
+                SELECT timestamp_close, pnl_usd, result
+                FROM trades
+                WHERE result IN ('WIN','LOSS')
+                ORDER BY timestamp_close
+            """)
         rows = cur.fetchall()
         balance = initial_balance
         curve = [{'timestamp': 'start', 'balance': balance, 'result': 'START'}]
-
         for r in rows:
             balance += r['pnl_usd']
             curve.append({
@@ -302,18 +404,68 @@ class LocalDB:
                 'balance': round(balance, 2),
                 'result': r['result']
             })
-
         return curve
+
+    # ══════════════════════════════════════════════════════════════
+    # Bot state persistence (cross-restart durability for SIM/LIVE bots)
+    # ══════════════════════════════════════════════════════════════
+
+    def upsert_bot_state(self, bot_id: str, state: dict) -> None:
+        """Save a bot's running counters so they survive launcher restarts."""
+        self.conn.execute("""
+            INSERT INTO bot_state_snapshots
+              (bot_id, snapshot_time, consecutive_loss, total_loss_pct,
+               today_pnl, realized_pnl_usd, last_signal_time, last_candle_time, state_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bot_id) DO UPDATE SET
+              snapshot_time    = excluded.snapshot_time,
+              consecutive_loss = excluded.consecutive_loss,
+              total_loss_pct   = excluded.total_loss_pct,
+              today_pnl        = excluded.today_pnl,
+              realized_pnl_usd = excluded.realized_pnl_usd,
+              last_signal_time = excluded.last_signal_time,
+              last_candle_time = excluded.last_candle_time,
+              state_json       = excluded.state_json
+        """, (
+            bot_id,
+            datetime.now().isoformat(),
+            int(state.get('consecutive_loss', 0)),
+            float(state.get('total_loss_pct', 0)),
+            float(state.get('today_pnl', 0)),
+            float(state.get('realized_pnl_usd', 0)),
+            state.get('last_signal_time'),
+            state.get('last_candle_time'),
+            json.dumps(state.get('extras', {})),
+        ))
+        self.conn.commit()
+
+    def get_bot_state(self, bot_id: str) -> Optional[dict]:
+        cur = self.conn.execute(
+            "SELECT * FROM bot_state_snapshots WHERE bot_id=?", (bot_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d['extras'] = json.loads(d.pop('state_json') or '{}')
+        except Exception:
+            d['extras'] = {}
+        return d
 
     # ══════════════════════════════════════════════════════════════
     # Utility
     # ══════════════════════════════════════════════════════════════
 
-    def clear_trades(self):
-        """ล้าง trades ก่อนรัน backtest ใหม่"""
-        self.conn.execute("DELETE FROM trades")
+    def clear_trades(self, bot_id: Optional[str] = None):
+        """Clear trades. With bot_id only that bot's rows; otherwise wipe all."""
+        if bot_id:
+            self.conn.execute("DELETE FROM trades WHERE bot_id=?", (bot_id,))
+            logger.info(f"✓ LocalDB: Cleared trades for bot {bot_id}")
+        else:
+            self.conn.execute("DELETE FROM trades")
+            logger.info("✓ LocalDB: Cleared all trades")
         self.conn.commit()
-        logger.info("✓ LocalDB: Cleared all trades")
 
     def vacuum(self):
         """Optimize database"""

@@ -560,7 +560,9 @@ class TraiderMainLoop:
                             pnl=t.get('pnl_usd', t.get('pnl', 0)),
                             close_price=t.get('close_price', 0),
                             close_time=t.get('timestamp_close', candle_time),
-                            close_reason=t.get('close_reason', '')
+                            close_reason=t.get('close_reason', ''),
+                            mae_pip=t.get('mae_pip'),
+                            mfe_pip=t.get('mfe_pip'),
                         )
                     # Persist bot counters so a launcher restart doesn't reset
                     # consecutive_loss / realized_pnl mid-session.
@@ -986,6 +988,17 @@ class TraiderMainLoop:
         # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
         # when running under api_server with a bot_id assigned).
         if self.local_db:
+            # Snapshot analytics fields at the moment we open — feed Risk/Money-
+            # mgmt design later. R55 captures volatility; signal.details carries
+            # pattern-specific strength (Mountain height, MaiRuay father_pct, etc.)
+            import json as _json
+            r55_at_open = (world_state.get('range') or {}).get('pip')
+            sig_details = getattr(signal, 'details', None) if signal else None
+            try:
+                details_json = _json.dumps(sig_details, default=str) if sig_details else None
+            except Exception:
+                details_json = None
+
             for order in orders_with_ids:
                 self.local_db.insert_trade({
                     'trade_id': order['trade_id'],
@@ -1010,7 +1023,9 @@ class TraiderMainLoop:
                     'llm_tokens': llm_log.get('total_tokens', 0),
                     'llm_cost_usd': llm_log.get('cost_usd', 0),
                     'result': 'PENDING',
-                    'trailing_sl': order['sl']
+                    'trailing_sl': order['sl'],
+                    'r55_pip_at_open': r55_at_open,
+                    'pattern_details_json': details_json,
                 })
 
         # Add to position monitor (only orders that actually went into MT5)
@@ -1155,6 +1170,14 @@ class TraiderMainLoop:
             else:
                 candle_time = datetime.now()
 
+            # Update running MAE/MFE on every open order before the broker checks
+            # for closes — this way the close event carries the final excursion
+            # from the bar that triggered it (live mode doesn't iterate per
+            # candle the way check_and_update does in backtest).
+            if current_candle:
+                from agents.g4_position_monitor import update_excursion_only
+                update_excursion_only(open_orders, current_candle)
+
             # Update broker positions (check SL/TP with real prices)
             current_price = current_candle.get('close') if current_candle else None
             newly_closed = self.broker.update_positions(candle_time, current_price=current_price)
@@ -1201,6 +1224,10 @@ class TraiderMainLoop:
                             # SIM/LIVE bots never cleared PENDING in DB).
                             if self.local_db:
                                 try:
+                                    # MAE/MFE were accumulated on the in-memory
+                                    # order dict by update_excursion_only() during
+                                    # the cycle loop (live mode), or by the candle
+                                    # check in check_positions_on_candle_close().
                                     self.local_db.update_trade_result(
                                         trade_id=trade_id,
                                         result=broker_pos['result'],
@@ -1208,6 +1235,8 @@ class TraiderMainLoop:
                                         close_price=broker_pos['close_price'],
                                         close_time=broker_pos['close_time'],
                                         close_reason=broker_pos['close_reason'],
+                                        mae_pip=order.get('mae_pip'),
+                                        mfe_pip=order.get('mfe_pip'),
                                     )
                                 except Exception as e:
                                     logger.error(f"LocalDB update_trade_result failed for {trade_id}: {e}")

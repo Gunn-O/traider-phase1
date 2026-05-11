@@ -58,6 +58,9 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> Li
     """
     updates = []
 
+    high_c = candle.get('high', 0) or 0
+    low_c  = candle.get('low', 0) or 0
+
     for order in open_orders:
         if order.get('result') != 'PENDING':
             continue
@@ -68,6 +71,21 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> Li
         tp = order.get('tp_price', order.get('tp'))
         lot = order.get('lot_size', order.get('lot', 0.01))
         trade_id = order['trade_id']
+
+        # Update running MAE/MFE before checking SL/TP so the close row carries
+        # the full excursion stats (including the bar that triggered the close).
+        # Stored in-place on the order dict; the close-flow reads it back.
+        if high_c > 0 and low_c > 0 and entry:
+            if action == 'BUY':
+                adverse_pip   = max(0.0, (entry - low_c)) * 100
+                favorable_pip = max(0.0, (high_c - entry)) * 100
+            elif action == 'SELL':
+                adverse_pip   = max(0.0, (high_c - entry)) * 100
+                favorable_pip = max(0.0, (entry - low_c)) * 100
+            else:
+                adverse_pip = favorable_pip = 0.0
+            order['mae_pip'] = max(order.get('mae_pip', 0.0) or 0.0, adverse_pip)
+            order['mfe_pip'] = max(order.get('mfe_pip', 0.0) or 0.0, favorable_pip)
 
         # Check SL/TP hit
         sl_hit = False
@@ -121,12 +139,47 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> Li
             'close_price': close_price,
             'close_reason': close_reason,
             'pnl_usd': pnl,
-            'timestamp_close': candle['timestamp'].isoformat() if isinstance(candle['timestamp'], datetime) else candle['timestamp']
+            'timestamp_close': candle['timestamp'].isoformat() if isinstance(candle['timestamp'], datetime) else candle['timestamp'],
+            'mae_pip': order.get('mae_pip', 0.0),
+            'mfe_pip': order.get('mfe_pip', 0.0),
         })
 
-        logger.info(f"[{trade_id}] Closed: {result} | P&L: ${pnl:.2f} | Reason: {close_reason}")
+        logger.info(
+            f"[{trade_id}] Closed: {result} | P&L: ${pnl:.2f} | Reason: {close_reason} "
+            f"| MAE={order.get('mae_pip', 0):.1f}p MFE={order.get('mfe_pip', 0):.1f}p"
+        )
 
     return updates
+
+
+def update_excursion_only(open_orders: List[dict], candle: dict) -> None:
+    """Update MAE/MFE on each open order WITHOUT checking SL/TP close.
+
+    Useful for live/broker-driven mode where SL/TP closes are detected by
+    the broker (via MT5 history), but we still want to track per-bar
+    excursion. Call once per cycle from main.py before broker.update_positions.
+    Mutates orders in place."""
+    high_c = candle.get('high', 0) or 0
+    low_c  = candle.get('low', 0) or 0
+    if high_c <= 0 or low_c <= 0:
+        return
+    for order in open_orders:
+        if order.get('result') != 'PENDING':
+            continue
+        action = order.get('action')
+        entry = order.get('entry_price', order.get('entry', 0)) or 0
+        if not entry:
+            continue
+        if action == 'BUY':
+            adverse_pip   = max(0.0, (entry - low_c)) * 100
+            favorable_pip = max(0.0, (high_c - entry)) * 100
+        elif action == 'SELL':
+            adverse_pip   = max(0.0, (high_c - entry)) * 100
+            favorable_pip = max(0.0, (entry - low_c)) * 100
+        else:
+            continue
+        order['mae_pip'] = max(order.get('mae_pip', 0.0) or 0.0, adverse_pip)
+        order['mfe_pip'] = max(order.get('mfe_pip', 0.0) or 0.0, favorable_pip)
 
 
 def check_trailing_sl(order: dict, candle: dict) -> Optional[float]:
