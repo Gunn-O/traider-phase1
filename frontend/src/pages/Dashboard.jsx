@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTicks } from '../hooks/useTicks'
+import MT5StatusCard from '../components/MT5StatusCard'
+import ChartPanel from '../components/ChartPanel'
 import './Dashboard.css'
 
 export default function Dashboard({ bots, onStop }) {
@@ -46,6 +48,11 @@ export default function Dashboard({ bots, onStop }) {
   return (
     <div className="dashboard">
       <TickerBar bots={visibleBots} />
+
+      <div className="dashboard-row dashboard-row-split-2-3">
+        <MT5StatusCard />
+        <ChartPanel bots={visibleBots} />
+      </div>
 
       <RunningBotsTable
         bots={bots}

@@ -910,10 +910,20 @@ async def mt5_status():
             "server": ai.server,
             "balance": float(ai.balance),
             "equity": float(ai.equity),
+            "profit": float(ai.profit),         # floating P/L on open positions
+            "margin": float(ai.margin),         # margin used by open positions
+            "margin_free": float(ai.margin_free),
+            "margin_level": float(ai.margin_level) if ai.margin_level else None,  # %
             "currency": ai.currency,
             "leverage": ai.leverage,
             "trade_mode": ai.trade_mode,  # 0=demo, 2=real
         }
+        # Open positions count — useful "is anything live right now"
+        try:
+            positions = mt5.positions_get(symbol=sym_name)
+            out["account"]["positions_count"] = len(positions) if positions else 0
+        except Exception:
+            out["account"]["positions_count"] = None
 
         si = mt5.symbol_info(sym_name)
         if si is None:

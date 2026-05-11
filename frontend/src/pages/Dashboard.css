@@ -237,6 +237,105 @@
 .warning { color: var(--status-warning); }
 .success { color: var(--agent-analyst); }
 
+/* MT5 Status + Chart row — split 1:2 (status narrower, chart wider) */
+.dashboard-row-split-2-3 {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);
+  gap: var(--spacing-lg);
+}
+@media (max-width: 1100px) {
+  .dashboard-row-split-2-3 { grid-template-columns: 1fr; }
+}
+
+/* MT5 Status card */
+.mt5-card .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.status-ok  { background: var(--agent-analyst, #4ade80); animation: pulse 2s infinite; }
+.status-err { background: var(--status-stopped, #ef4444); }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+.mt5-error {
+  color: var(--status-stopped, #f87171);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.mt5-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.stat-value {
+  font-size: 14px;
+  font-weight: 600;
+}
+.stat-sub {
+  font-size: 11px;
+}
+.mt5-symbol-line {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color, rgba(255,255,255,0.06));
+  font-size: 12px;
+}
+
+/* Chart panel */
+.chart-card .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chart-controls select.filter-pill {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.chart-tooltip {
+  background: rgba(20, 22, 28, 0.95);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.chart-tooltip span { margin-left: 6px; }
+
 /* Tier 3 — Live tick stream bar (top of Dashboard) */
 .ticker-bar {
   display: flex;
