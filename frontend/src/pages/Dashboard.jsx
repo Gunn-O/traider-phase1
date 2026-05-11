@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useTicks } from '../hooks/useTicks'
 import './Dashboard.css'
 
 export default function Dashboard({ bots, onStop }) {
@@ -44,6 +45,8 @@ export default function Dashboard({ bots, onStop }) {
 
   return (
     <div className="dashboard">
+      <TickerBar bots={visibleBots} />
+
       <RunningBotsTable
         bots={bots}
         onStop={onStop}
@@ -160,6 +163,46 @@ function RunningBotsTable({ bots, onStop, filterBotId, onFilterChange }) {
           </tbody>
         </table>
       )}
+    </div>
+  )
+}
+
+function TickerBar({ bots }) {
+  // Re-render every 1s so "X seconds ago" stays fresh between WS ticks.
+  const [, setNowTick] = useState(0)
+  useTick(() => setNowTick(n => n + 1), 1000)
+
+  const { ticks, isConnected } = useTicks()
+  const symbols = useMemo(
+    () => Array.from(new Set(bots.filter(b => b.status === 'running').map(b => b.symbol))),
+    [bots]
+  )
+  if (symbols.length === 0) return null
+
+  return (
+    <div className="ticker-bar">
+      <span className="ticker-label">📡 Live</span>
+      {symbols.map(sym => {
+        const t = ticks[sym]
+        if (!t) return (
+          <span key={sym} className="ticker-cell ticker-empty">
+            <span className="ticker-symbol">{sym}</span>
+            <span className="text-muted">waiting…</span>
+          </span>
+        )
+        const ageSec = Math.max(0, Math.floor((Date.now() - new Date(t.ts).getTime()) / 1000))
+        const ageClass = ageSec < 5 ? 'profit' : ageSec < 15 ? 'warning' : 'loss'
+        return (
+          <span key={sym} className="ticker-cell">
+            <span className="ticker-symbol">{sym}</span>
+            <span className="ticker-bid">bid <strong>{fmt(t.bid, 2)}</strong></span>
+            <span className="ticker-ask">ask <strong>{fmt(t.ask, 2)}</strong></span>
+            <span className="ticker-spread text-muted">sp {fmt(t.spread_pip, 1)}p</span>
+            <span className={`ticker-age ${ageClass}`}>{ageSec}s</span>
+          </span>
+        )
+      })}
+      {!isConnected && <span className="ticker-disconnected">⚠️ WS off</span>}
     </div>
   )
 }

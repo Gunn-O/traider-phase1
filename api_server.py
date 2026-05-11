@@ -1213,12 +1213,90 @@ async def startup_event():
     """Initialize on startup"""
     logger.info("🚀 API Server starting...")
     logger.info("📊 Dashboard available at http://127.0.0.1:8080")
+    # Tier 3: start the live tick poller (broadcasts MT5 bid/ask via WebSocket)
+    asyncio.create_task(_tick_poll_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("🛑 API Server shutting down...")
+    global _tick_poll_running
+    _tick_poll_running = False
+
+
+# ─── Tier 3: Live tick stream ──────────────────────────────────────
+# Broadcasts MT5 bid/ask for each unique symbol any running bot uses.
+# One MT5 connection (already used by /api/mt5-status), polled every
+# TICK_POLL_SECONDS. Cached so /api/ticks can serve REST requests too.
+_latest_ticks: Dict[str, dict] = {}
+_tick_poll_running = True
+TICK_POLL_SECONDS = 2.0
+
+
+def _active_symbols() -> List[str]:
+    """Distinct symbols across running bots. Empty list if none — poller idles."""
+    return list({b["symbol"] for b in bots.values() if b["status"] == "running"})
+
+
+async def _tick_poll_loop() -> None:
+    """Background poller — fetches MT5 tick per active symbol every
+    TICK_POLL_SECONDS, caches in _latest_ticks, broadcasts via WebSocket
+    as {event: 'tick', ...}. Survives transient MT5 hiccups silently."""
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        logger.warning("Tick poller: MetaTrader5 module not installed — disabled")
+        return
+
+    logger.info(f"📡 Tick poller started (every {TICK_POLL_SECONDS}s)")
+    while _tick_poll_running:
+        try:
+            symbols = _active_symbols()
+            if not symbols:
+                # Nothing to poll — sleep longer to avoid spinning
+                await asyncio.sleep(5.0)
+                continue
+
+            if not mt5.initialize():
+                await asyncio.sleep(TICK_POLL_SECONDS)
+                continue
+
+            for sym in symbols:
+                try:
+                    si = mt5.symbol_info(sym)
+                    if si is None:
+                        continue
+                    if not si.visible:
+                        mt5.symbol_select(sym, True)
+                    tick = mt5.symbol_info_tick(sym)
+                    if tick is None:
+                        continue
+                    payload = {
+                        "symbol": sym,
+                        "bid": float(tick.bid),
+                        "ask": float(tick.ask),
+                        "spread_pip": round((tick.ask - tick.bid) * 100, 1),
+                        "time": datetime.fromtimestamp(tick.time).isoformat(),
+                        "ts": datetime.now().isoformat(),
+                    }
+                    _latest_ticks[sym] = payload
+                    await manager.broadcast({"event": "tick", **payload})
+                except Exception as e:
+                    logger.debug(f"Tick poll {sym}: {e}")
+
+        except Exception as e:
+            logger.error(f"Tick poll loop error: {e}")
+
+        await asyncio.sleep(TICK_POLL_SECONDS)
+    logger.info("📡 Tick poller stopped")
+
+
+@app.get("/api/ticks")
+async def get_latest_ticks():
+    """REST snapshot of every symbol's most recent tick (poller updates every
+    TICK_POLL_SECONDS). UI can use this on first load before WS catches up."""
+    return {"ticks": _latest_ticks, "poll_seconds": TICK_POLL_SECONDS}
 
 
 # ============================================================================

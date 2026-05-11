@@ -237,6 +237,43 @@
 .warning { color: var(--status-warning); }
 .success { color: var(--agent-analyst); }
 
+/* Tier 3 — Live tick stream bar (top of Dashboard) */
+.ticker-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  background: var(--bg-secondary, rgba(255,255,255,0.04));
+  border: 1px solid var(--border-color, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.ticker-label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.ticker-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.ticker-symbol {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.ticker-bid strong { color: var(--status-stopped); }
+.ticker-ask strong { color: var(--agent-analyst); }
+.ticker-spread { font-size: 11px; }
+.ticker-age { font-size: 11px; min-width: 24px; text-align: right; }
+.ticker-empty { color: var(--text-secondary); font-style: italic; }
+.ticker-disconnected { color: var(--status-warning); font-weight: 600; }
+
 /* Tier 2 — per-strategy SKIP reasons inside Live Snapshot row */
 .skip-reasons {
   margin-top: 4px;
