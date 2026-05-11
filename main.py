@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Tra(i)der Phase I v4.3 — Main Trading Loop
+Tra(i)der Phase II — Main Trading Loop
 
-Pipeline: G1 → G2 → G3a (Analyst) → G3b (Risk Manager) → G3c (Guardian) → G4
-Agents: A (Analyst), B (Risk Manager), C (Weekly), D (Monthly), Reflector (Daily)
+Per-trade pipeline (Python only — no AI per cycle):
+    Signal Engine → G2 Pre-filter → AUTO_APPROVE → Lot from Signal Engine
+                  → G3c Guardian (Python rules) → Execute → MT5
 
-V4.3 Updates:
-- Twin Candle dual-role system (Swing + Entry with beauty scoring)
-- Agent A uses System Prompt V4.3
-- Reflector: Daily Python-only reflection ($0)
-- Beauty score tracking throughout pipeline
+AI scope (separate cadence, not per-trade):
+    - Weekly Strategist  : weekly review of stats + parameter suggestions
+    - Monthly Evolver    : monthly proposal of strategy updates (human approves)
 
 Usage:
     python main.py --winrate-test  # Winrate test mode (0.01 lot)
@@ -17,7 +16,7 @@ Usage:
     python main.py --backtest --start 2026-01-01 --end 2026-03-31
     python main.py --backtest --start 2026-04-04 --end 2026-04-10 --log-sheets  # Backtest with Sheets logging
 
-Reference: XAUUSD_AI_Trading_System_v2.1.md, XAUUSD_System_PromptV43.md
+Reference: CLAUDE.md (Phase II Architecture)
 """
 
 import os
@@ -392,17 +391,16 @@ class TraiderMainLoop:
         update_bot_state({"data_source_actual": data_source})
         logger.info("✓ Data connector ready")
 
-        # Initialize agents (Phase II — Signal Engine Architecture)
-        logger.info("🤖 Initializing agents (Phase II: Signal Engine)...")
+        # Initialize agents (Phase II — Signal Engine Architecture, Python-only per-trade)
+        logger.info("🤖 Initializing agents (Phase II: Signal Engine, no AI per trade)...")
 
         # G2: Pre-filter (active)
         self.g2 = G2Prefilter(config={'verbose': True})
 
-        # Phase II: Analyst and Risk Manager REMOVED
-        # - BACKTEST: Signal Engine → AUTO_APPROVE (no Claude)
-        # - SIM/LIVE: Signal Engine → Claude Reviewer (future implementation)
-        self.analyst = None  # Placeholder for Phase II Claude Reviewer
-        self.risk_manager = None  # Removed - use Signal Engine lot directly
+        # Phase II: per-trade decision is fully deterministic (Python only).
+        # Signal Engine produces entry/SL/TP/lot → AUTO_APPROVE → Guardian.
+        # No Claude Reviewer per signal; no Risk Manager (Haiku) per signal.
+        # AI runs only on weekly/monthly cadence (Strategist / Evolver below).
 
         # Weekly Strategist + Monthly Evolver need ANTHROPIC_API_KEY.
         # .env documents the key as optional, and these agents only run on
@@ -809,21 +807,22 @@ class TraiderMainLoop:
 
         logger.info("✓ G2: Pre-filter PASSED")
 
-        # Step 3a: Decision — Phase II AUTO_APPROVE (no Claude in backtest)
-        logger.info("\n[STEP 3a] Decision...")
+        # Step 3a: Decision — AUTO_APPROVE (Signal Engine is authoritative)
+        # Phase II: no Claude per trade. Signal Engine output is taken as-is and
+        # only re-checked by G3c Guardian (Python rules) below.
+        logger.info("\n[STEP 3a] Decision: AUTO_APPROVE (no AI call)")
 
-        # Phase II: Use Signal Engine decision directly (already in world_state)
         signal = world_state.get('signal')
         if not signal:
             logger.error("❌ No signal from Signal Engine")
             return
 
-        # Convert signal to decision format (for compatibility with existing code)
+        # Decision dict kept for compatibility with downstream Sheets/LocalDB writers.
         decision = {
-            'action': signal.direction,  # Signal has 'direction' not 'action'
+            'action': signal.direction,
             'entry': signal.entry,
             'sl': signal.sl,
-            'tp': signal.tp_order,  # Signal has 'tp_order' not 'tp'
+            'tp': signal.tp_order,
             'lot': signal.lot,
             'rr_ratio': signal.rr,
             'confidence': 1.0,  # Signal Engine is deterministic
@@ -831,9 +830,9 @@ class TraiderMainLoop:
             'skip_reason': None
         }
 
-        # Phase II: No Claude call in backtest → $0 cost
+        # llm_log kept for Sheets/LocalDB schema compatibility — always $0/no tokens.
         llm_log = {
-            'action': 'BACKTEST_AUTO_APPROVE',
+            'action': 'AUTO_APPROVE',
             'total_tokens': 0,
             'cost_usd': 0.0,
             'cache_hit': False
@@ -842,54 +841,15 @@ class TraiderMainLoop:
         logger.info(f"✓ Signal Engine: {decision['action']} @ {decision['entry']:.2f} "
                     f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f})")
 
-        # Step 3b: Agent B — Risk Manager
-        logger.info("\n[STEP 3b] Agent B — Risk Manager...")
-
-        # Agent B: Backtest bypass (deterministic), Simulate/Live call Haiku
-        if self.is_backtest:
-            # Backtest: ใช้ lot จาก Signal Engine โดยตรง
-            signal = world_state.get('signal')
-            lot = signal.lot if signal and hasattr(signal, 'lot') else 0.01
-            # Winrate test override
-            if os.getenv('WINRATE_TEST', 'false').lower() == 'true':
-                lot = 0.01
-            risk_result = {
-                'approved': True,
-                'lot': lot,
-                'reason': 'backtest_auto_approve',
-                'adjusted': False,
-                'llm_log': {'action': 'BACKTEST_SKIP', 'cost_usd': 0}
-            }
-            logger.info(f"✓ Agent B: BACKTEST mode → lot={lot:.2f} (no API call)")
-        else:
-            # Simulate/Live: Build risk context and call Haiku
-            from agents.g3_claude_decision import build_risk_context
-
-            risk_context = build_risk_context(
-                decision=decision,
-                balance=self.balance,
-                portfolio_state=portfolio_state,
-                weekly_stats=self.weekly_stats
-            )
-
-            logger.info(f"  Risk Context: base_lot={risk_context['base_lot']:.2f}, "
-                        f"consecutive_loss={risk_context['consecutive_loss']}, "
-                        f"weekly_wr={risk_context['weekly_winrate']:.1%}")
-
-            risk_result = self.risk_manager.approve(
-                decision=decision,
-                risk_context=risk_context
-            )
-
-            if not risk_result['approved']:
-                logger.warning(f"❌ Agent B REJECTED: {risk_result['reason']}")
-                return
-
-        lot = risk_result['lot']
-        adjusted = risk_result.get('adjusted', False)
-
-        logger.info(f"✓ Agent B: Approved lot={lot:.2f} "
-                    f"{'(adjusted)' if adjusted else ''}")
+        # Step 3b: Lot sizing — Signal Engine is authoritative (no AI per trade).
+        # Same path for BACKTEST / SIM / LIVE: take signal.lot, override to 0.01
+        # only when WINRATE_TEST=true. Risk Manager (Haiku) was removed —
+        # criteria are fully captured in the Python strategies.
+        signal = world_state.get('signal')
+        lot = signal.lot if signal and hasattr(signal, 'lot') else 0.01
+        if os.getenv('WINRATE_TEST', 'false').lower() == 'true':
+            lot = 0.01
+        logger.info(f"\n[STEP 3b] Lot from Signal Engine: {lot:.2f} (no AI call)")
 
         # Step 3c: Guardian Check (legacy — final safety check)
         logger.info("\n[STEP 3c] Guardian Risk Gate...")
