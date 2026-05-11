@@ -947,6 +947,39 @@ class TraiderMainLoop:
             else decision.get('setup', 'none')
         )
 
+        # ── Execute via broker FIRST — never log/track an order MT5 rejected ──
+        # Previously we logged Sheets/LocalDB + added to position_monitor BEFORE
+        # the broker call, which left zombie PENDING rows when MT5 returned
+        # "Invalid stops" or similar. Those zombies kept active_plan_id pinned
+        # and blocked future Mountain/MaiRuay signals.
+        if self.broker is not None:
+            logger.info(f"\n[Broker] Executing {len(orders_with_ids)} order(s)...")
+            trail_meta = None
+            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
+                trail_meta = getattr(signal, 'details', None) or {}
+            for order in orders_with_ids:
+                ticket = self.broker.open_position(
+                    action=order['action'],
+                    lot=order['lot'],
+                    sl=order['sl'],
+                    tp=order['tp'],
+                    plan_id=plan_id,
+                    candle_time=candle_time,
+                    trade_id=order['trade_id'],
+                    entry_price=order.get('entry'),
+                    trail_meta=trail_meta,
+                )
+                if ticket:
+                    order['broker_ticket'] = ticket
+                    logger.info(f"✓ Order {order['trade_id']} opened as ticket #{ticket}")
+                else:
+                    logger.error(f"✗ Failed to open order {order['trade_id']} — will not be tracked")
+
+            orders_with_ids = [o for o in orders_with_ids if o.get('broker_ticket')]
+            if not orders_with_ids:
+                logger.warning("All orders failed at broker — aborting plan (no Sheets/DB/monitor entries)")
+                return
+
         # Log to Sheets
         self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision_for_sheets, world_state, llm_log, candle_time=candle_time)
 
@@ -980,32 +1013,7 @@ class TraiderMainLoop:
                     'trailing_sl': order['sl']
                 })
 
-        # Execute trades via broker (if paper mode)
-        if self.broker is not None:
-            logger.info(f"\n[Broker] Executing {len(orders_with_ids)} orders via PaperBroker...")
-            # Mountain trailing metadata (only Mountain BUY uses 3-stage trailing SL)
-            trail_meta = None
-            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
-                trail_meta = getattr(signal, 'details', None) or {}
-            for order in orders_with_ids:
-                ticket = self.broker.open_position(
-                    action=order['action'],
-                    lot=order['lot'],
-                    sl=order['sl'],
-                    tp=order['tp'],
-                    plan_id=plan_id,
-                    candle_time=candle_time,
-                    trade_id=order['trade_id'],
-                    entry_price=order.get('entry'),  # For backtest mode
-                    trail_meta=trail_meta,
-                )
-                if ticket:
-                    order['broker_ticket'] = ticket  # Store ticket for tracking
-                    logger.info(f"✓ Order {order['trade_id']} opened as ticket #{ticket}")
-                else:
-                    logger.error(f"✗ Failed to open order {order['trade_id']}")
-
-        # Add to position monitor
+        # Add to position monitor (only orders that actually went into MT5)
         self.position_monitor.add_orders(orders_with_ids)
 
         # Notify Dashboard about plan opened (per-order event so each leg shows up)
@@ -1151,21 +1159,68 @@ class TraiderMainLoop:
             current_price = current_candle.get('close') if current_candle else None
             newly_closed = self.broker.update_positions(candle_time, current_price=current_price)
 
-            # Sync closed positions to PositionMonitor
+            # Sync closed positions to PositionMonitor + Sheets + LocalDB + Dashboard
             if newly_closed:
-                logger.info(f"📄 PaperBroker closed {len(newly_closed)} positions")
+                logger.info(f"📄 Broker closed {len(newly_closed)} position(s)")
                 for broker_pos in newly_closed:
-                    trade_id = broker_pos['trade_id']
+                    broker_tid = broker_pos['trade_id']
 
-                    # Find matching order in PositionMonitor
+                    # Match by prefix — many MT5 brokers truncate the position
+                    # comment to 16 chars even though the docs say 31, so a
+                    # full trade_id like "RT-20260511-124200-000000-1" comes
+                    # back from history as "RT-20260511-1242". Use startswith
+                    # so the original full id still maps to its close.
                     for order in open_orders:
-                        if order['trade_id'] == trade_id:
+                        order_tid = order.get('trade_id', '')
+                        if order_tid == broker_tid or order_tid.startswith(broker_tid):
+                            trade_id = order_tid  # canonical full id for downstream writes
                             # Update order state
                             order['result'] = broker_pos['result']
                             order['close_price'] = broker_pos['close_price']
                             order['close_reason'] = broker_pos['close_reason']
                             order['pnl_usd'] = broker_pos['pnl']
                             order['timestamp_close'] = broker_pos['close_time']
+
+                            # Push close event to api_server so the Dashboard
+                            # moves the order from Open → Closed in real time.
+                            post_bot_event(
+                                "plan_closed",
+                                f"{broker_pos['result']} {broker_pos['close_reason']}",
+                                {
+                                    "plan_id": order.get('plan_id', ''),
+                                    "trade_id": trade_id,
+                                    "result": broker_pos['result'],
+                                    "close_reason": broker_pos['close_reason'],
+                                    "close_price": broker_pos['close_price'],
+                                    "pnl": broker_pos['pnl'],
+                                },
+                            )
+
+                            # Write the close to LocalDB (mirrors the
+                            # check_and_update path; was missing here, so
+                            # SIM/LIVE bots never cleared PENDING in DB).
+                            if self.local_db:
+                                try:
+                                    self.local_db.update_trade_result(
+                                        trade_id=trade_id,
+                                        result=broker_pos['result'],
+                                        pnl=broker_pos['pnl'],
+                                        close_price=broker_pos['close_price'],
+                                        close_time=broker_pos['close_time'],
+                                        close_reason=broker_pos['close_reason'],
+                                    )
+                                except Exception as e:
+                                    logger.error(f"LocalDB update_trade_result failed for {trade_id}: {e}")
+                            if self.local_db and _BOT_ID:
+                                try:
+                                    self.local_db.upsert_bot_state(_BOT_ID, {
+                                        'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
+                                        'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                                        'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                                        'last_candle_time': broker_pos.get('close_time'),
+                                    })
+                                except Exception as e:
+                                    logger.warning(f"upsert_bot_state failed: {e}")
 
                             # Update Sheets
                             if self.sheets_logger:

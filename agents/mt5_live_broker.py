@@ -337,17 +337,26 @@ class MT5LiveBroker:
         return out
 
     def _query_history_deal(self, ticket: int) -> Optional[dict]:
-        """Look up close info from MT5 history for a given ticket (after position closed)"""
-        # Get deals associated with this position ticket
+        """Look up close info from MT5 history for a given ticket (after position closed).
+
+        Also extracts the original trade_id from the *entry* deal's comment
+        (we write our trade_id there in open_position). This lets the caller
+        sync the close back to the correct row in position_monitor / Sheets /
+        LocalDB, instead of inventing a synthetic 'LIVE-{ticket}' key that
+        nothing else recognizes.
+        """
         deals = mt5.history_deals_get(position=ticket)
         if deals is None or len(deals) == 0:
             return None
-        # Last deal is the close
+        # First deal = entry (carries our trade_id in comment); last = close.
+        entry_deal = deals[0]
         close_deal = deals[-1]
+        entry_comment = str(getattr(entry_deal, "comment", "") or "").strip()
         return {
-            "close_price": float(close_deal.price),
-            "close_time":  datetime.fromtimestamp(close_deal.time).isoformat(),
-            "pnl":         round(float(close_deal.profit), 2),
+            "close_price":   float(close_deal.price),
+            "close_time":    datetime.fromtimestamp(close_deal.time).isoformat(),
+            "pnl":           round(float(close_deal.profit), 2),
+            "entry_comment": entry_comment,
         }
 
     # ------------------------------------------------------------------ trailing SL
@@ -460,11 +469,15 @@ class MT5LiveBroker:
                 logger.warning(f"Cannot find history for closed ticket {ticket}")
                 continue
             pnl = hist["pnl"]
-            # We don't know the exact close_reason from history (could be SL/TP/manual)
-            # Heuristic: compare close_price vs sl/tp (we lost original sl/tp after close)
+            # Prefer the trade_id we wrote into the entry deal's comment; fall
+            # back to a synthetic id only when the comment is empty (e.g. an
+            # order opened outside this bot). Without this, main.py's
+            # `if order['trade_id'] == trade_id` never matches and the close
+            # never syncs to position_monitor / Sheets / LocalDB.
+            trade_id = hist.get("entry_comment") or f"LIVE-{ticket}"
             pos_dict = {
                 "ticket":       ticket,
-                "trade_id":     f"LIVE-{ticket}",
+                "trade_id":     trade_id,
                 "close_price":  hist["close_price"],
                 "close_time":   hist["close_time"],
                 "pnl":          pnl,
