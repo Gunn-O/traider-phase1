@@ -1,195 +1,372 @@
+import { useEffect, useMemo, useState } from 'react'
 import './Dashboard.css'
-import MT5LivePanel from '../components/MT5LivePanel'
 
-export default function Dashboard({ botState, selection }) {
+export default function Dashboard({ bots, onStop }) {
+  const [filterBotId, setFilterBotId] = useState('') // '' = all bots
+
+  const visibleBots = useMemo(
+    () => filterBotId ? bots.filter(b => b.bot_id === filterBotId) : bots,
+    [bots, filterBotId]
+  )
+
+  // Aggregate signal events across the visible bots, newest first
+  const signalEvents = useMemo(() => {
+    const all = []
+    for (const b of visibleBots) {
+      for (const e of (b.events || [])) {
+        if (e.type === 'signal_detected' || e.type === 'signal_skipped') {
+          all.push({ ...e, bot_id: b.bot_id, tf: b.tf })
+        }
+      }
+    }
+    return all.sort((a, b) => (b.ts || '').localeCompare(a.ts || '')).slice(0, 30)
+  }, [visibleBots])
+
+  const openOrders = useMemo(() => {
+    const all = []
+    for (const b of visibleBots) {
+      for (const o of (b.open_orders || [])) {
+        all.push({ ...o, bot_id: b.bot_id, tf: b.tf })
+      }
+    }
+    return all
+  }, [visibleBots])
+
+  const closedOrders = useMemo(() => {
+    const all = []
+    for (const b of visibleBots) {
+      for (const o of (b.closed_orders || [])) {
+        all.push({ ...o, bot_id: b.bot_id, tf: b.tf })
+      }
+    }
+    return all.slice(-30).reverse()
+  }, [visibleBots])
+
   return (
     <div className="dashboard">
-      <div className="dashboard-grid">
-        {/* MT5 Live Data — uses TopBar selection so candles match what user picked */}
-        <MT5LivePanel
-          symbol={selection?.symbol || botState?.symbol || 'XAUUSDc'}
-          timeframe={selection?.timeframe || botState?.trading_tf || 'M5'}
-        />
+      <RunningBotsTable
+        bots={bots}
+        onStop={onStop}
+        filterBotId={filterBotId}
+        onFilterChange={setFilterBotId}
+      />
 
-        {/* Portfolio Stats */}
-        <div className="card stats-card">
-          <h2 className="card-title">Portfolio</h2>
-          <div className="stats-grid">
-            <div className="stat-item">
-              <div className="stat-label">Balance</div>
-              <div className="stat-value text-mono">${botState?.balance?.toFixed(2) || '0.00'}</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Daily P/L</div>
-              <div className="stat-value text-mono">${botState?.daily_pnl?.toFixed(2) || '0.00'}</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Total P/L</div>
-              <div className={`stat-value text-mono ${botState.portfolio?.total_pnl >= 0 ? 'profit' : 'loss'}`}>
-                {botState.portfolio?.total_pnl >= 0 ? '+' : ''}${botState.portfolio?.total_pnl?.toFixed(2) || '0.00'}
-              </div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">P/L %</div>
-              <div className={`stat-value text-mono ${botState.portfolio?.total_pnl_pct >= 0 ? 'profit' : 'loss'}`}>
-                {botState.portfolio?.total_pnl_pct >= 0 ? '+' : ''}{botState.portfolio?.total_pnl_pct?.toFixed(2) || '0.00'}%
-              </div>
-            </div>
-          </div>
-        </div>
+      <div className="dashboard-row">
+        <LiveSnapshotPanel bots={visibleBots} />
+      </div>
 
-        {/* Risk Metrics */}
-        <div className="card stats-card">
-          <h2 className="card-title">Risk Metrics</h2>
-          <div className="stats-grid">
-            <div className="stat-item">
-              <div className="stat-label">Open Positions</div>
-              <div className="stat-value text-mono">{botState.portfolio?.open_positions || 0}</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Consecutive Loss</div>
-              <div className="stat-value text-mono">{botState.portfolio?.consecutive_loss || 0}</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Active Plan</div>
-              <div className="stat-value text-mono">
-                {botState.portfolio?.active_plan_id ? 'Yes' : 'No'}
-              </div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Max DD</div>
-              <div className="stat-value text-mono loss">{botState.max_dd?.toFixed(2) || '0.00'}%</div>
-            </div>
-          </div>
-        </div>
+      <div className="dashboard-row">
+        <SignalEventsPanel events={signalEvents} />
+      </div>
 
-        {/* Performance */}
-        <div className="card stats-card">
-          <h2 className="card-title">Performance</h2>
-          <div className="stats-grid">
-            <div className="stat-item">
-              <div className="stat-label">Total Trades</div>
-              <div className="stat-value text-mono">{botState.total_trades || 0}</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Win Rate</div>
-              <div className="stat-value text-mono profit">{botState.win_rate?.toFixed(1) || '0.0'}%</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Avg R:R</div>
-              <div className="stat-value text-mono">{botState.avg_rr?.toFixed(2) || '0.00'}</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-label">Sharpe</div>
-              <div className="stat-value text-mono">{botState.sharpe?.toFixed(2) || '0.00'}</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Market State */}
-        <div className="card world-botState-card">
-          <h2 className="card-title">Market State</h2>
-          <div className="world-botState-grid">
-            <div className="world-botState-item">
-              <span className="ws-label">Trend:</span>
-              <span className={`ws-value badge ${getTrendClass(botState.world_botState?.trend)}`}>
-                {botState.world_botState?.trend || 'unclear'}
-              </span>
-            </div>
-            <div className="world-botState-item">
-              <span className="ws-label">Quality:</span>
-              <span className="ws-value text-mono">
-                {((botState.world_botState?.chart_quality || 0) * 100).toFixed(0)}%
-              </span>
-            </div>
-            <div className="world-botState-item">
-              <span className="ws-label">Twin Candle:</span>
-              <span className={`ws-value badge ${botState.world_botState?.twin_candle ? 'success' : 'error'}`}>
-                {botState.world_botState?.twin_candle ? 'Yes' : 'No'}
-              </span>
-            </div>
-            <div className="world-botState-item">
-              <span className="ws-label">Breakout Box:</span>
-              <span className={`ws-value badge ${botState.world_botState?.breakout_box ? 'success' : 'error'}`}>
-                {botState.world_botState?.breakout_box ? 'Yes' : 'No'}
-              </span>
-            </div>
-            <div className="world-botState-item">
-              <span className="ws-label">Mountain:</span>
-              <span className={`ws-value badge ${botState.world_botState?.mountain_detected ? 'success' : 'error'}`}>
-                {botState.world_botState?.mountain_detected ? 'Yes' : 'No'}
-              </span>
-            </div>
-            <div className="world-botState-item">
-              <span className="ws-label">Technique:</span>
-              <span className="ws-value text-mono">
-                {botState.world_botState?.technique_candidate || 'None'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Recent Trades */}
-        <div className="card recent-trades-card">
-          <h2 className="card-title">Recent Trades</h2>
-          <div className="trades-list">
-            {botState.recent_trades && botState.recent_trades.length > 0 ? (
-              botState.recent_trades.slice(0, 5).map((trade, index) => (
-                <div key={index} className="trade-item">
-                  <div className="trade-header">
-                    <span className={`trade-type badge ${trade.type === 'BUY' ? 'success' : 'warning'}`}>
-                      {trade.type}
-                    </span>
-                    <span className="trade-time text-muted text-mono">{trade.time}</span>
-                  </div>
-                  <div className="trade-details">
-                    <span className="text-mono">Entry: ${trade.entry?.toFixed(2)}</span>
-                    <span className="text-mono">SL: ${trade.sl?.toFixed(2)}</span>
-                    <span className="text-mono">TP: ${trade.tp?.toFixed(2)}</span>
-                    <span className={`text-mono ${trade.pnl >= 0 ? 'profit' : 'loss'}`}>
-                      P/L: {trade.pnl >= 0 ? '+' : ''}${trade.pnl?.toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="empty-botState text-muted">No trades yet</div>
-            )}
-          </div>
-        </div>
-
-        {/* Last Decision */}
-        {botState.last_decision && (
-          <div className="card last-decision-card">
-            <h2 className="card-title">Last Decision</h2>
-            <div className="decision-content">
-              <div className="decision-header">
-                <span className={`decision-action badge ${botState.last_decision.action === 'SKIP' ? 'error' : 'success'}`}>
-                  {botState.last_decision.action}
-                </span>
-                <span className="decision-confidence text-mono">
-                  {(botState.last_decision.confidence * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="decision-reason text-muted">
-                {botState.last_decision.reason}
-              </div>
-              {botState.last_decision.technique && (
-                <div className="decision-technique">
-                  <span className="badge info">{botState.last_decision.technique}</span>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+      <div className="dashboard-row dashboard-row-split">
+        <OpenOrdersPanel orders={openOrders} />
+        <ClosedOrdersPanel orders={closedOrders} />
       </div>
     </div>
   )
 }
 
-function getTrendClass(trend) {
-  if (trend === 'uptrend') return 'success'
-  if (trend === 'downtrend') return 'warning'
-  if (trend === 'mountain') return 'info'
-  return 'error'
+function RunningBotsTable({ bots, onStop, filterBotId, onFilterChange }) {
+  const [busyId, setBusyId] = useState('')
+
+  const handleStop = async (botId) => {
+    if (!confirm(`Stop bot ${botId}?`)) return
+    setBusyId(botId)
+    try { await onStop(botId) } finally { setBusyId('') }
+  }
+
+  const sorted = [...bots].sort((a, b) => {
+    if (a.status !== b.status) return a.status === 'running' ? -1 : 1
+    return (a.bot_id || '').localeCompare(b.bot_id || '')
+  })
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <h2 className="card-title">Bots</h2>
+        {bots.length > 0 && (
+          <div className="filter-pills">
+            <button
+              className={`filter-pill ${filterBotId === '' ? 'active' : ''}`}
+              onClick={() => onFilterChange('')}
+            >
+              All ({bots.length})
+            </button>
+            {bots.map(b => (
+              <button
+                key={b.bot_id}
+                className={`filter-pill ${filterBotId === b.bot_id ? 'active' : ''}`}
+                onClick={() => onFilterChange(b.bot_id)}
+              >
+                {b.bot_id}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {bots.length === 0 ? (
+        <div className="empty-state">No bots — pick a TF and click + Add Bot</div>
+      ) : (
+        <table className="bots-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>TF</th>
+              <th>Mode</th>
+              <th>Symbol</th>
+              <th>Status</th>
+              <th>PID</th>
+              <th>Started</th>
+              <th>Last cycle</th>
+              <th>Cycles</th>
+              <th>Open</th>
+              <th>Closed</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map(b => (
+              <tr key={b.bot_id} className={`bot-row ${b.status}`}>
+                <td className="text-mono">{b.bot_id}</td>
+                <td>{b.tf}</td>
+                <td>{b.mode}</td>
+                <td>{b.symbol}</td>
+                <td>
+                  <span className={`badge ${b.status === 'running' ? 'success' : 'error'}`}>
+                    {b.status}
+                  </span>
+                </td>
+                <td className="text-mono text-muted">{b.bot_pid ?? '—'}</td>
+                <td className="text-mono text-muted">{fmtTime(b.started_at)}</td>
+                <td className="text-mono"><AgoBadge ts={b.heartbeat?.ts || b.last_updated} /></td>
+                <td className="text-mono">{b.cycle_count ?? 0}</td>
+                <td className="text-mono">{(b.open_orders || []).length}</td>
+                <td className="text-mono">{(b.closed_orders || []).length}</td>
+                <td>
+                  {b.status === 'running' && (
+                    <button
+                      className="btn-tiny btn-tiny-stop"
+                      onClick={() => handleStop(b.bot_id)}
+                      disabled={busyId === b.bot_id}
+                    >
+                      {busyId === b.bot_id ? '…' : 'Stop'}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+function LiveSnapshotPanel({ bots }) {
+  // Re-render every 2s so AgoBadge / "X seconds ago" stays fresh even when no
+  // new heartbeat arrived. Cheap — just a state bump.
+  const [, setNowTick] = useState(0)
+  useTick(() => setNowTick(n => n + 1), 2000)
+
+  const runningBots = bots.filter(b => b.status === 'running')
+  return (
+    <div className="card">
+      <h2 className="card-title">
+        Live Snapshot {runningBots.length > 0 && <span className="muted-count">({runningBots.length})</span>}
+      </h2>
+      {runningBots.length === 0 ? (
+        <div className="empty-state">No running bots</div>
+      ) : (
+        <table className="orders-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Last cycle</th>
+              <th>Candle</th>
+              <th>Close</th>
+              <th>R55 (pip)</th>
+              <th>Session</th>
+              <th>State</th>
+              <th>Active plan</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runningBots.map(b => {
+              const hb = b.heartbeat || {}
+              const state = hb.signal_pattern
+                ? `${hb.signal_pattern} ${hb.signal_direction || ''}${hb.signal_rr ? ` R:R=${fmt(hb.signal_rr, 2)}` : ''}`
+                : (hb.skip_reason || hb.chart_type || '—')
+              const stateClass = hb.signal_pattern ? 'success' : (hb.chart_type === 'unclear' ? 'text-muted' : 'warning')
+              return (
+                <tr key={b.bot_id}>
+                  <td className="text-mono">{b.bot_id}</td>
+                  <td><AgoBadge ts={hb.ts || b.last_updated} /></td>
+                  <td className="text-mono text-muted">{fmtTime(hb.candle_time)}</td>
+                  <td className="text-mono">{fmt(hb.candle_close)}</td>
+                  <td className="text-mono">{fmt(hb.R55_pip, 0)}</td>
+                  <td className="text-mono text-muted">{hb.session || '—'}</td>
+                  <td className={stateClass}>{state}</td>
+                  <td className="text-mono text-muted">{shortPlanId(hb.active_plan) || '—'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+function AgoBadge({ ts }) {
+  if (!ts) return <span className="text-muted">—</span>
+  const now = Date.now()
+  const then = new Date(ts).getTime()
+  if (!Number.isFinite(then)) return <span className="text-muted">—</span>
+  const sec = Math.max(0, Math.floor((now - then) / 1000))
+  let label, cls
+  if (sec < 5) { label = 'just now'; cls = 'profit' }
+  else if (sec < 90) { label = `${sec}s ago`; cls = 'profit' }
+  else if (sec < 300) { label = `${Math.floor(sec / 60)}m ago`; cls = 'warning' }
+  else { label = `${Math.floor(sec / 60)}m ago`; cls = 'loss' }
+  return <span className={cls}>{label}</span>
+}
+
+// Stable interval hook so panels can self-tick without props
+function useTick(callback, ms) {
+  useEffect(() => {
+    const t = setInterval(callback, ms)
+    return () => clearInterval(t)
+  }, [ms, callback])
+}
+
+function SignalEventsPanel({ events }) {
+  return (
+    <div className="card">
+      <h2 className="card-title">Signal Events {events.length > 0 && <span className="muted-count">({events.length})</span>}</h2>
+      {events.length === 0 ? (
+        <div className="empty-state">No signals yet — bots will report SIGNAL/SKIP here</div>
+      ) : (
+        <div className="event-list">
+          {events.map((e, i) => (
+            <div key={i} className={`event-item event-${e.type}`}>
+              <span className="event-time text-mono text-muted">{fmtTime(e.ts)}</span>
+              <span className="event-bot text-mono">{e.bot_id}</span>
+              <span className={`event-type badge ${e.type === 'signal_detected' ? 'success' : 'warning'}`}>
+                {e.type === 'signal_detected' ? 'SIGNAL' : 'SKIP'}
+              </span>
+              <span className="event-msg">{e.msg}</span>
+              {e.type === 'signal_detected' && e.data && (
+                <span className="event-extra text-mono text-muted">
+                  {e.data.direction} entry={fmt(e.data.entry)} sl={fmt(e.data.sl)} tp={fmt(e.data.tp)} R:R={fmt(e.data.rr, 2)}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpenOrdersPanel({ orders }) {
+  return (
+    <div className="card">
+      <h2 className="card-title">Open Positions {orders.length > 0 && <span className="muted-count">({orders.length})</span>}</h2>
+      {orders.length === 0 ? (
+        <div className="empty-state">No open positions</div>
+      ) : (
+        <table className="orders-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Plan</th>
+              <th>Action</th>
+              <th>Entry</th>
+              <th>SL</th>
+              <th>TP</th>
+              <th>Lot</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((o, i) => (
+              <tr key={i}>
+                <td className="text-mono text-muted">{o.bot_id}</td>
+                <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
+                <td>
+                  <span className={`badge ${o.action === 'BUY' ? 'success' : 'warning'}`}>{o.action}</span>
+                </td>
+                <td className="text-mono">{fmt(o.entry)}</td>
+                <td className="text-mono">{fmt(o.sl)}</td>
+                <td className="text-mono">{fmt(o.tp)}</td>
+                <td className="text-mono">{o.lot}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+function ClosedOrdersPanel({ orders }) {
+  return (
+    <div className="card">
+      <h2 className="card-title">Recently Closed {orders.length > 0 && <span className="muted-count">({orders.length})</span>}</h2>
+      {orders.length === 0 ? (
+        <div className="empty-state">No closed positions yet</div>
+      ) : (
+        <table className="orders-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Plan</th>
+              <th>Result</th>
+              <th>Reason</th>
+              <th>Close</th>
+              <th>P/L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((o, i) => (
+              <tr key={i}>
+                <td className="text-mono text-muted">{o.bot_id}</td>
+                <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
+                <td>
+                  <span className={`badge ${o.result === 'WIN' ? 'success' : 'error'}`}>{o.result}</span>
+                </td>
+                <td className="text-muted">{o.close_reason}</td>
+                <td className="text-mono">{fmt(o.close_price)}</td>
+                <td className={`text-mono ${(o.pnl || 0) >= 0 ? 'profit' : 'loss'}`}>
+                  {(o.pnl || 0) >= 0 ? '+' : ''}{fmt(o.pnl, 2)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+function fmt(v, digits = 2) {
+  if (v === null || v === undefined || v === '') return '—'
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toFixed(digits) : '—'
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch { return iso }
+}
+
+function shortPlanId(id) {
+  if (!id) return '—'
+  // PT-PLAN-20260510-143030-001 → 14:30:30
+  const m = String(id).match(/(\d{2})(\d{2})(\d{2})-?(\d+)?$/)
+  return m ? `${m[1]}:${m[2]}:${m[3]}` : id.slice(-12)
 }

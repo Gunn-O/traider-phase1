@@ -15,15 +15,107 @@ Target: Windows local machine (localhost only)
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
 import threading
 import sys
+from collections import deque
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
+
+# ─── Multi-bot session persistence ───────────────────────────────────
+# Array of {tf, symbol, mode, data_source} for every bot currently running.
+# Updated whenever a bot starts/stops; read by launcher on boot to auto-resume.
+SESSIONS_FILE = Path(__file__).resolve().parent / "last_sessions.json"
+
+
+def _save_sessions() -> None:
+    """Persist configs of currently-running bots so launcher can resume after reboot."""
+    sessions = [
+        {"tf": b["tf"], "symbol": b["symbol"], "mode": b["mode"], "data_source": b["data_source"]}
+        for b in bots.values() if b["status"] == "running"
+    ]
+    try:
+        if sessions:
+            SESSIONS_FILE.write_text(json.dumps(sessions))
+        else:
+            SESSIONS_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to write last_sessions.json: {e}")
+
+
+# ─── Multi-bot state ─────────────────────────────────────────────────
+# bot_id format: "{tf}-{symbol}-{mode}" — uniquely identifies a config.
+# Two bots with the same id can't coexist (start would 400).
+bots: Dict[str, dict] = {}
+_bot_procs: Dict[str, subprocess.Popen] = {}
+
+
+def _make_bot_id(tf: str, symbol: str, mode: str) -> str:
+    return f"{tf}-{symbol}-{mode}"
+
+
+def _new_bot_state(req: "StartRequest", pid: int) -> dict:
+    now = datetime.now().isoformat()
+    return {
+        "bot_id": _make_bot_id(req.tf, req.symbol, req.mode),
+        "tf": req.tf,
+        "symbol": req.symbol,
+        "mode": req.mode,
+        "data_source": req.data_source,
+        "status": "running",
+        "bot_pid": pid,
+        "started_at": now,
+        "last_updated": now,
+        "open_orders": [],     # populated via POST /api/bots/{id}/event
+        "closed_orders": [],   # ring buffer of last 50 closed orders
+        "events": deque(maxlen=200),
+        "balance": float(os.getenv("ACCOUNT_BALANCE", "1000")),
+        # Per-cycle snapshot pushed by main.py via POST /api/bots/{id}/heartbeat.
+        # Lives outside `events` so a 60s cycle tick doesn't flood the panel.
+        # Always overwrites the previous snapshot — only the latest tick matters.
+        "heartbeat": {},
+        "cycle_count": 0,
+    }
+
+
+def _serialize_bot(b: dict) -> dict:
+    """Convert deque → list so JSON encoder accepts it."""
+    return {**b, "events": list(b["events"])}
+
+
+def _add_event(bot_id: str, ev_type: str, msg: str = "", data: Optional[dict] = None) -> None:
+    if bot_id not in bots:
+        return
+    bots[bot_id]["events"].append({
+        "ts": datetime.now().isoformat(),
+        "type": ev_type,
+        "msg": msg,
+        "data": data or {},
+    })
+    bots[bot_id]["last_updated"] = datetime.now().isoformat()
+
+
+def _sweep_dead() -> List[str]:
+    """Detect bot subprocesses that exited; flip their status to 'stopped'.
+    Returns the list of bot_ids that just transitioned."""
+    transitioned = []
+    for bot_id, proc in list(_bot_procs.items()):
+        rc = proc.poll()
+        if rc is not None:
+            if bot_id in bots and bots[bot_id]["status"] == "running":
+                bots[bot_id]["status"] = "stopped"
+                bots[bot_id]["bot_pid"] = None
+                _add_event(bot_id, "subprocess_died", f"exit code {rc}", {"rc": rc})
+                transitioned.append(bot_id)
+            _bot_procs.pop(bot_id, None)
+    if transitioned:
+        _save_sessions()
+    return transitioned
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,10 +145,6 @@ _backtest_state = {
     "error": None,
     "pid": None,
 }
-
-# ── Live trading subprocess handle (started via /api/start) ──────────────
-# main.py spawned with --simulate + --mode/--symbol/--tf flags
-_bot_proc: Optional[subprocess.Popen] = None
 
 def _run_backtest_thread(start: str, end: str, timeframe: str = "M5"):
     """รัน backtest ใน background thread"""
@@ -248,114 +336,153 @@ async def serve_dashboard():
     return FileResponse(dashboard_path)
 
 
+# ─── Multi-bot endpoints ────────────────────────────────────────────
+
+class BotEvent(BaseModel):
+    type: str
+    msg: str = ""
+    data: dict = {}
+
+
+@app.get("/api/bots")
+async def list_bots():
+    """List all bots (running + recently stopped) with their state and event count."""
+    _sweep_dead()
+    return {
+        "bots": [_serialize_bot(b) for b in bots.values()],
+        "count": len(bots),
+        "running": sum(1 for b in bots.values() if b["status"] == "running"),
+    }
+
+
+@app.get("/api/bots/{bot_id}")
+async def get_bot(bot_id: str):
+    _sweep_dead()
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    return _serialize_bot(bots[bot_id])
+
+
+@app.post("/api/bots/{bot_id}/event")
+async def post_bot_event(bot_id: str, event: BotEvent):
+    """Bot subprocess (main.py) POSTs significant events here so the UI sees them.
+    Some types also mutate bot state (open_orders, closed_orders)."""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+
+    _add_event(bot_id, event.type, event.msg, event.data)
+
+    if event.type == "plan_opened":
+        bots[bot_id]["open_orders"].append(event.data)
+    elif event.type == "plan_closed":
+        plan_id = event.data.get("plan_id")
+        bots[bot_id]["open_orders"] = [
+            o for o in bots[bot_id]["open_orders"] if o.get("plan_id") != plan_id
+        ]
+        closed = bots[bot_id].setdefault("closed_orders", [])
+        closed.append(event.data)
+        bots[bot_id]["closed_orders"] = closed[-50:]
+
+    await manager.broadcast({
+        "event": "bot_event",
+        "bot_id": bot_id,
+        "data": {"ts": datetime.now().isoformat(), **event.dict()},
+    })
+    return {"ok": True}
+
+
+@app.post("/api/bots/{bot_id}/heartbeat")
+async def post_bot_heartbeat(bot_id: str, request: Request):
+    """Bot subprocess (main.py) POSTs a per-cycle snapshot here so the UI can
+    show 'system is alive' updates (last candle, current price, R55, session,
+    skip reason). Stored in bots[bot_id]['heartbeat'] — overwrites previous;
+    NOT appended to the events deque (would flood it at 60s cadence)."""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    body = await request.json()
+    now_iso = datetime.now().isoformat()
+    bots[bot_id]["heartbeat"] = {**body, "ts": now_iso}
+    bots[bot_id]["cycle_count"] = bots[bot_id].get("cycle_count", 0) + 1
+    bots[bot_id]["last_updated"] = now_iso
+    await manager.broadcast({
+        "event": "bot_heartbeat",
+        "bot_id": bot_id,
+        "data": bots[bot_id]["heartbeat"],
+        "cycle_count": bots[bot_id]["cycle_count"],
+    })
+    return {"ok": True}
+
+
+@app.get("/api/bots/{bot_id}/events")
+async def get_bot_events(bot_id: str, limit: int = 50, type: Optional[str] = None):
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    events = list(bots[bot_id]["events"])
+    if type:
+        events = [e for e in events if e["type"] == type]
+    return {"events": events[-limit:], "total": len(bots[bot_id]["events"])}
+
+
 @app.get("/api/status")
 async def get_status():
-    """Get current bot status — also verifies subprocess is still alive."""
-    global _bot_proc
-    # If subprocess died unexpectedly, reflect in state
-    if bot_state["status"] == "running" and _bot_proc is not None:
-        rc = _bot_proc.poll()
-        if rc is not None:  # process exited
-            logger.warning(f"Bot subprocess died (exit code {rc}) — resetting state to stopped")
-            bot_state["status"] = "stopped"
-            bot_state["bot_pid"] = None
-            bot_state["logs"].append(
-                f"{datetime.now().strftime('%H:%M:%S')} - Bot subprocess died (exit {rc})"
-            )
-            bot_state["logs"] = bot_state["logs"][-50:]
-            _bot_proc = None
+    """Legacy aggregate status — mirrors the first running bot for backward compat
+    with non-Dashboard pages. New code should use /api/bots instead."""
+    _sweep_dead()
+    running = [b for b in bots.values() if b["status"] == "running"]
+    bot_state["status"] = "running" if running else "stopped"
+    if running:
+        first = running[0]
+        bot_state["mode"] = first["mode"]
+        bot_state["symbol"] = first["symbol"]
+        bot_state["trading_tf"] = first["tf"]
+        bot_state["data_source_mode"] = first["data_source"]
+        bot_state["bot_pid"] = first["bot_pid"]
+        bot_state["open_orders"] = first["open_orders"]
+    else:
+        bot_state["bot_pid"] = None
+        bot_state["open_orders"] = []
     bot_state["last_updated"] = datetime.now().isoformat()
     return bot_state
 
 
 @app.post("/api/start")
 async def start_bot(request: StartRequest):
-    """
-    Start bot with selected timeframe and symbol
-
-    Args:
-        request: {"tf": "M5", "symbol": "XAUUSDc"}
-
-    Returns:
-        {"status": "started", "tf": "M5", "symbol": "XAUUSDc"}
-    """
-    if bot_state["status"] == "running":
-        raise HTTPException(status_code=400, detail="Bot already running")
-
-    # Validate TF
+    """Start a bot for the given (tf, symbol, mode). Multiple bots may run concurrently
+    as long as their (tf, symbol, mode) tuple differs. Returns the bot_id."""
     valid_tfs = ["M1", "M5", "M15", "M30", "H1", "H4"]
+    valid_symbols = ["XAUUSDc", "XAUUSDm", "XAUUSD"]
+    valid_modes = ["paper", "micro", "live"]
+    valid_data_sources = ["auto", "mt5", "yf", "tv"]
     if request.tf not in valid_tfs:
         raise HTTPException(status_code=400, detail=f"Invalid TF. Must be one of {valid_tfs}")
-
-    # Validate Symbol
-    valid_symbols = ["XAUUSDc", "XAUUSDm", "XAUUSD"]
     if request.symbol not in valid_symbols:
         raise HTTPException(status_code=400, detail=f"Invalid symbol. Must be one of {valid_symbols}")
-
-    # Validate Mode
-    valid_modes = ["paper", "micro", "live"]
     if request.mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of {valid_modes}")
-
-    # Validate Data Source
-    valid_data_sources = ["auto", "mt5", "yf", "tv"]
     if request.data_source not in valid_data_sources:
         raise HTTPException(status_code=400, detail=f"Invalid data_source. Must be one of {valid_data_sources}")
 
-    # Use symbol as selected by user (no auto-override)
-    actual_symbol = request.symbol
-
-    # Update state
-    bot_state["status"] = "running"
-    bot_state["mode"] = request.mode
-    bot_state["symbol"] = actual_symbol
-    bot_state["trading_tf"] = request.tf
-    bot_state["data_source_mode"] = request.data_source
-    # Reflect requested data source immediately — subprocess runs in a separate process
-    # and can't write back to api_server's bot_state. Map request value → display label.
-    ds_actual_map = {"mt5": "MT5", "yf": "yfinance", "tv": "TradingView", "auto": "Auto"}
-    bot_state["data_source_actual"] = ds_actual_map.get(request.data_source, request.data_source)
-
-    mode_labels = {
-        "paper": "Paper Trade (Simulate)",
-        "micro": "Cent Account",
-        "live": "Real Account"
-    }
-    mode_label = mode_labels.get(request.mode, request.mode)
-
-    bot_state["logs"].append(
-        f"{datetime.now().strftime('%H:%M:%S')} - Bot started "
-        f"(Mode: {mode_label}, Symbol: {actual_symbol}, TF: {request.tf})"
-    )
-    bot_state["logs"] = bot_state["logs"][-50:]  # Keep last 50
-
-    logger.info(f"Bot started with Mode: {request.mode}, Symbol: {actual_symbol}, TF: {request.tf}")
-
-    # ── Spawn main.py subprocess (actual trading loop) ──────────────
-    global _bot_proc
-    if _bot_proc is not None and _bot_proc.poll() is None:
-        # Old subprocess still alive — kill before spawning new one
-        try:
-            _bot_proc.terminate()
-            _bot_proc.wait(timeout=3)
-        except Exception:
-            try: _bot_proc.kill()
-            except Exception: pass
+    _sweep_dead()
+    bot_id = _make_bot_id(request.tf, request.symbol, request.mode)
+    if bot_id in bots and bots[bot_id]["status"] == "running":
+        raise HTTPException(status_code=400, detail=f"Bot {bot_id} already running")
 
     project_root = Path(__file__).parent
     cmd = [
         sys.executable, str(project_root / "main.py"),
         "--simulate",
         "--mode", request.mode,
-        "--symbol", actual_symbol,
+        "--symbol", request.symbol,
         "--tf", request.tf,
         "--data-source", request.data_source,
-        "--no-confirm",  # caller already confirmed via UI; subprocess has no stdin
+        "--no-confirm",
         "--decision-engine", "python",
     ]
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
-    env["BACKTEST_TIMEFRAME"] = request.tf  # signal_engine reads this
+    env["BACKTEST_TIMEFRAME"] = request.tf
+    env["TRAIDER_BOT_ID"] = bot_id            # subprocess uses this to label events
+    env["TRAIDER_API_URL"] = f"http://127.0.0.1:8080"
 
     creationflags = 0
     startupinfo = None
@@ -363,118 +490,116 @@ async def start_bot(request: StartRequest):
         creationflags = subprocess.CREATE_NO_WINDOW
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0  # SW_HIDE
+        startupinfo.wShowWindow = 0
 
     try:
-        _bot_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd, cwd=str(project_root), env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=creationflags, startupinfo=startupinfo,
         )
-        logger.info(f"Bot subprocess spawned: pid={_bot_proc.pid}")
-        bot_state["bot_pid"] = _bot_proc.pid
     except Exception as e:
-        logger.error(f"Failed to spawn bot subprocess: {e}")
-        bot_state["status"] = "stopped"
+        logger.error(f"Failed to spawn bot subprocess for {bot_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start bot: {e}")
 
-    # Broadcast to WebSocket clients
+    bots[bot_id] = _new_bot_state(request, proc.pid)
+    _bot_procs[bot_id] = proc
+    _add_event(bot_id, "started", f"Bot {bot_id} started (pid={proc.pid})")
+    _save_sessions()
+    logger.info(f"Bot {bot_id} subprocess spawned: pid={proc.pid}")
+
     await manager.broadcast({
         "event": "bot_started",
-        "mode": request.mode,
-        "tf": request.tf,
-        "symbol": actual_symbol
+        "bot_id": bot_id,
+        "bot": _serialize_bot(bots[bot_id]),
     })
 
     return {
+        "bot_id": bot_id,
         "status": "started",
         "mode": request.mode,
         "tf": request.tf,
-        "symbol": actual_symbol,
-        "pid": _bot_proc.pid,
+        "symbol": request.symbol,
+        "pid": proc.pid,
     }
 
 
-@app.post("/api/stop")
-async def stop_bot(request: Optional[StopRequest] = None):
-    """
-    Stop bot gracefully (wait for current cycle to finish)
+def _kill_bot_proc(bot_id: str) -> Optional[int]:
+    """Kill the subprocess for one bot (taskkill /F /T on Windows). Returns the killed pid."""
+    proc = _bot_procs.get(bot_id)
+    if proc is None or proc.poll() is not None:
+        return None
+    pid = proc.pid
+    try:
+        if sys.platform == 'win32':
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(pid)],
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            proc.terminate()
+            try: proc.wait(timeout=5)
+            except Exception: proc.kill()
+        logger.info(f"Bot {bot_id} subprocess killed: pid={pid}")
+    except Exception as e:
+        logger.error(f"Failed to kill bot {bot_id} pid={pid}: {e}")
+    return pid
 
-    Returns:
-        {"status": "stopped"}
-    """
-    if bot_state["status"] != "running":
-        raise HTTPException(status_code=400, detail="Bot not running")
 
+async def _stop_one(bot_id: str, reason: str) -> dict:
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    killed_pid = _kill_bot_proc(bot_id)
+    bots[bot_id]["status"] = "stopped"
+    bots[bot_id]["bot_pid"] = None
+    _bot_procs.pop(bot_id, None)
+    _add_event(bot_id, "stopped", reason)
+    _save_sessions()
+    await manager.broadcast({"event": "bot_stopped", "bot_id": bot_id, "reason": reason})
+    return {"bot_id": bot_id, "status": "stopped", "reason": reason, "killed_pid": killed_pid}
+
+
+@app.post("/api/stop/{bot_id}")
+async def stop_bot_by_id(bot_id: str, request: Optional[StopRequest] = None):
+    """Stop one specific bot by id."""
+    _sweep_dead()
     reason = request.reason if request else "User requested stop"
+    return await _stop_one(bot_id, reason)
 
-    # Kill the bot subprocess if alive — uses taskkill /F /T on Windows to clean up tree
-    global _bot_proc
-    killed_pid = None
-    if _bot_proc is not None and _bot_proc.poll() is None:
-        killed_pid = _bot_proc.pid
-        try:
-            if sys.platform == 'win32':
-                subprocess.run(
-                    ['taskkill', '/F', '/T', '/PID', str(_bot_proc.pid)],
-                    capture_output=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                _bot_proc.terminate()
-                try: _bot_proc.wait(timeout=5)
-                except Exception: _bot_proc.kill()
-            logger.info(f"Bot subprocess killed: pid={killed_pid}")
-        except Exception as e:
-            logger.error(f"Failed to kill bot subprocess pid={killed_pid}: {e}")
-    _bot_proc = None
 
-    # Update state
-    bot_state["status"] = "stopped"
-    bot_state["bot_pid"] = None
-    bot_state["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - Bot stopped: {reason}")
-    bot_state["logs"] = bot_state["logs"][-50:]
-
-    logger.info(f"Bot stopped: {reason}")
-
-    # Broadcast to WebSocket clients
-    await manager.broadcast({"event": "bot_stopped", "reason": reason})
-
-    return {"status": "stopped", "reason": reason, "killed_pid": killed_pid}
+@app.post("/api/stop")
+async def stop_all_bots(request: Optional[StopRequest] = None):
+    """Stop every running bot. Used by global Stop All button + legacy callers."""
+    _sweep_dead()
+    reason = request.reason if request else "User requested stop"
+    stopped = []
+    for bot_id in list(bots.keys()):
+        if bots[bot_id]["status"] == "running":
+            stopped.append((await _stop_one(bot_id, reason))["bot_id"])
+    return {"status": "stopped", "stopped": stopped, "count": len(stopped)}
 
 
 @app.post("/api/emergency-stop")
 async def emergency_stop():
-    """
-    Emergency stop — stop bot immediately + close all orders
-
-    WARNING: This forcefully stops the bot and attempts to close all positions
-
-    Returns:
-        {"status": "emergency_stopped", "orders_closed": int}
-    """
-    # Update state
-    bot_state["status"] = "stopped"
-    bot_state["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - 🚨 EMERGENCY STOP")
-    bot_state["logs"] = bot_state["logs"][-50:]
-
-    # Count orders that were open
-    orders_count = len(bot_state["open_orders"])
-
-    # Clear open orders (in real implementation, this should trigger actual position close)
-    # For now, just clear the state
-    bot_state["open_orders"] = []
-    bot_state["active_plan_id"] = ""
-
-    logger.warning(f"Emergency stop triggered! {orders_count} orders cleared")
-
-    # Broadcast to WebSocket clients
-    await manager.broadcast({
-        "event": "emergency_stop",
-        "orders_closed": orders_count
-    })
-
-    return {"status": "emergency_stopped", "orders_closed": orders_count}
+    """Stop every bot immediately and clear open positions across all of them."""
+    _sweep_dead()
+    orders_count = 0
+    stopped_ids = []
+    for bot_id in list(bots.keys()):
+        if bots[bot_id]["status"] == "running":
+            orders_count += len(bots[bot_id].get("open_orders", []))
+            _kill_bot_proc(bot_id)
+            bots[bot_id]["status"] = "stopped"
+            bots[bot_id]["bot_pid"] = None
+            bots[bot_id]["open_orders"] = []
+            _bot_procs.pop(bot_id, None)
+            _add_event(bot_id, "emergency_stopped", "🚨 EMERGENCY STOP")
+            stopped_ids.append(bot_id)
+    _save_sessions()
+    logger.warning(f"Emergency stop: {len(stopped_ids)} bots, {orders_count} orders cleared")
+    await manager.broadcast({"event": "emergency_stop", "stopped": stopped_ids, "orders_closed": orders_count})
+    return {"status": "emergency_stopped", "stopped": stopped_ids, "orders_closed": orders_count}
 
 
 @app.get("/api/history")
@@ -641,30 +766,25 @@ async def get_agent_costs():
     return summary
 
 
-@app.get("/api/candles")
-async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
-    """
-    Get latest OHLC candles for chart — fetches directly from MT5 Desktop via Python IPC.
+# ─── Shared candle cache ─────────────────────────────────────────────
+# Two scenarios this prevents:
+#   1. Multiple bots fetching the same (tf, symbol) within seconds — they hit
+#      the cache instead of pounding MT5 / yfinance independently.
+#   2. UI polling /api/candles every few seconds — same cache path.
+# TTL is keyed to TF size so M1 expires fast (10s) and H4 expires slowly (300s).
+_candles_cache: Dict[tuple, dict] = {}  # (source, tf, symbol, limit) -> {"ts": float, "data": list}
 
-    Works whether or not main.py is running (api_server has its own MT5 connection).
+_CANDLE_TTL_SEC = {
+    "M1": 10, "M5": 30, "M15": 60, "M30": 90, "H1": 180, "H4": 300,
+}
 
-    Args:
-        tf: Timeframe (M1/M5/M15/M30/H1/H4)
-        limit: Number of candles (default: 100)
-        symbol: Symbol (default: bot_state.symbol)
 
-    Returns:
-        List of candle dicts: [{"time": unix_ts, "open": float, ...}, ...]
-    """
-    sym = symbol or bot_state.get("symbol", "XAUUSDc")
-
+def _fetch_candles_mt5(sym: str, tf: str, limit: int) -> list:
     try:
         import MetaTrader5 as mt5
     except ImportError:
         logger.error("MetaTrader5 module not installed")
         return []
-
-    # Map TF string → mt5 timeframe constant
     tf_map = {
         "M1":  mt5.TIMEFRAME_M1,  "M5":  mt5.TIMEFRAME_M5,
         "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
@@ -673,30 +793,22 @@ async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
     mt5_tf = tf_map.get(tf.upper())
     if mt5_tf is None:
         return []
-
     try:
         if not mt5.initialize():
             logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
             return []
-
-        # Ensure symbol is in Market Watch
         si = mt5.symbol_info(sym)
         if si is None:
             logger.warning(f"Symbol {sym} not found")
             return []
         if not si.visible:
             mt5.symbol_select(sym, True)
-
-        # copy_rates_from_pos(symbol, tf, start, count) — start=0 = most recent
         rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, limit)
         if rates is None or len(rates) == 0:
-            logger.warning(f"copy_rates_from_pos returned no data for {sym} {tf}")
             return []
-
-        # Transform to lightweight-charts format
         return [
             {
-                "time":  int(r["time"]),     # unix timestamp (seconds)
+                "time":  int(r["time"]),
                 "open":  float(r["open"]),
                 "high":  float(r["high"]),
                 "low":   float(r["low"]),
@@ -705,10 +817,36 @@ async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
             }
             for r in rates
         ]
-
     except Exception as e:
-        logger.error(f"Failed to fetch candles: {e}")
+        logger.error(f"MT5 candle fetch failed: {e}")
         return []
+
+
+@app.get("/api/candles")
+async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None,
+                      source: str = "mt5", force: bool = False):
+    """Latest OHLC candles. Cached by (source, tf, symbol, limit) with a
+    TF-sized TTL so concurrent bots / UI polls share one fetch."""
+    import time as _time
+    sym = symbol or bot_state.get("symbol", "XAUUSDc")
+    key = (source, tf.upper(), sym, limit)
+    ttl = _CANDLE_TTL_SEC.get(tf.upper(), 60)
+    now = _time.time()
+
+    if not force:
+        cached = _candles_cache.get(key)
+        if cached and (now - cached["ts"]) < ttl:
+            return cached["data"]
+
+    if source == "mt5":
+        data = _fetch_candles_mt5(sym, tf, limit)
+    else:
+        # Future: yfinance/tv branches — keep the cache contract identical.
+        logger.warning(f"/api/candles: source '{source}' not implemented, falling back to MT5")
+        data = _fetch_candles_mt5(sym, tf, limit)
+
+    _candles_cache[key] = {"ts": now, "data": data}
+    return data
 
 
 @app.get("/api/health")
@@ -991,85 +1129,79 @@ async def get_backtest_status():
 
 @app.get("/api/strategies")
 async def get_strategies():
-    """
-    Get all strategy patterns with their active status
-
-    Returns:
-        {
-            "version": str,
-            "patterns": {
-                "MOUNTAIN": {"active": bool, "name": str, ...},
-                ...
-            },
-            "active_count": int
-        }
-    """
-    from utils.strategy_loader import load_config, get_active_patterns
+    """Strategy config + per-pattern allowed_tfs (resolved against ALL_TFS default)."""
+    from utils.strategy_loader import load_config, get_active_patterns, get_allowed_tfs, ALL_TFS
 
     try:
         config = load_config()
+        patterns = config.get("patterns", {})
         active = get_active_patterns()
+
+        # Materialize allowed_tfs so the frontend always gets an explicit list
+        # (even when the JSON omits the key — then it's "all TFs allowed").
+        for name, meta in patterns.items():
+            meta["allowed_tfs"] = get_allowed_tfs(name)
 
         return {
             "version": config.get("version", "?"),
-            "patterns": config.get("patterns", {}),
+            "patterns": patterns,
             "active_count": len(active),
             "active_patterns": active,
-            "last_updated": config.get("last_updated", "")
+            "all_tfs": list(ALL_TFS),
+            "last_updated": config.get("last_updated", ""),
         }
     except Exception as e:
         logger.error(f"Failed to load strategies: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/strategies")
 async def update_strategies(request: Request):
-    """
-    Update active pattern list
+    """Update active patterns and/or per-pattern allowed_tfs.
 
-    Body:
+    Body (both fields optional, applied independently):
         {
-            "active": ["MOUNTAIN", "MOUNTAIN_R2"]
-        }
-
-    Returns:
-        {
-            "success": bool,
-            "active_patterns": List[str]
+          "active": ["MOUNTAIN", "MAI_RUAY"],
+          "allowed_tfs": {"MOUNTAIN": ["M1", "M5"]}
         }
     """
-    from utils.strategy_loader import save_active, get_active_patterns
+    from utils.strategy_loader import (
+        save_active, save_allowed_tfs, get_active_patterns, get_allowed_tfs,
+    )
 
     try:
         body = await request.json()
-        active_list = body.get("active", [])
+        active_list = body.get("active")
+        tfs_map = body.get("allowed_tfs")
 
-        if not isinstance(active_list, list):
-            return JSONResponse(
-                status_code=400,
-                content={"error": "active must be a list of pattern names"}
-            )
+        if active_list is not None:
+            if not isinstance(active_list, list):
+                return JSONResponse(status_code=400,
+                                    content={"error": "active must be a list of pattern names"})
+            save_active(active_list)
 
-        # Save updated active list
-        save_active(active_list)
+        if tfs_map is not None:
+            if not isinstance(tfs_map, dict):
+                return JSONResponse(status_code=400,
+                                    content={"error": "allowed_tfs must be a {pattern: [tf, ...]} object"})
+            save_allowed_tfs(tfs_map)
 
-        # Verify
-        updated = get_active_patterns()
+        if active_list is None and tfs_map is None:
+            return JSONResponse(status_code=400,
+                                content={"error": "Provide 'active' and/or 'allowed_tfs'"})
 
-        logger.info(f"Strategy patterns updated: {updated}")
+        updated_active = get_active_patterns()
+        updated_tfs = {p: get_allowed_tfs(p) for p in (tfs_map or {}).keys()}
+
+        logger.info(f"Strategies updated. active={updated_active} allowed_tfs={updated_tfs}")
         return {
             "success": True,
-            "active_patterns": updated
+            "active_patterns": updated_active,
+            "allowed_tfs": updated_tfs,
         }
     except Exception as e:
         logger.error(f"Failed to update strategies: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ============================================================================

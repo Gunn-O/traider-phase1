@@ -58,6 +58,53 @@ except ImportError:
     def update_bot_state(updates): pass
     def add_log(msg): pass
 
+# ─── Multi-bot event reporting (POST events back to api_server) ────────
+# api_server sets these env vars when spawning the subprocess via /api/start.
+# When running from CLI (no api_server) both are empty → events become no-ops.
+import json as _json_post
+import urllib.request as _urlreq_post
+
+_BOT_ID = os.getenv("TRAIDER_BOT_ID", "")
+_API_URL = os.getenv("TRAIDER_API_URL", "")
+
+
+def post_bot_event(event_type: str, msg: str = "", data: dict = None) -> None:
+    """Send a SIGNAL/SKIP/PLAN_OPENED/PLAN_CLOSED event to api_server so the
+    Dashboard can show what this bot is doing in real time. Best-effort: any
+    error is swallowed so trading isn't impacted by API hiccups."""
+    if not _BOT_ID or not _API_URL:
+        return
+    try:
+        body = _json_post.dumps({"type": event_type, "msg": msg, "data": data or {}}).encode()
+        req = _urlreq_post.Request(
+            f"{_API_URL}/api/bots/{_BOT_ID}/event",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urlreq_post.urlopen(req, timeout=2).read()
+    except Exception:
+        pass
+
+
+def post_bot_heartbeat(data: dict) -> None:
+    """Per-cycle snapshot push so the Dashboard sees 'alive' updates without
+    flooding the events panel. Overwrites previous heartbeat — only the latest
+    tick matters. Best-effort like post_bot_event."""
+    if not _BOT_ID or not _API_URL:
+        return
+    try:
+        body = _json_post.dumps(data).encode()
+        req = _urlreq_post.Request(
+            f"{_API_URL}/api/bots/{_BOT_ID}/heartbeat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urlreq_post.urlopen(req, timeout=2).read()
+    except Exception:
+        pass
+
 # Load environment (override=True to ensure .env takes precedence over shell)
 load_dotenv(override=True)
 
@@ -357,19 +404,20 @@ class TraiderMainLoop:
         self.analyst = None  # Placeholder for Phase II Claude Reviewer
         self.risk_manager = None  # Removed - use Signal Engine lot directly
 
-        # Weekly Strategist (analysis only, not used in backtest loop)
-        self.weekly_strategist = G4WeeklyStrategist(
-            api_key=os.getenv('ANTHROPIC_API_KEY'),
-            config={'verbose': True}
-        )
-        logger.info("✓ Weekly Strategist initialized")
-
-        # Monthly Evolver (analysis only, not used in backtest loop)
-        self.monthly_evolver = G4MonthlyEvolver(
-            api_key=os.getenv('ANTHROPIC_API_KEY'),
-            config={'verbose': True}
-        )
-        logger.info("✓ Monthly Evolver initialized")
+        # Weekly Strategist + Monthly Evolver need ANTHROPIC_API_KEY.
+        # .env documents the key as optional, and these agents only run on
+        # weekly/monthly schedules — skip init (with warning) when the key is
+        # absent so the bot can still start for paper/python-decision runs.
+        anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+        if anthropic_key:
+            self.weekly_strategist = G4WeeklyStrategist(api_key=anthropic_key, config={'verbose': True})
+            logger.info("✓ Weekly Strategist initialized")
+            self.monthly_evolver = G4MonthlyEvolver(api_key=anthropic_key, config={'verbose': True})
+            logger.info("✓ Monthly Evolver initialized")
+        else:
+            self.weekly_strategist = None
+            self.monthly_evolver = None
+            logger.warning("⚠️ ANTHROPIC_API_KEY not set — Weekly Strategist & Monthly Evolver disabled")
 
         # Initialize G4
         # Backtest mode: Disable Sheets by default (use LocalDB instead)
@@ -385,15 +433,21 @@ class TraiderMainLoop:
         self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override)
         logger.info(f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id={self.sheets_logger.sheets_id[:20]}..." if self.sheets_logger.sheets_id else f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id=None")
 
-        # Initialize LocalDB for backtest (avoid Sheets API rate limits)
+        # Initialize LocalDB:
+        #   - Backtest: scratch DB that gets cleared per run
+        #   - SIM/LIVE under api_server: persistent DB that survives launcher restarts
+        # Separate paths so a backtest doesn't wipe live bot history.
         if self.is_backtest:
             from utils.local_db import LocalDB
-            self.local_db = LocalDB()
+            self.local_db = LocalDB(db_path='traider_backtest.db')
             self.local_db.clear_trades()
-            # Enable batch mode to queue Sheets writes until end
             if self.sheets_logger.enabled:
                 self.sheets_logger.set_batch_mode(True)
             logger.info("✓ Backtest mode: LocalDB + Sheets batch mode")
+        elif _BOT_ID:
+            from utils.local_db import LocalDB
+            self.local_db = LocalDB(db_path='traider_sim.db')
+            # bot_state restore happens after portfolio_state_cache is initialized.
         else:
             self.local_db = None
 
@@ -435,7 +489,22 @@ class TraiderMainLoop:
         }
 
         # Initialize portfolio state cache (for backtest mode duplicate prevention)
+        # Seed from LocalDB if a previous run for this bot_id was persisted, so
+        # guardian counters (consecutive_loss, total_loss_pct) survive restarts.
         self.portfolio_state_cache = {}
+        if self.local_db and _BOT_ID:
+            saved = self.local_db.get_bot_state(_BOT_ID)
+            if saved:
+                self.portfolio_state_cache.update({
+                    'consecutive_loss': saved.get('consecutive_loss', 0),
+                    'total_loss_pct':   saved.get('total_loss_pct', 0),
+                    'realized_pnl_usd': saved.get('realized_pnl_usd', 0),
+                })
+                logger.info(
+                    f"✓ Bot state restored from LocalDB for {_BOT_ID}: "
+                    f"consec_loss={saved.get('consecutive_loss', 0)}, "
+                    f"realized_pnl=${saved.get('realized_pnl_usd', 0):.2f}"
+                )
 
         logger.info("✓ All agents initialized")
 
@@ -475,8 +544,18 @@ class TraiderMainLoop:
                         f"reason={t.get('close_reason')} @ {t.get('close_price')}"
                     )
 
-                    # Update LocalDB (backtest mode)
-                    if self.is_backtest and self.local_db:
+                    post_bot_event("plan_closed", f"{t['result']} {t.get('close_reason', '')}", {
+                        "plan_id": t.get('plan_id', ''),
+                        "trade_id": t.get('trade_id', ''),
+                        "result": t.get('result', ''),
+                        "close_reason": t.get('close_reason', ''),
+                        "close_price": t.get('close_price', 0),
+                        "pnl": t.get('pnl_usd', t.get('pnl', 0)),
+                    })
+
+                    # Update LocalDB whenever it's available (backtest always; SIM/LIVE
+                    # only when running under api_server with a bot_id).
+                    if self.local_db:
                         self.local_db.update_trade_result(
                             trade_id=t['trade_id'],
                             result=t['result'],
@@ -485,6 +564,15 @@ class TraiderMainLoop:
                             close_time=t.get('timestamp_close', candle_time),
                             close_reason=t.get('close_reason', '')
                         )
+                    # Persist bot counters so a launcher restart doesn't reset
+                    # consecutive_loss / realized_pnl mid-session.
+                    if self.local_db and _BOT_ID:
+                        self.local_db.upsert_bot_state(_BOT_ID, {
+                            'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
+                            'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                            'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                            'last_candle_time': str(candle_time) if candle_time else None,
+                        })
         else:
             # Fallback to old monitor_positions for simulate mode
             self.monitor_positions(current_candle=current_candle)
@@ -564,7 +652,7 @@ class TraiderMainLoop:
         # Daily reflection skipped in Phase II
 
         # Weekly Strategist — รันทุก 7 วัน (analysis only)
-        if should_run_weekly(self.last_weekly_date, current_date):
+        if self.weekly_strategist and should_run_weekly(self.last_weekly_date, current_date):
             logger.info("\n[Agent C] Running Weekly Strategist...")
             history = self.sheets_logger.get_recent_trades(limit=100) if self.sheets_logger.enabled else []
             stats = aggregate_weekly_stats(history)
@@ -579,7 +667,7 @@ class TraiderMainLoop:
             self.last_weekly_date = current_date
 
         # Monthly Evolver (Agent D) — รันทุก 30 วัน
-        if should_run_monthly(self.last_monthly_date, current_date):
+        if self.monthly_evolver and should_run_monthly(self.last_monthly_date, current_date):
             logger.info("\n[Agent D] Running Monthly Evolver...")
             history = self.sheets_logger.get_recent_trades(limit=200) if self.sheets_logger.enabled else []
             stats = aggregate_monthly_stats(history)
@@ -660,17 +748,49 @@ class TraiderMainLoop:
             except Exception as e:
                 logger.debug(f"Failed to update latest_candle: {e}")
 
-        if world_state.get('chart_type') == 'unclear':
+        # ── Tier 1 heartbeat: per-cycle snapshot for Dashboard ────────
+        # Posted EVERY cycle (including "Chart unclear" skips) so the UI knows
+        # the bot is alive and processing. Lives in bots[id]['heartbeat'] —
+        # not in the events panel.
+        signal_obj = world_state.get('signal')
+        chart_type_hb = world_state.get('chart_type', 'unclear')
+        post_bot_heartbeat({
+            "tf": active_tf,
+            "candle_time": candle_time.isoformat() if candle_time else None,
+            "candle_close": current_candle.get("close") if current_candle else None,
+            "candle_high": current_candle.get("high") if current_candle else None,
+            "candle_low": current_candle.get("low") if current_candle else None,
+            "R55_usd": world_state.get('range', {}).get('usd'),
+            "R55_pip": world_state.get('range', {}).get('pip'),
+            "session": world_state.get('session'),
+            "chart_type": chart_type_hb,
+            "skip_reason": world_state.get('skip_reason'),
+            "signal_pattern": signal_obj.pattern if signal_obj else None,
+            "signal_direction": signal_obj.direction if signal_obj else None,
+            "signal_rr": round(signal_obj.rr, 2) if signal_obj else None,
+            "active_plan": (portfolio_state or {}).get('active_plan_id'),
+            "balance": self.balance,
+        })
+
+        if chart_type_hb == 'unclear':
             skip_reason = world_state.get('skip_reason', 'Chart unclear')
             logger.info(f"❌ SKIP: {skip_reason}")
+            # Heartbeat above carries the skip_reason — no event needed here.
             return
 
-        signal = world_state.get('signal')
+        signal = signal_obj
         if signal:
             logger.info(f"✓ Signal Engine: {signal.pattern} {signal.direction} → Entry={signal.entry:.2f}, "
                         f"SL={signal.sl:.2f}, TP={signal.tp_order:.2f}, R:R={signal.rr:.2f}, Lot={signal.lot}")
+            post_bot_event("signal_detected", f"{signal.pattern} {signal.direction}", {
+                "pattern": signal.pattern, "direction": signal.direction,
+                "entry": signal.entry, "sl": signal.sl, "tp": signal.tp_order,
+                "rr": signal.rr, "lot": signal.lot,
+            })
         else:
-            logger.info(f"✓ Signal Engine: {world_state.get('chart_type')} (quality={world_state.get('quality', 0):.2f}) — No trade signal")
+            chart_type = world_state.get('chart_type')
+            logger.info(f"✓ Signal Engine: {chart_type} (quality={world_state.get('quality', 0):.2f}) — No trade signal")
+            # Same rationale — "no setup" is the steady state, not a notification.
 
         # Step 3: G2 Pre-filter
         logger.info("\n[STEP 3] G2 Pre-filter...")
@@ -679,6 +799,7 @@ class TraiderMainLoop:
 
         if not prefilter_result['pre_approved']:
             logger.info(f"❌ SKIP: {prefilter_result['skip_reason']}")
+            post_bot_event("signal_skipped", prefilter_result['skip_reason'], {"stage": "g2_prefilter", "reason": prefilter_result['skip_reason']})
             update_session_stats(self.session_stats, None, g2_blocked=True)
             return
 
@@ -865,11 +986,13 @@ class TraiderMainLoop:
         # Log to Sheets
         self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision_for_sheets, world_state, llm_log, candle_time=candle_time)
 
-        # Log to LocalDB (backtest mode — no rate limits)
-        if self.is_backtest and self.local_db:
+        # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
+        # when running under api_server with a bot_id assigned).
+        if self.local_db:
             for order in orders_with_ids:
                 self.local_db.insert_trade({
                     'trade_id': order['trade_id'],
+                    'bot_id': _BOT_ID or None,
                     'plan_id': plan_id,
                     'order_num': order.get('order_num', 1),
                     'timestamp_open': candle_time.isoformat() if candle_time else datetime.now().isoformat(),
@@ -920,6 +1043,19 @@ class TraiderMainLoop:
 
         # Add to position monitor
         self.position_monitor.add_orders(orders_with_ids)
+
+        # Notify Dashboard about plan opened (per-order event so each leg shows up)
+        for order in orders_with_ids:
+            post_bot_event("plan_opened", f"{order.get('action', '?')} {order.get('lot_size', order.get('lot', 0))} lot", {
+                "plan_id": plan_id,
+                "trade_id": order.get('trade_id', ''),
+                "action": order.get('action', ''),
+                "entry": order.get('entry_price', order.get('entry', 0)),
+                "sl": order.get('sl_price', order.get('sl', 0)),
+                "tp": order.get('tp_price', order.get('tp', 0)),
+                "lot": order.get('lot_size', order.get('lot', 0)),
+                "pattern": (signal.pattern if signal else ''),
+            })
 
         # Update portfolio state (14 fields)
         portfolio_state['active_plan_id'] = plan_id
@@ -1205,8 +1341,6 @@ class TraiderMainLoop:
         - วนลูปตาม candles ย้อนหลัง (M5)
         - แต่ละ candle close → รัน pipeline
         - สะสม results → export สรุป
-
-        Note: ต้องใช้ DATA_MODE=backtest ใน .env
         """
         from datetime import datetime, timedelta
         import pandas as pd
