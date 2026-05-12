@@ -446,6 +446,91 @@ class MT5LiveBroker:
                         f"old_sl={pos.sl:.3f} new_sl={new_sl:.3f} bid={current_bid:.3f}"
                     )
 
+    def reconcile_pending(self, trade_ids: List[str]) -> List[dict]:
+        """Verify each `trade_id` we *believe* is PENDING against MT5's actual state.
+
+        Returns close-event dicts (same shape as `update_positions`) for trades
+        that MT5 says are gone — i.e., the LIMIT order expired, was cancelled,
+        or rejected before fill. The caller treats these the same way it would
+        a SL/TP close: mark CANCELLED in DB/Sheets, drop from open_orders,
+        broadcast `plan_closed`.
+
+        Detection strategy (matches `scripts/reconcile_pending.py`):
+          1. Snapshot `positions_get` + `orders_get` — if our trade_id matches
+             a live entry there, it's still active. Skip.
+          2. Search 24h `history_deals_get` — deals are only created on fills,
+             so any deal carrying our comment means the order DID fill (and
+             update_positions() handles the WIN/LOSS sync separately). Skip.
+          3. Otherwise: the LIMIT was placed but never filled → mark CANCELLED.
+
+        Why not `history_orders_get`? MT5 overwrites the order's comment with
+        text like `"expired [2026.05.12 08:42]"` once the order expires, so the
+        original trade_id is lost there. Deals preserve the comment because
+        deals only fire on fills (no deal = never filled).
+
+        Caller is expected to apply a min-age filter (e.g., 60s) before
+        invoking so we don't false-cancel a LIMIT that was just placed but
+        MT5 hasn't indexed yet.
+
+        Verified bug fixed by this: 2026-05-12 BUY_LIMIT 4698.173 (ticket
+        #3274854807) expired at 08:42 server time without filling; bot UI
+        kept showing it as open until the manual reconcile script ran.
+        """
+        if not trade_ids:
+            return []
+
+        positions = mt5.positions_get(symbol=self.symbol) or []
+        orders    = mt5.orders_get(symbol=self.symbol)    or []
+        live_comments    = [(p.comment or "").strip() for p in positions if p.magic == self.magic]
+        pending_comments = [(o.comment or "").strip() for o in orders    if o.magic == self.magic]
+
+        from_dt = datetime.now() - timedelta(hours=24)
+        deals = mt5.history_deals_get(from_dt, datetime.now()) or []
+        deal_comments = [(d.comment or "").strip() for d in deals if getattr(d, "magic", 0) == self.magic]
+
+        # Broker truncates the comment to 16 chars on many platforms even
+        # though the MT5 spec allows 31, so match by prefix (stored is a
+        # leading substring of our full trade_id).
+        def _matches(stored: str, full_tid: str) -> bool:
+            stored = (stored or "").strip()
+            if not stored:
+                return False
+            return stored == full_tid or full_tid.startswith(stored)
+
+        cancelled: List[dict] = []
+        now_iso = datetime.now().isoformat()
+
+        for tid in trade_ids:
+            if any(_matches(c, tid) for c in live_comments):
+                continue   # filled and currently open
+            if any(_matches(c, tid) for c in pending_comments):
+                continue   # LIMIT still queued
+            if any(_matches(c, tid) for c in deal_comments):
+                continue   # filled, then closed — update_positions handles that
+
+            # Not in any of: positions / orders / deals → never filled.
+            # MT5 has either expired it server-side, the user/admin cancelled
+            # it, or it was rejected before reaching the order book. Either
+            # way the local PENDING row is stale and should be CANCELLED.
+            cancelled.append({
+                "trade_id":     tid,
+                "ticket":       0,
+                "plan_id":      "",
+                "action":       "BUY",        # caller already knows; not needed downstream
+                "lot":          0.0,
+                "lot_size":     0.0,
+                "entry":        0.0,
+                "entry_price":  0.0,
+                "result":       "CANCELLED",
+                "close_price":  0.0,
+                "close_time":   now_iso,
+                "close_reason": "BROKER_REJECT_OR_EXPIRE",
+                "pnl":          0.0,
+            })
+            logger.warning(f"⚠️ Reconcile: {tid} → CANCELLED (not in MT5 positions/orders/deals)")
+
+        return cancelled
+
     def update_positions(self, candle_time: datetime, current_price: Optional[float] = None) -> List[dict]:
         """
         เช็ค SL/TP / manual close — diff กับ _known_open_tickets เพื่อหา newly closed

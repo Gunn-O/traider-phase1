@@ -473,7 +473,7 @@ class TraiderMainLoop:
 
         # Mountain state tracking (for Round 2 detection)
         self.mountain_state = None  # Will be updated by Signal Engine
-        # Notebook v3.4 stateful Scanner — segment tracking + stop_segments.
+        # Notebook v3.8 stateful Scanner — segment tracking + stop_segments.
         # Loaded from bot_state_snapshots.state_json on startup; persisted on
         # each plan_closed event so a launcher restart preserves it.
         self.scanner_state: Optional[dict] = None
@@ -589,7 +589,7 @@ class TraiderMainLoop:
                             mfe_pip=t.get('mfe_pip'),
                         )
 
-                    # Notebook v3.4 stop_segments: on LOSS of a Scanner trade,
+                    # Notebook v3.8 stop_segments: on LOSS of a Scanner trade,
                     # mark its segment so the detector blocks new entries in
                     # that same trend segment until the trend resets.
                     self._record_scanner_loss_segment(t)
@@ -1029,7 +1029,7 @@ class TraiderMainLoop:
             details_json = _json.dumps(sig_details, default=str) if sig_details else None
         except Exception:
             details_json = None
-        # Scanner v3.4 segment_id — stored on each trade so the stop-on-loss
+        # Scanner v3.8 segment_id — stored on each trade so the stop-on-loss
         # filter in scanner_state knows which segment was lost. None for
         # non-Scanner trades (Mountain / MaiRuay don't use segments).
         scanner_seg_id = (sig_details or {}).get('segment_id') if sig_details else None
@@ -1067,7 +1067,7 @@ class TraiderMainLoop:
 
         # Attach scanner_segment_id to each order dict before handing to the
         # position monitor — the close-path needs it to mark the segment as
-        # STOPPED on a LOSS (notebook v3.4 stop_segments behavior).
+        # STOPPED on a LOSS (notebook v3.8 stop_segments behavior).
         for _o in orders_with_ids:
             _o['scanner_segment_id'] = scanner_seg_id
 
@@ -1221,9 +1221,54 @@ class TraiderMainLoop:
                 from agents.g4_position_monitor import update_excursion_only
                 update_excursion_only(open_orders, current_candle)
 
+            # Reconcile our PENDING list against MT5's actual state BEFORE
+            # the SL/TP check. Catches LIMIT orders that the broker expired /
+            # cancelled / rejected — without this, those rows stay PENDING
+            # in the UI forever even after MT5 has dropped them.
+            # Only check trades that are >60s old (avoid false-cancelling a
+            # LIMIT that was just placed and MT5 hasn't fully indexed yet).
+            cancelled_orphans = []
+            if hasattr(self.broker, 'reconcile_pending'):
+                from dateutil import parser as _date_parser
+                ids_to_check = []
+                now = datetime.now()
+                for o in open_orders:
+                    if o.get('result') != 'PENDING':
+                        continue
+                    tid = o.get('trade_id')
+                    if not tid:
+                        continue
+                    open_iso = o.get('timestamp_open')
+                    if open_iso:
+                        try:
+                            opened_dt = _date_parser.parse(open_iso)
+                            if opened_dt.tzinfo:
+                                opened_dt = opened_dt.replace(tzinfo=None)
+                            if (now - opened_dt).total_seconds() < 60:
+                                continue  # too fresh, give MT5 a beat to index
+                        except Exception:
+                            pass
+                    ids_to_check.append(tid)
+                if ids_to_check:
+                    try:
+                        cancelled_orphans = self.broker.reconcile_pending(ids_to_check)
+                        if cancelled_orphans:
+                            logger.warning(
+                                f"⚠️ Reconcile found {len(cancelled_orphans)} orphan "
+                                f"PENDING(s) — MT5 says they're gone, cleaning up DB/UI"
+                            )
+                    except Exception as e:
+                        logger.error(f"reconcile_pending failed (continuing): {e}")
+                        cancelled_orphans = []
+
             # Update broker positions (check SL/TP with real prices)
             current_price = current_candle.get('close') if current_candle else None
             newly_closed = self.broker.update_positions(candle_time, current_price=current_price)
+            # Merge orphan cancellations into the same close-event flow so the
+            # downstream sync (DB / Sheets / api_server / position_monitor)
+            # treats them identically — only the result string differs.
+            if cancelled_orphans:
+                newly_closed = (newly_closed or []) + cancelled_orphans
 
             # Sync closed positions to PositionMonitor + Sheets + LocalDB + Dashboard
             if newly_closed:
@@ -1246,6 +1291,12 @@ class TraiderMainLoop:
                             order['close_reason'] = broker_pos['close_reason']
                             order['pnl_usd'] = broker_pos['pnl']
                             order['timestamp_close'] = broker_pos['close_time']
+                            # Propagate plan_id back into the broker dict so the
+                            # portfolio-state cleanup below (`closed_plan_ids =
+                            # {pos['plan_id'] for pos in newly_closed}`) doesn't
+                            # KeyError. Broker's _query_history_deal doesn't
+                            # carry plan_id — only trade_id via comment.
+                            broker_pos['plan_id'] = order.get('plan_id', '')
 
                             # Mark segment as STOPPED on a Scanner LOSS.
                             self._record_scanner_loss_segment({
@@ -1329,36 +1380,41 @@ class TraiderMainLoop:
                             # Check if all orders in plan are closed
                             plan_orders = [o for o in self.position_monitor.open_orders
                                            if o.get('plan_id') == plan_id]
-                            all_closed = all(o.get('result') in ['WIN', 'LOSS'] for o in plan_orders)
+                            TERMINAL = ('WIN', 'LOSS', 'CANCELLED')
+                            all_closed = all(o.get('result') in TERMINAL for o in plan_orders)
+                            if not all_closed:
+                                continue
 
-                            if all_closed:
-                                plan_pnl = sum(o.get('pnl_usd', 0) for o in plan_orders)
+                            # P&L counts only filled trades (WIN/LOSS).
+                            # CANCELLED LIMITs never filled → 0 contribution.
+                            filled = [o for o in plan_orders if o.get('result') in ('WIN', 'LOSS')]
+                            plan_pnl = sum(o.get('pnl_usd', 0) for o in filled)
+
+                            portfolio_state = self.sheets_logger.get_portfolio_state()
+
+                            if portfolio_state.get('active_plan_id') == plan_id:
+                                portfolio_state['active_plan_id'] = ''
+                                portfolio_state['open_plans_count'] = 0
+                                portfolio_state['total_risk_pct'] = 0.0
+                                portfolio_state['open_orders_count'] = 0
+                                portfolio_state['total_open_lot'] = 0.0
+                                logger.info(f"[{plan_id}] Cleared active plan from portfolio state")
+
+                            if not filled:
+                                # Pure CANCELLED plan (e.g., LIMIT never filled) —
+                                # don't touch consecutive_loss / realized_pnl.
+                                logger.info(f"[{plan_id}] Plan ended with no fills (all CANCELLED)")
+                            else:
                                 plan_result = 'WIN' if plan_pnl > 0 else 'LOSS'
-
                                 logger.info(f"[{plan_id}] Plan fully closed: {plan_result} (P&L: ${plan_pnl:.2f})")
-
-                                # Update portfolio state
-                                portfolio_state = self.sheets_logger.get_portfolio_state()
-
-                                if portfolio_state.get('active_plan_id') == plan_id:
-                                    portfolio_state['active_plan_id'] = ''
-                                    portfolio_state['open_plans_count'] = 0
-                                    portfolio_state['total_risk_pct'] = 0.0
-                                    portfolio_state['open_orders_count'] = 0
-                                    portfolio_state['total_open_lot'] = 0.0
-                                    logger.info(f"[{plan_id}] Cleared active plan from portfolio state")
-
-                                # Update consecutive loss
                                 if plan_result == 'LOSS':
                                     portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
                                 else:
                                     portfolio_state['consecutive_loss'] = 0
-
-                                # Update realized P&L
                                 portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + plan_pnl
 
-                                self.sheets_logger.update_portfolio_state(portfolio_state)
-                                logger.info(f"[{plan_id}] Portfolio state updated (consecutive_loss={portfolio_state['consecutive_loss']})")
+                            self.sheets_logger.update_portfolio_state(portfolio_state)
+                            logger.info(f"[{plan_id}] Portfolio state updated (consecutive_loss={portfolio_state['consecutive_loss']})")
 
                     except Exception as e:
                         logger.error(f"Failed to update portfolio state after closes: {e}")
