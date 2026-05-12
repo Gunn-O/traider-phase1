@@ -58,13 +58,13 @@ def guardian_check(decision: Dict, lot_info: Dict,
         return {'approved': False, 'block_reason': 'Decision is SKIP', 'blocked_by': 'decision'}
 
     # ============ Rule 1: มี Active Plan ของ pattern เดียวกัน ============
-    # Per-pattern slot — Mountain + MAI_RUAY trade ขนานกันได้
+    # Per-pattern slot — Mountain + MAI_RUAY + Scanner trade ขนานกันได้
+    # Key must match the WRITE path in main.py:1120 which uses raw signal.pattern
+    # (uppercased here for consistency). The old normalization to 'MOUNTAIN' /
+    # 'MAI_RUAY' was a bug: signal.pattern is 'MOUNTAIN_R1' / 'UPTREND_SCANNER' /
+    # etc., so the lookup missed and G3 let through duplicate Mountain trades
+    # that G2 also somehow missed.
     decision_pattern = (decision.get('setup') or '').upper()
-    # Map setup string from main.py decision dict to pattern name
-    if 'mountain' in decision_pattern.lower():
-        decision_pattern = 'MOUNTAIN'
-    elif 'mai_ruay' in decision_pattern.lower() or 'mairuay' in decision_pattern.lower():
-        decision_pattern = 'MAI_RUAY'
     active_plans = portfolio_state.get('active_plans_by_pattern', {}) or {}
     pattern_plan = active_plans.get(decision_pattern, '')
     if pattern_plan and pattern_plan != 'ไม่มีแผนที่เปิดอยู่':

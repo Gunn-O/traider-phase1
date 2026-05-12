@@ -493,6 +493,9 @@ class TraiderMainLoop:
         # Initialize portfolio state cache (for backtest mode duplicate prevention)
         # Seed from LocalDB if a previous run for this bot_id was persisted, so
         # guardian counters (consecutive_loss, total_loss_pct) survive restarts.
+        # Scanner stop_segments are also restored — without this, a LOSS in a
+        # downtrend segment was forgotten across launcher restart (WU reboot,
+        # crash, etc.) and the bot would re-enter the same losing segment.
         self.portfolio_state_cache = {}
         if self.local_db and _BOT_ID:
             saved = self.local_db.get_bot_state(_BOT_ID)
@@ -502,6 +505,18 @@ class TraiderMainLoop:
                     'total_loss_pct':   saved.get('total_loss_pct', 0),
                     'realized_pnl_usd': saved.get('realized_pnl_usd', 0),
                 })
+                extras = saved.get('extras') or {}
+                saved_scanner = extras.get('scanner_state')
+                if saved_scanner:
+                    self.scanner_state = saved_scanner
+                    n_up   = len(saved_scanner.get('stopped_up_segments')   or [])
+                    n_down = len(saved_scanner.get('stopped_down_segments') or [])
+                    logger.info(
+                        f"✓ Scanner state restored: "
+                        f"up_seg={saved_scanner.get('up_segment_id')}, "
+                        f"down_seg={saved_scanner.get('down_segment_id')}, "
+                        f"stopped(up={n_up}, down={n_down})"
+                    )
                 logger.info(
                     f"✓ Bot state restored from LocalDB for {_BOT_ID}: "
                     f"consec_loss={saved.get('consecutive_loss', 0)}, "
@@ -594,13 +609,17 @@ class TraiderMainLoop:
                     # that same trend segment until the trend resets.
                     self._record_scanner_loss_segment(t)
                     # Persist bot counters so a launcher restart doesn't reset
-                    # consecutive_loss / realized_pnl mid-session.
+                    # consecutive_loss / realized_pnl mid-session. Scanner state
+                    # (segment ids + stopped sets) goes into `extras` so the
+                    # stop_segments survives restart — otherwise a LOSS-stopped
+                    # downtrend would re-arm on reboot.
                     if self.local_db and _BOT_ID:
                         self.local_db.upsert_bot_state(_BOT_ID, {
                             'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
                             'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
                             'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
                             'last_candle_time': str(candle_time) if candle_time else None,
+                            'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
                         })
         else:
             # Fallback to old monitor_positions for simulate mode
@@ -960,6 +979,12 @@ class TraiderMainLoop:
             order['sl_price'] = order['sl']
             order['tp_price'] = order['tp']
             order['lot_size'] = order['lot']
+            # Attach pattern so the per-pattern-slot cleanup at line 647-661 can
+            # tell which slot this order keeps occupied. Previously this field
+            # was absent → cleanup wiped active_plans_by_pattern every cycle →
+            # next signal trivially passed G2/G3 → double-trade. This is the
+            # root cause of the user's "เบิ้ลไม้" report.
+            order['pattern'] = (getattr(signal, 'pattern', '') or '').upper()
             # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
             if is_mountain:
                 d = signal.details or {}
@@ -979,6 +1004,24 @@ class TraiderMainLoop:
             if signal and hasattr(signal, 'pattern')
             else decision.get('setup', 'none')
         )
+
+        # ── Defensive per-pattern slot check (last line of defense) ──
+        # G2 + G3 both check active_plans_by_pattern earlier, but if either path
+        # fails (e.g., bug in normalization, cache cleared mid-cycle, signal
+        # pattern label changed), we'd open a duplicate trade. Re-check the
+        # cache here, immediately before sending to broker, with the raw
+        # signal.pattern key — the same key the WRITE path uses below.
+        sig_pat = (getattr(signal, 'pattern', '') or '').upper() if signal else ''
+        if sig_pat:
+            _pat_map_now = self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+            _existing = _pat_map_now.get(sig_pat) or _pat_map_now.get(getattr(signal, 'pattern', ''))
+            if _existing:
+                logger.warning(
+                    f"⛔ ABORT execute: {sig_pat} already has active plan "
+                    f"{_existing} — would be a double-trade. G2/G3 should have "
+                    f"caught this earlier; check pattern-key normalization."
+                )
+                return
 
         # ── Execute via broker FIRST — never log/track an order MT5 rejected ──
         # Previously we logged Sheets/LocalDB + added to position_monitor BEFORE
@@ -1349,6 +1392,9 @@ class TraiderMainLoop:
                                         'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
                                         'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
                                         'last_candle_time': broker_pos.get('close_time'),
+                                        # Scanner stop_segments survive restart
+                                        # so a LOSS doesn't re-arm after reboot.
+                                        'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
                                     })
                                 except Exception as e:
                                     logger.warning(f"upsert_bot_state failed: {e}")

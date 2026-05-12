@@ -833,18 +833,37 @@ _SCAN_FATHER_MAX_PCT  = 100.0
 # duplicate-pip filter prevents re-entering on the same swing.
 @dataclass
 class ScannerSegmentState:
-    """Per-bot, persisted across LIVE cycles in portfolio_state_cache."""
-    up_segment_id:        Optional[str] = None      # ISO timestamp; None = not in uptrend
-    down_segment_id:      Optional[str] = None
+    """Per-bot, persisted across LIVE cycles in portfolio_state_cache.
+
+    Segment lifecycle (matches notebook v3.8 `scan_entries_bar_by_bar`):
+      - First passing cycle → segment_id = current bar's ISO timestamp
+      - Subsequent passing cycles where window overlaps previous (cur_ws <
+        last_confirmed_we) → segment_id stays the same (continuation)
+      - Passing cycle where window doesn't overlap (cur_ws >= last_confirmed_we)
+        → segment_id resets to current bar (new segment)
+      - Failing cycle → segment_id stays unchanged (NOT reset). This is the
+        notebook's "merged trend" rule: brief criteria gaps within an
+        overlapping trend window keep us in the same segment so a LOSS on bar
+        N can't be re-entered on bar N+2 just because bar N+1 momentarily
+        failed.
+    """
+    up_segment_id:         Optional[str] = None      # ISO timestamp; None = no trend ever
+    down_segment_id:       Optional[str] = None
+    # ISO of last bar where criteria passed — used to detect "new segment"
+    # (cur_ws >= up_last_confirmed_we means no overlap → fresh trend).
+    up_last_confirmed_we:  Optional[str] = None
+    down_last_confirmed_we: Optional[str] = None
     stopped_up_segments:   set = field(default_factory=set)
     stopped_down_segments: set = field(default_factory=set)
 
     def to_dict(self) -> dict:
         return {
-            "up_segment_id":         self.up_segment_id,
-            "down_segment_id":       self.down_segment_id,
-            "stopped_up_segments":   sorted(self.stopped_up_segments),
-            "stopped_down_segments": sorted(self.stopped_down_segments),
+            "up_segment_id":          self.up_segment_id,
+            "down_segment_id":        self.down_segment_id,
+            "up_last_confirmed_we":   self.up_last_confirmed_we,
+            "down_last_confirmed_we": self.down_last_confirmed_we,
+            "stopped_up_segments":    sorted(self.stopped_up_segments),
+            "stopped_down_segments":  sorted(self.stopped_down_segments),
         }
 
     @classmethod
@@ -854,6 +873,8 @@ class ScannerSegmentState:
         return cls(
             up_segment_id=d.get("up_segment_id"),
             down_segment_id=d.get("down_segment_id"),
+            up_last_confirmed_we=d.get("up_last_confirmed_we"),
+            down_last_confirmed_we=d.get("down_last_confirmed_we"),
             stopped_up_segments=set(d.get("stopped_up_segments") or []),
             stopped_down_segments=set(d.get("stopped_down_segments") or []),
         )
@@ -1086,22 +1107,29 @@ def _detect_uptrend_scanner(
     R55_pip = R55 * 100
 
     if R55 < _SCAN_MIN_R55_USD:
-        if state is not None:
-            state.up_segment_id = None  # flat market → no trend
+        # Flat market doesn't end the segment on its own — that requires a
+        # successful PASS on a non-overlapping window. Leave state alone.
         return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
 
     passes, fail_reason = _scan_uptrend_criteria(window_t, lookback_t, L55, R55, R55_pip)
 
-    # Maintain segment_id across cycles. Trend starts on the first cycle where
-    # criteria pass; continues while they keep passing; ends the moment they
-    # fail (or anti-trend triggers).
-    cur_ts = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
-    if state is not None:
-        if passes:
-            if state.up_segment_id is None:
-                state.up_segment_id = cur_ts
-        else:
-            state.up_segment_id = None
+    # Maintain segment_id across cycles per notebook v3.8 merged-trend rule:
+    # segment continues as long as passing windows overlap. A FAIL does NOT
+    # reset segment_id — it only stays the same. A new segment is detected
+    # when the next PASS has cur_ws >= up_last_confirmed_we (no overlap).
+    # Why this matters: after a LOSS at segment X, the user expects "wait for
+    # a NEW chart to form" — not just one failing bar followed by re-entry.
+    cur_we = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
+    cur_ws = window[0].time.isoformat() if hasattr(window[0].time, "isoformat") else str(window[0].time)
+    if state is not None and passes:
+        is_new_segment = (
+            state.up_last_confirmed_we is None
+            or cur_ws >= state.up_last_confirmed_we
+        )
+        if is_new_segment or state.up_segment_id is None:
+            state.up_segment_id = cur_we
+        # else: continuation — keep existing segment_id
+        state.up_last_confirmed_we = cur_we
 
     if not passes:
         return _skip(fail_reason)
@@ -1224,19 +1252,23 @@ def _detect_downtrend_scanner(
     R55_pip = R55 * 100
 
     if R55 < _SCAN_MIN_R55_USD:
-        if state is not None:
-            state.down_segment_id = None
+        # Flat market doesn't end the segment — see _detect_uptrend_scanner.
         return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
 
     passes, fail_reason = _scan_downtrend_criteria(window_t, lookback_t, H55, R55, R55_pip)
 
-    cur_ts = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
-    if state is not None:
-        if passes:
-            if state.down_segment_id is None:
-                state.down_segment_id = cur_ts
-        else:
-            state.down_segment_id = None
+    # Merged-trend segment tracking — mirror of UP path. See ScannerSegmentState
+    # docstring and _detect_uptrend_scanner for the why.
+    cur_we = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
+    cur_ws = window[0].time.isoformat() if hasattr(window[0].time, "isoformat") else str(window[0].time)
+    if state is not None and passes:
+        is_new_segment = (
+            state.down_last_confirmed_we is None
+            or cur_ws >= state.down_last_confirmed_we
+        )
+        if is_new_segment or state.down_segment_id is None:
+            state.down_segment_id = cur_we
+        state.down_last_confirmed_we = cur_we
 
     if not passes:
         return _skip(fail_reason)

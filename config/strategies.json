@@ -1,6 +1,6 @@
 {
   "version": "66",
-  "last_updated": "2026-05-11",
+  "last_updated": "2026-05-12",
   "patterns": {
     "MOUNTAIN": {
       "active": true,
@@ -52,7 +52,7 @@
       ]
     },
     "UPTREND_SCANNER": {
-      "active": true,
+      "active": false,
       "implemented": true,
       "name": "Uptrend Scanner v3.8",
       "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric.",
@@ -71,11 +71,12 @@
       "allowed_tfs": [
         "M5",
         "M15",
-        "M30"
+        "M30",
+        "M1"
       ]
     },
     "DOWNTREND_SCANNER": {
-      "active": true,
+      "active": false,
       "implemented": true,
       "name": "Downtrend Scanner v3.8",
       "description": "Mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric. (v3.8: C6D inequality fix)",
@@ -94,7 +95,8 @@
       "allowed_tfs": [
         "M5",
         "M15",
-        "M30"
+        "M30",
+        "M1"
       ]
     }
   },

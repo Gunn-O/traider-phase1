@@ -122,7 +122,8 @@
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-11 --tfs M1 --dup-pip 0 2>&1 | Select-Object -Last 18)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-11 --tfs M1 2>&1 | Select-Object -Last 12)",
       "Bash(git reset *)",
-      "Bash(git status *)"
+      "Bash(git status *)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-11 --tfs M1 2>&1 | Select-Object -Last 14)"
     ],
     "additionalDirectories": [
       "/tmp",
