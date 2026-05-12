@@ -32,7 +32,12 @@ export default function Dashboard({ bots, onStop }) {
         all.push({ ...o, bot_id: b.bot_id, tf: b.tf })
       }
     }
-    return all
+    // Newest first — open_time / candle_time / plan_id all encode the order time;
+    // fall back to plan_id which embeds YYYYMMDD-HHMMSS so it sorts correctly.
+    return all.sort((a, b) =>
+      String(b.open_time || b.candle_time || b.plan_id || '')
+        .localeCompare(String(a.open_time || a.candle_time || a.plan_id || ''))
+    )
   }, [visibleBots])
 
   const closedOrders = useMemo(() => {
@@ -42,7 +47,12 @@ export default function Dashboard({ bots, onStop }) {
         all.push({ ...o, bot_id: b.bot_id, tf: b.tf })
       }
     }
-    return all.slice(-30).reverse()
+    // Newest first by close_time (closed_orders is append-only; reverse puts
+    // most-recently-closed at top).
+    return all.sort((a, b) =>
+      String(b.close_time || b.plan_id || '')
+        .localeCompare(String(a.close_time || a.plan_id || ''))
+    ).slice(0, 30)
   }, [visibleBots])
 
   return (
@@ -344,7 +354,9 @@ function OpenOrdersPanel({ orders }) {
         <table className="orders-table">
           <thead>
             <tr>
+              <th>Time</th>
               <th>Bot</th>
+              <th>Strategy</th>
               <th>Plan</th>
               <th>Action</th>
               <th>Entry</th>
@@ -356,7 +368,9 @@ function OpenOrdersPanel({ orders }) {
           <tbody>
             {orders.map((o, i) => (
               <tr key={i}>
+                <td className="text-mono text-muted">{fmtTime(o.open_time || o.candle_time) || planIdTime(o.plan_id)}</td>
                 <td className="text-mono text-muted">{o.bot_id}</td>
+                <td className="text-mono">{shortPattern(o.pattern || o.chart_type)}</td>
                 <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
                 <td>
                   <span className={`badge ${o.action === 'BUY' ? 'success' : 'warning'}`}>{o.action}</span>
@@ -384,7 +398,9 @@ function ClosedOrdersPanel({ orders }) {
         <table className="orders-table">
           <thead>
             <tr>
+              <th>Close Time</th>
               <th>Bot</th>
+              <th>Strategy</th>
               <th>Plan</th>
               <th>Result</th>
               <th>Reason</th>
@@ -395,10 +411,12 @@ function ClosedOrdersPanel({ orders }) {
           <tbody>
             {orders.map((o, i) => (
               <tr key={i}>
+                <td className="text-mono text-muted">{fmtTime(o.close_time) || planIdTime(o.plan_id)}</td>
                 <td className="text-mono text-muted">{o.bot_id}</td>
+                <td className="text-mono">{shortPattern(o.pattern || o.chart_type)}</td>
                 <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
                 <td>
-                  <span className={`badge ${o.result === 'WIN' ? 'success' : 'error'}`}>{o.result}</span>
+                  <span className={`badge ${o.result === 'WIN' ? 'success' : o.result === 'LOSS' ? 'error' : 'warning'}`}>{o.result}</span>
                 </td>
                 <td className="text-muted">{o.close_reason}</td>
                 <td className="text-mono">{fmt(o.close_price)}</td>
@@ -412,6 +430,26 @@ function ClosedOrdersPanel({ orders }) {
       )}
     </div>
   )
+}
+
+// Short, readable strategy label — MOUNTAIN, MAI_RUAY,
+// UPTREND_SCANNER → "Uptrend", DOWNTREND_SCANNER → "Downtrend"
+function shortPattern(p) {
+  if (!p) return '—'
+  const u = String(p).toUpperCase()
+  if (u === 'UPTREND_SCANNER')   return 'Uptrend'
+  if (u === 'DOWNTREND_SCANNER') return 'Downtrend'
+  if (u.startsWith('MOUNTAIN'))  return 'Mountain'
+  if (u.startsWith('MAI_RUAY'))  return 'MaiRuay'
+  return u
+}
+
+// Extract HH:MM:SS from a plan_id like "RT-PLAN-20260512-153700-000000"
+// when no explicit open_time / close_time is attached to the order.
+function planIdTime(id) {
+  if (!id) return ''
+  const m = String(id).match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/)
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : ''
 }
 
 function fmt(v, digits = 2) {
