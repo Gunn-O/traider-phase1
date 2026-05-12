@@ -588,6 +588,12 @@ class TraiderMainLoop:
                         "close_reason": t.get('close_reason', ''),
                         "close_price": t.get('close_price', 0),
                         "pnl": t.get('pnl_usd', t.get('pnl', 0)),
+                        # Dashboard Closed Positions panel reads pattern +
+                        # close_time + open_time. Without these the Strategy
+                        # column shows "—" and Time is parsed from plan_id.
+                        "pattern": (t.get('pattern') or t.get('chart_type') or '').upper(),
+                        "close_time": str(t.get('timestamp_close', '') or t.get('close_time', '')),
+                        "open_time": str(t.get('timestamp_open', '') or ''),
                     })
 
                     # Update LocalDB whenever it's available (backtest always; SIM/LIVE
@@ -1128,6 +1134,9 @@ class TraiderMainLoop:
                 "tp": order.get('tp_price', order.get('tp', 0)),
                 "lot": order.get('lot_size', order.get('lot', 0)),
                 "pattern": (signal.pattern if signal else ''),
+                # Dashboard Open Positions panel reads open_time for its
+                # "Time" column and to sort newest-first.
+                "open_time": str(candle_time) if candle_time else '',
             })
 
         # Update portfolio state (14 fields)
@@ -1361,6 +1370,11 @@ class TraiderMainLoop:
                                     "close_reason": broker_pos['close_reason'],
                                     "close_price": broker_pos['close_price'],
                                     "pnl": broker_pos['pnl'],
+                                    # See plan_closed at line ~584 for why
+                                    # Dashboard needs pattern + timestamps.
+                                    "pattern": (order.get('pattern') or order.get('chart_type') or '').upper(),
+                                    "close_time": broker_pos.get('close_time', ''),
+                                    "open_time": str(order.get('timestamp_open', '') or order.get('open_time', '')),
                                 },
                             )
 

@@ -117,10 +117,13 @@ def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
         import sqlite3
         con = sqlite3.connect(db_path)
         con.row_factory = sqlite3.Row
-        # Open = anything still PENDING for this bot
+        # Open = anything still PENDING for this bot. Include chart_type +
+        # timestamp_open so the Dashboard Open Positions panel can render the
+        # Strategy column and Time column without having to wait for the next
+        # event broadcast.
         open_rows = con.execute(
             "SELECT trade_id, plan_id, action, entry_price, sl_price, tp_price, "
-            "lot_size, rr_ratio FROM trades "
+            "lot_size, rr_ratio, chart_type, timestamp_open FROM trades "
             "WHERE bot_id = ? AND result = 'PENDING' "
             "ORDER BY timestamp_open",
             (bot_id,),
@@ -136,13 +139,17 @@ def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
                 "lot":       r["lot_size"],
                 "lot_size":  r["lot_size"],
                 "rr":        r["rr_ratio"],
+                "pattern":   (r["chart_type"] or "").upper(),
+                "open_time": r["timestamp_open"],
             }
             for r in open_rows
         ]
-        # Closed = last 50 WIN/LOSS/CANCELLED for this bot, newest last
+        # Closed = last 50 WIN/LOSS/CANCELLED for this bot, newest last.
+        # chart_type + timestamp_open same reason as above so the Closed panel
+        # can show Strategy / Open Time.
         closed_rows = con.execute(
             "SELECT trade_id, plan_id, action, result, close_reason, close_price, "
-            "pnl_usd, timestamp_close FROM trades "
+            "pnl_usd, timestamp_close, chart_type, timestamp_open FROM trades "
             "WHERE bot_id = ? AND result IN ('WIN','LOSS','CANCELLED') "
             "ORDER BY timestamp_close ASC LIMIT 50",
             (bot_id,),
@@ -157,6 +164,8 @@ def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
                 "close_price":  r["close_price"],
                 "pnl":          r["pnl_usd"],
                 "close_time":   r["timestamp_close"],
+                "pattern":      (r["chart_type"] or "").upper(),
+                "open_time":    r["timestamp_open"],
             }
             for r in closed_rows
         ]

@@ -432,15 +432,17 @@ function ClosedOrdersPanel({ orders }) {
   )
 }
 
-// Short, readable strategy label — MOUNTAIN, MAI_RUAY,
-// UPTREND_SCANNER → "Uptrend", DOWNTREND_SCANNER → "Downtrend"
+// Short, readable strategy label. Events send the raw signal.pattern
+// (`UPTREND_SCANNER`, `DOWNTREND_SCANNER`, `MOUNTAIN`, `MAI_RUAY`); DB
+// hydration uses chart_type (`uptrend`, `downtrend`, `mountain`, `mai_ruay`).
+// Match prefixes so both forms render identically.
 function shortPattern(p) {
   if (!p) return '—'
   const u = String(p).toUpperCase()
-  if (u === 'UPTREND_SCANNER')   return 'Uptrend'
-  if (u === 'DOWNTREND_SCANNER') return 'Downtrend'
+  if (u.startsWith('UPTREND'))   return 'Uptrend'
+  if (u.startsWith('DOWNTREND')) return 'Downtrend'
   if (u.startsWith('MOUNTAIN'))  return 'Mountain'
-  if (u.startsWith('MAI_RUAY'))  return 'MaiRuay'
+  if (u.startsWith('MAI_RUAY') || u.startsWith('MAIRUAY')) return 'MaiRuay'
   return u
 }
 
