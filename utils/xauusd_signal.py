@@ -783,15 +783,15 @@ def format_signal(sig: Signal, cur_time: str = "") -> str:
 
 
 # ════════════════════════════════════════════════════════════════════
-# XAUUSD Uptrend + Downtrend Scanner v3.4
-# Ported from notebook XAUUSD_Uptrend_Downtrend_Scanner_v3.4.md
+# XAUUSD Uptrend + Downtrend Scanner v3.8
+# Ported from notebook XAUUSD_Uptrend_Downtrend_Scanner_v3.8.md
 # These are ADDITIVE — no existing function above is modified.
 # Public detectors:
 #     _detect_uptrend_scanner(bars, portfolio)   -> Optional[Signal]
 #     _detect_downtrend_scanner(bars, portfolio) -> Optional[Signal]
 # ════════════════════════════════════════════════════════════════════
 
-# ── Scanner constants (notebook v3.4) ─────────────────────────────
+# ── Scanner constants (notebook v3.8) ─────────────────────────────
 _SCAN_WINDOW          = 55
 _SCAN_LOOKBACK        = 25
 _SCAN_C1_MIN          = 0.60   # Close in upper 60% of R55
@@ -812,7 +812,7 @@ _SCAN_FATHER_MIN_PCT  = 40.0   # anti-trend kill threshold (% R55, pip basis)
 _SCAN_FATHER_MAX_PCT  = 100.0
 
 
-# ── Stateful trend-segment tracking (mirror notebook v3.4 backtest behavior) ──
+# ── Stateful trend-segment tracking (mirror notebook v3.8 backtest behavior) ──
 # In the notebook, `scan_uptrend` + `scan_entries_bar_by_bar` walk every bar
 # sequentially and track:
 #   - is_trend (currently inside a trend window)
@@ -943,7 +943,11 @@ def _scan_c4_down(window_t, R55):
     return False
 
 def _scan_c5_down(lookback_t, R55):
-    if not lookback_t or R55 <= 1e-6:
+    # Short-circuit when the lookback window is sparse (matches notebook v3.8
+    # `check_c5d` — bot's LIVE mode often has <25 lookback bars after a fresh
+    # symbol_select; v3.7 used to fall through and accidentally pass anyway,
+    # v3.8 makes the early-return explicit).
+    if not lookback_t or len(lookback_t) < 5 or R55 <= 1e-6:
         return True
     for b in lookback_t:
         body = _C(b) - _O(b)            # bullish > 0
@@ -952,12 +956,25 @@ def _scan_c5_down(lookback_t, R55):
     return True
 
 def _scan_c6_down(window_t, lookback_t, H55, R55):
-    """Mirror of C6 — min close in (lookback + first 5) must stay ABOVE H55 - 40% R55."""
+    """C6D — match notebook v3.8 `check_c6d`: at least one close in
+    (lookback + first 5 of window) must reach AT OR ABOVE the level
+    H55 - 40% R55 (the top 40% boundary of the 55-bar range).
+
+    Semantic intent (downtrend): the start of the window must have been HIGH
+    — there should be an initial peak the price subsequently fell from.
+
+    Note: v3.7 had the inequality flipped (`max(closes) <= level`) which
+    required the start to be LOW — exactly opposite of a valid downtrend
+    setup. That was the bug v3.8 fixes.
+
+    Per CLAUDE.md, notebook engine code is the source of truth — this is NOT
+    a clean mirror of C6 UP (which uses `max <= level_low`); the asymmetry
+    is intentional in v3.8."""
     level = H55 - _SCAN_C6_MAX_START * R55
     closes = [_C(b) for b in window_t[: _SCAN_C6_START_BARS]]
     if lookback_t:
         closes += [_C(b) for b in lookback_t]
-    return (min(closes) >= level) if closes else True
+    return (max(closes) >= level) if closes else True
 
 
 # ── Anti-trend "father" filter ────────────────────────────────────
@@ -1034,14 +1051,14 @@ def _detect_uptrend_scanner(
     debug: dict = None,
     state: "Optional[ScannerSegmentState]" = None,
 ):
-    """Scanner v3.4 BUY detector. Returns Signal or None.
+    """Scanner v3.8 BUY detector. Returns Signal or None.
 
     debug: optional dict — when supplied, writes 'skip' = '<reason>' on each
            early-exit so signal_engine can surface a per-pattern SKIP reason
            in the heartbeat (Tier 2). Strategy logic is unchanged.
     state: optional ScannerSegmentState — when supplied, the detector tracks
            the current uptrend segment and refuses to fire on segments that
-           already had a LOSS (notebook v3.4 stop_segments behavior).
+           already had a LOSS (notebook v3.8 stop_segments behavior).
 
     Pipeline:
       1. C1-C6 on the trailing 55-bar window (with 25-bar lookback for C5/C6)
@@ -1182,7 +1199,7 @@ def _detect_downtrend_scanner(
     debug: dict = None,
     state: "Optional[ScannerSegmentState]" = None,
 ):
-    """Scanner v3.4 SELL detector. Mirror of the BUY path.
+    """Scanner v3.8 SELL detector. Mirror of the BUY path.
 
     debug: optional dict — same usage as _detect_uptrend_scanner.
     state: optional ScannerSegmentState — tracks the current downtrend segment
@@ -1237,14 +1254,20 @@ def _detect_downtrend_scanner(
     if not highs or not lows:
         return _skip("ไม่เจอ swing high/low")
 
-    thresh_body_pip = _SCAN_SL_MIN_BODY_PCT * R55_pip
+    # Notebook v3.8 SELL path (`scan_entries_bar_by_bar_down`) preserves the
+    # same units quirk as v3.7: multiplies `min_body` by 100 before comparing
+    # to `thresh_body` (which is already in pip), so the 4% R55 body filter
+    # is *effectively disabled* on the SELL side. The BUY path doesn't have
+    # the extra *100 and the filter is active there. Per CLAUDE.md (notebook
+    # is source of truth), we replicate the same asymmetry — otherwise live
+    # SELL signals get blocked when Colab fires them (verified at M1
+    # 2026-05-11 12:09/12:17 UTC).
     triggered = []
     for sh in highs:
         body_hi = sh['body_hi']
         if not (zone_lo <= body_hi <= zone_hi):
             continue
-        if not _scan_swing_pair_min_body_ok(window_t, sh, thresh_body_pip):
-            continue
+        # SELL: skip the body filter to match notebook behavior.
         if cur_high >= body_hi:
             triggered.append(sh)
     if not triggered:

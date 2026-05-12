@@ -19,7 +19,12 @@
         "SL = entry - 60% × height"
       ],
       "priority": 2,
-      "allowed_tfs": ["M1", "M5"]
+      "allowed_tfs": [
+        "M1",
+        "M5",
+        "M15",
+        "M30"
+      ]
     },
     "MAI_RUAY": {
       "active": true,
@@ -39,15 +44,20 @@
         "Lot = portfolio × 10% / SL (pip)"
       ],
       "priority": 5,
-      "allowed_tfs": ["M1", "M5", "M15", "M30"]
+      "allowed_tfs": [
+        "M1",
+        "M5",
+        "M15",
+        "M30"
+      ]
     },
     "UPTREND_SCANNER": {
       "active": true,
       "implemented": true,
-      "name": "Uptrend Scanner v3.4",
+      "name": "Uptrend Scanner v3.8",
       "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric.",
       "direction": "BUY",
-      "version": "3.4",
+      "version": "3.8",
       "validations": [
         "C1: Close >= 60% R55",
         "C2: Recent Low (5 bars) >= 55% R55",
@@ -58,26 +68,34 @@
         "Anti-trend: father bar 40-100% R55 in 1-8 bars blocks signal"
       ],
       "priority": 6,
-      "allowed_tfs": ["M5"]
+      "allowed_tfs": [
+        "M5",
+        "M15",
+        "M30"
+      ]
     },
     "DOWNTREND_SCANNER": {
       "active": true,
       "implemented": true,
-      "name": "Downtrend Scanner v3.4",
-      "description": "Mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric.",
+      "name": "Downtrend Scanner v3.8",
+      "description": "Mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric. (v3.8: C6D inequality fix)",
       "direction": "SELL",
-      "version": "3.4",
+      "version": "3.8",
       "validations": [
         "C1D: Close <= 40% R55 (top-down)",
         "C2D: Recent High (5 bars) <= 45% R55 (top-down)",
         "C3D: Rise from LL <= 30% R55",
         "C4D: Bearish impulse 2-8 bars >= 25% R55",
         "C5D: No bullish bar > 30% R55 in 25-bar lookback",
-        "C6D: min close in (lookback + first 5) >= H55 - 40% R55",
+        "C6D: max close in (lookback + first 5) >= H55 - 40% R55 (v3.8 fix)",
         "Anti-trend: father bar 40-100% R55 (mirror) blocks signal"
       ],
       "priority": 7,
-      "allowed_tfs": ["M5"]
+      "allowed_tfs": [
+        "M5",
+        "M15",
+        "M30"
+      ]
     }
   },
   "global_settings": {
@@ -93,7 +111,9 @@
       "enabled": true,
       "close_hour_utc": 21,
       "buffer_minutes": 120,
-      "weekdays_only": [4]
+      "weekdays_only": [
+        4
+      ]
     }
   }
 }

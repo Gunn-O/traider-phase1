@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS trades (
     mfe_pip            REAL DEFAULT 0,   -- max favorable excursion while open (pip)
     r55_pip_at_open    REAL,             -- 55-bar range at entry (volatility context)
     pattern_details_json TEXT,           -- json.dumps(signal.details) for pattern tuning
-    -- Scanner v3.4 stop_segments support (2026-05-12)
+    -- Scanner v3.8 stop_segments support (2026-05-12)
     scanner_segment_id TEXT              -- ISO timestamp of first bar in trend segment; used to skip same-segment entries after LOSS
 );
 
