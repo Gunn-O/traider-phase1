@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { useBots } from './hooks/useBots'
 import { useBotState } from './hooks/useBotState'
 import Sidebar from './components/Sidebar'
 import TopBar from './components/TopBar'
@@ -12,22 +13,22 @@ import Backtest from './pages/Backtest'
 import Strategy from './pages/Strategy'
 
 export default function App() {
-  const {
-    botState, isConnected,
-    startBot, stopBot, emergencyStop
-  } = useBotState()
+  // New multi-bot model — primary state for Dashboard + TopBar
+  const { bots, isConnected, startBot, stopBot, emergencyStopAll } = useBots()
 
-  // Lifted state — TopBar selectors drive the dashboard panel too,
-  // so MT5 candle fetches use whatever TF/symbol the user has selected
-  // (not whatever bot_state happens to hold from a previous run).
+  // Legacy single-bot view — pages that haven't migrated yet (AgentActivity,
+  // Proposals, Settings) consume this. Backed by /api/status which mirrors
+  // the first running bot.
+  const { botState } = useBotState()
+
+  // Selection state for the "Add Bot" form in TopBar.
   const [selection, setSelection] = useState({
-    tradeKind:   'simulation',  // 'simulation' | 'broker'
-    accountType: 'cent',        // 'cent' | 'real'
+    tradeKind:   'simulation',
+    accountType: 'cent',
     symbol:      'XAUUSDc',
     timeframe:   'M5',
     dataSource:  'auto',
   })
-
   const updateSelection = (patch) => setSelection(prev => ({ ...prev, ...patch }))
 
   return (
@@ -38,12 +39,11 @@ export default function App() {
       />
       <div className="main-wrapper">
         <TopBar
-          botState={botState}
+          bots={bots}
           selection={selection}
           onSelectionChange={updateSelection}
-          onStart={startBot}
-          onStop={stopBot}
-          onEmergencyStop={emergencyStop}
+          onAddBot={startBot}
+          onEmergencyStop={emergencyStopAll}
         />
         <main className="main-content">
           <Routes>
@@ -53,7 +53,7 @@ export default function App() {
             />
             <Route
               path="/dashboard"
-              element={<Dashboard botState={botState} selection={selection}/>}
+              element={<Dashboard bots={bots} onStop={stopBot} selection={selection}/>}
             />
             <Route
               path="/agents"

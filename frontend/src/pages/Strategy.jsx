@@ -5,15 +5,17 @@ export default function Strategy() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [strategies, setStrategies] = useState(null);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState('');  // pattern name currently being saved, '' if idle
 
   useEffect(() => {
     loadStrategies();
   }, []);
 
-  const loadStrategies = async () => {
+  // `silent` skips the loading-screen swap so a refetch (e.g. after a failed
+  // optimistic write) doesn't tear down the cards and reset scroll.
+  const loadStrategies = async ({ silent = false } = {}) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       setError(null);
       const response = await fetch('/api/strategies');
       if (!response.ok) throw new Error('Failed to load strategies');
@@ -21,33 +23,66 @@ export default function Strategy() {
       setStrategies(data);
     } catch (err) {
       setError(err.message);
-      console.error('Failed to load strategies:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
+  const postUpdate = async (body) => {
+    const res = await fetch('/api/strategies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      throw new Error(t || `HTTP ${res.status}`);
+    }
+    return res.json();
+  };
+
+  // Optimistic mutation — updates local state in place so the toggle feels
+  // instant and React doesn't tear down the cards (which used to lose the
+  // user's scroll position on every click).
   const handleToggle = async (patternName) => {
     if (saving) return;
-    try {
-      setSaving(true);
-      const currentActive = strategies.active_patterns || [];
-      const newActive = currentActive.includes(patternName)
-        ? currentActive.filter(p => p !== patternName)
-        : [...currentActive, patternName];
+    const currentActive = strategies.active_patterns || [];
+    const newActive = currentActive.includes(patternName)
+      ? currentActive.filter(p => p !== patternName)
+      : [...currentActive, patternName];
 
-      const response = await fetch('/api/strategies', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ active: newActive }),
-      });
-      if (!response.ok) throw new Error('Failed to update strategies');
-      await loadStrategies();
+    setStrategies(prev => ({ ...prev, active_patterns: newActive }))
+    setSaving(patternName);
+    try {
+      await postUpdate({ active: newActive });
     } catch (err) {
       setError(err.message);
-      console.error('Failed to toggle pattern:', err);
+      loadStrategies({ silent: true });  // resync without flashing the loading screen
     } finally {
-      setSaving(false);
+      setSaving('');
+    }
+  };
+
+  const handleTfToggle = async (patternName, tf) => {
+    if (saving) return;
+    const meta = strategies.patterns[patternName] || {};
+    const current = meta.allowed_tfs || strategies.all_tfs || [];
+    const next = current.includes(tf)
+      ? current.filter(t => t !== tf)
+      : [...current, tf];
+
+    setStrategies(prev => ({
+      ...prev,
+      patterns: { ...prev.patterns, [patternName]: { ...meta, allowed_tfs: next } },
+    }))
+    setSaving(patternName + ':' + tf);
+    try {
+      await postUpdate({ allowed_tfs: { [patternName]: next } });
+    } catch (err) {
+      setError(err.message);
+      loadStrategies();
+    } finally {
+      setSaving('');
     }
   };
 
@@ -86,6 +121,7 @@ export default function Strategy() {
 
   const patterns = strategies.patterns;
   const activePatterns = strategies.active_patterns || [];
+  const allTfs = strategies.all_tfs || ['M1', 'M5', 'M15', 'M30', 'H1', 'H4'];
 
   return (
     <div className="strategy-page">
@@ -105,6 +141,7 @@ export default function Strategy() {
             const isDeprecated = meta.deprecated || false;
             const isImplemented = meta.implemented !== false;
             const dirClass = meta.direction === 'BUY' ? 'buy' : meta.direction === 'SELL' ? 'sell' : '';
+            const allowedTfs = meta.allowed_tfs || allTfs;
 
             return (
               <div
@@ -124,7 +161,7 @@ export default function Strategy() {
                   </div>
                   <button
                     onClick={() => handleToggle(patternName)}
-                    disabled={saving || !isImplemented}
+                    disabled={!!saving || !isImplemented}
                     className={`strategy-toggle ${isActive ? 'on' : ''}`}
                     aria-label={`Toggle ${patternName}`}
                     title={!isImplemented ? 'Pattern not implemented yet' : ''}
@@ -155,6 +192,32 @@ export default function Strategy() {
                   </div>
                 )}
 
+                <div className="strategy-tfs">
+                  <div className="strategy-tfs-title">
+                    Active on TF
+                    <span className="strategy-tfs-count">
+                      ({allowedTfs.length}/{allTfs.length})
+                    </span>
+                  </div>
+                  <div className="strategy-tfs-pills">
+                    {allTfs.map(tf => {
+                      const on = allowedTfs.includes(tf);
+                      const busy = saving === patternName + ':' + tf;
+                      return (
+                        <button
+                          key={tf}
+                          className={`tf-pill ${on ? 'on' : ''} ${!isActive ? 'dim' : ''}`}
+                          onClick={() => handleTfToggle(patternName, tf)}
+                          disabled={!!saving || !isImplemented}
+                          title={isActive ? `${on ? 'Disable' : 'Enable'} ${tf} for ${patternName}` : 'Pattern is OFF — enable it first'}
+                        >
+                          {busy ? '…' : tf}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <div className="strategy-status">
                   <span className={`strategy-status-pill ${isActive ? 'active' : 'inactive'}`}>
                     {isActive ? '✓ ACTIVE' : '✗ INACTIVE'}
@@ -168,10 +231,10 @@ export default function Strategy() {
       <div className="strategy-help">
         <h3>💡 How to use Strategy Manager</h3>
         <ul>
-          <li>Toggle patterns on/off to control which setups the system will detect</li>
-          <li>Active patterns are checked by G2 Pre-filter before sending to Claude Reviewer</li>
-          <li>Changes take effect immediately for new candles</li>
-          <li>Priority determines detection order (lower number = higher priority)</li>
+          <li>Master toggle (top-right) turns the whole strategy ON / OFF</li>
+          <li>TF pills under each card pick which timeframes the strategy runs on (Mountain default = M1, M5)</li>
+          <li>A bot only fires a strategy if both the master toggle is ON and its TF is in the allow-list</li>
+          <li>Changes take effect on the next cycle — no restart needed</li>
         </ul>
       </div>
     </div>

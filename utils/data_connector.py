@@ -1246,11 +1246,7 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDc"):
     Raises:
         RuntimeError: If forced mode is not available
     """
-    # Override from environment if not specified
-    if mode == "auto":
-        mode = os.getenv("DATA_MODE", "auto")
-
-    # Normalize backtest/simulate mode to auto
+    # Normalize legacy backtest/simulate aliases to auto-detect
     if mode in ["backtest", "simulate"]:
         mode = "auto"
 

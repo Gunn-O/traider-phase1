@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Auto-start TraiderLauncher.exe at user logon via Windows Task Scheduler.
 .DESCRIPTION
