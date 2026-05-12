@@ -187,7 +187,7 @@ def _sweep_dead() -> List[str]:
         _save_sessions()
     return transitioned
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -746,6 +746,289 @@ async def get_history(limit: int = 30):
         "count": 0,
         "message": "No trade history available"
     }
+
+
+# ─── Trade History (analytics) ───────────────────────────────────────
+# Reads from LocalDB (traider_backtest.db / traider_sim.db). Computes:
+#   - List of normalized trade objects (filtered by date / mode / pattern / bot_id)
+#   - Aggregate stats: winrate, P&L, drawdown, equity curve, consecutive streaks
+# Used by TradeHistory.jsx — a single page showing every trade the system has
+# ever taken, regardless of which bot opened it.
+
+def _localdb_paths() -> List[str]:
+    """Both DBs the bot might write to. Earlier/older runs land in different
+    files, so the analytics page queries both and merges."""
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "traider_sim.db",
+        here / "traider_backtest.db",
+        here / os.getenv("LOCAL_DB_PATH", "traider_backtest.db"),
+    ]
+    seen, out = set(), []
+    for p in candidates:
+        s = str(p)
+        if s in seen:
+            continue
+        seen.add(s)
+        if p.exists():
+            out.append(s)
+    return out
+
+
+def _parse_bot_id(bot_id: Optional[str]) -> tuple:
+    """bot_id = '{tf}-{symbol}-{mode}'. Returns (tf, symbol, mode), each may be None."""
+    if not bot_id:
+        return (None, None, None)
+    parts = bot_id.split("-")
+    if len(parts) >= 3:
+        return (parts[0], parts[1], parts[-1])
+    return (None, None, None)
+
+
+def _normalize_trade(row: dict, source_db: str) -> dict:
+    """Map a LocalDB `trades` row to the TradeHistory schema the UI expects.
+    Keeps the LocalDB row intact under `_raw` for debugging if anyone needs it."""
+    tf, symbol, mode = _parse_bot_id(row.get("bot_id"))
+    entry = row.get("entry_price")
+    close = row.get("close_price")
+    sl    = row.get("sl_price")
+    tp    = row.get("tp_price")
+    action = (row.get("action") or "").upper()
+
+    pnl_pip = None
+    if entry is not None and close is not None:
+        # 1 pip = 0.01 USD on XAUUSD
+        pnl_pip = round((close - entry) * 100 * (1 if action == "BUY" else -1), 1)
+
+    rr_actual = None
+    if entry is not None and close is not None and sl is not None:
+        risk = abs(entry - sl)
+        if risk > 0:
+            reward = (close - entry) if action == "BUY" else (entry - close)
+            rr_actual = round(reward / risk, 2)
+
+    return {
+        "trade_id":         row.get("trade_id"),
+        "plan_id":          row.get("plan_id"),
+        "bot_id":           row.get("bot_id"),
+        "open_time":        row.get("timestamp_open"),
+        "close_time":       row.get("timestamp_close"),
+        "symbol":           symbol or "XAUUSDc",
+        "timeframe":        row.get("timeframe") or tf,
+        "direction":        action,
+        "lot":              row.get("lot_size"),
+        "entry_price":      entry,
+        "sl_price":         sl,
+        "tp_price":         tp,
+        "close_price":      close,
+        "result":           row.get("result"),
+        "close_reason":     row.get("close_reason"),
+        "pnl_usd":          row.get("pnl_usd"),
+        "pnl_pip":          pnl_pip,
+        "rr_actual":        rr_actual,
+        "rr_planned":       row.get("rr_ratio"),
+        "pattern":          row.get("chart_type"),
+        "session":          row.get("session"),
+        "claude_confidence": row.get("confidence"),
+        "claude_reason":    row.get("ai_reason"),
+        "mae_pip":          row.get("mae_pip"),
+        "mfe_pip":          row.get("mfe_pip"),
+        "r55_pip_at_open":  row.get("r55_pip_at_open"),
+        "mode":             mode or "paper",
+        "source_db":        Path(source_db).name,
+    }
+
+
+def _load_trades_from_db(
+    from_date: Optional[str],
+    to_date: Optional[str],
+    mode: Optional[str],
+    pattern: Optional[str],
+    bot_id: Optional[str],
+) -> List[dict]:
+    """Pull rows from every LocalDB file we know about, normalize, merge,
+    and apply filters. Date filter applies to timestamp_open."""
+    import sqlite3
+    all_rows: List[dict] = []
+    for db_path in _localdb_paths():
+        try:
+            con = sqlite3.connect(db_path)
+            con.row_factory = sqlite3.Row
+            q = "SELECT * FROM trades"
+            conds, params = [], []
+            if bot_id:
+                conds.append("bot_id = ?")
+                params.append(bot_id)
+            if from_date:
+                conds.append("timestamp_open >= ?")
+                params.append(from_date)
+            if to_date:
+                # to_date is inclusive — extend to end-of-day
+                conds.append("timestamp_open < ?")
+                params.append(to_date + "T23:59:59" if "T" not in to_date else to_date)
+            if conds:
+                q += " WHERE " + " AND ".join(conds)
+            q += " ORDER BY timestamp_open"
+            try:
+                cur = con.execute(q, params)
+            except sqlite3.OperationalError:
+                # Older DB without some columns — skip silently.
+                con.close()
+                continue
+            for r in cur.fetchall():
+                all_rows.append(_normalize_trade(dict(r), db_path))
+            con.close()
+        except Exception as e:
+            logger.warning(f"_load_trades_from_db({db_path}): {e}")
+            continue
+
+    # Mode / pattern filters — applied post-normalize so they handle the bot_id parse.
+    if mode and mode != "all":
+        all_rows = [t for t in all_rows if (t.get("mode") or "").lower() == mode.lower()]
+    if pattern and pattern != "all":
+        all_rows = [t for t in all_rows if (t.get("pattern") or "").upper() == pattern.upper()]
+
+    # Sort by open_time, newest last (UI flips to desc).
+    all_rows.sort(key=lambda t: t.get("open_time") or "")
+    return all_rows
+
+
+def _compute_trade_stats(trades: List[dict], initial_balance: float = 1000.0) -> dict:
+    """Aggregate stats over normalized trades.
+    Equity curve uses cumulative pnl_usd starting from initial_balance.
+    Drawdown is computed against the running peak of that curve."""
+    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    wins   = [t for t in closed if t["result"] == "WIN"]
+    losses = [t for t in closed if t["result"] == "LOSS"]
+
+    total_pnl_usd = round(sum(t.get("pnl_usd") or 0 for t in closed), 2)
+    total_pnl_pip = round(sum(t.get("pnl_pip") or 0 for t in closed), 1)
+    wr_pct        = round(len(wins) / len(closed) * 100, 1) if closed else 0.0
+
+    best  = max(closed, key=lambda t: t.get("pnl_usd") or 0, default=None)
+    worst = min(closed, key=lambda t: t.get("pnl_usd") or 0, default=None)
+
+    rr_actuals  = [t["rr_actual"] for t in wins if t.get("rr_actual") is not None]
+    rr_planneds = [t["rr_planned"] for t in closed if t.get("rr_planned")]
+    avg_rr_actual  = round(sum(rr_actuals) / len(rr_actuals), 2) if rr_actuals else 0.0
+    avg_rr_planned = round(sum(rr_planneds) / len(rr_planneds), 2) if rr_planneds else 0.0
+
+    # Equity curve + drawdown
+    balance = initial_balance
+    peak = initial_balance
+    max_dd_pct = 0.0
+    max_dd_usd = 0.0
+    equity_curve: List[dict] = [{
+        "t": trades[0]["open_time"] if trades else None,
+        "balance": round(balance, 2),
+        "drawdown_pct": 0.0,
+        "drawdown_usd": 0.0,
+        "trade_id": None,
+    }]
+    for t in closed:
+        balance += (t.get("pnl_usd") or 0)
+        if balance > peak:
+            peak = balance
+        dd_usd = peak - balance
+        dd_pct = (dd_usd / peak * 100) if peak > 0 else 0.0
+        if dd_pct > max_dd_pct:
+            max_dd_pct = dd_pct
+        if dd_usd > max_dd_usd:
+            max_dd_usd = dd_usd
+        equity_curve.append({
+            "t": t.get("close_time") or t.get("open_time"),
+            "balance": round(balance, 2),
+            "drawdown_pct": round(-dd_pct, 2),  # negative for chart
+            "drawdown_usd": round(-dd_usd, 2),
+            "trade_id": t.get("trade_id"),
+        })
+
+    # Consecutive streaks
+    max_win_streak  = 0
+    max_loss_streak = 0
+    cur_win  = 0
+    cur_loss = 0
+    for t in closed:
+        if t["result"] == "WIN":
+            cur_win += 1
+            cur_loss = 0
+            max_win_streak = max(max_win_streak, cur_win)
+        else:
+            cur_loss += 1
+            cur_win = 0
+            max_loss_streak = max(max_loss_streak, cur_loss)
+
+    # Pattern breakdown
+    by_pattern: Dict[str, dict] = {}
+    for t in closed:
+        pat = t.get("pattern") or "UNKNOWN"
+        d = by_pattern.setdefault(pat, {"pattern": pat, "total": 0, "wins": 0, "losses": 0, "net_usd": 0.0})
+        d["total"] += 1
+        if t["result"] == "WIN":  d["wins"]   += 1
+        if t["result"] == "LOSS": d["losses"] += 1
+        d["net_usd"] += (t.get("pnl_usd") or 0)
+    pattern_breakdown = []
+    for d in by_pattern.values():
+        d["wr_pct"] = round(d["wins"] / d["total"] * 100, 1) if d["total"] else 0.0
+        d["net_usd"] = round(d["net_usd"], 2)
+        pattern_breakdown.append(d)
+    pattern_breakdown.sort(key=lambda d: d["total"], reverse=True)
+
+    return {
+        "total_trades":     len(trades),
+        "closed_trades":    len(closed),
+        "pending":          sum(1 for t in trades if t.get("result") == "PENDING"),
+        "wins":             len(wins),
+        "losses":           len(losses),
+        "wr_pct":           wr_pct,
+        "total_pnl_usd":    total_pnl_usd,
+        "total_pnl_pip":    total_pnl_pip,
+        "best_trade":       {"pnl_usd": best.get("pnl_usd"),  "trade_id": best.get("trade_id"),  "pattern": best.get("pattern")}  if best  else None,
+        "worst_trade":      {"pnl_usd": worst.get("pnl_usd"), "trade_id": worst.get("trade_id"), "pattern": worst.get("pattern")} if worst else None,
+        "avg_rr_actual":    avg_rr_actual,
+        "avg_rr_planned":   avg_rr_planned,
+        "max_drawdown_pct": round(max_dd_pct, 2),
+        "max_drawdown_usd": round(max_dd_usd, 2),
+        "max_win_streak":   max_win_streak,
+        "max_loss_streak":  max_loss_streak,
+        "current_balance":  round(balance, 2),
+        "starting_balance": initial_balance,
+        "peak_balance":     round(peak, 2),
+        "equity_curve":     equity_curve,
+        "pattern_breakdown": pattern_breakdown,
+    }
+
+
+@app.get("/api/trades")
+async def list_trades(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date:   Optional[str] = Query(None, alias="to"),
+    mode:      Optional[str] = "all",
+    pattern:   Optional[str] = "all",
+    bot_id:    Optional[str] = None,
+    limit:     int = 1000,
+):
+    """List trades for TradeHistory.jsx. Accepts ?from=YYYY-MM-DD&to=YYYY-MM-DD."""
+    trades = _load_trades_from_db(from_date, to_date, mode, pattern, bot_id)
+    # Truncate to `limit` newest (page itself paginates client-side).
+    if len(trades) > limit:
+        trades = trades[-limit:]
+    return {"trades": trades, "count": len(trades)}
+
+
+@app.get("/api/trades/stats")
+async def trade_stats(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date:   Optional[str] = Query(None, alias="to"),
+    mode:      Optional[str] = "all",
+    pattern:   Optional[str] = "all",
+    bot_id:    Optional[str] = None,
+    initial_balance: float = 1000.0,
+):
+    """Aggregate analytics for TradeHistory.jsx. Same filters as /api/trades."""
+    trades = _load_trades_from_db(from_date, to_date, mode, pattern, bot_id)
+    stats = _compute_trade_stats(trades, initial_balance=initial_balance)
+    return stats
 
 
 @app.get("/api/proposals")
