@@ -473,6 +473,10 @@ class TraiderMainLoop:
 
         # Mountain state tracking (for Round 2 detection)
         self.mountain_state = None  # Will be updated by Signal Engine
+        # Notebook v3.4 stateful Scanner — segment tracking + stop_segments.
+        # Loaded from bot_state_snapshots.state_json on startup; persisted on
+        # each plan_closed event so a launcher restart preserves it.
+        self.scanner_state: Optional[dict] = None
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -505,6 +509,26 @@ class TraiderMainLoop:
                 )
 
         logger.info("✓ All agents initialized")
+
+    def _record_scanner_loss_segment(self, closed_trade: dict) -> None:
+        """If a closed Scanner trade is a LOSS, add its segment_id to the
+        scanner-state stop list (UP or DOWN bucket based on action). The next
+        cycle will refuse to fire a new Scanner signal in that same segment."""
+        seg = closed_trade.get('scanner_segment_id')
+        if not seg or closed_trade.get('result') != 'LOSS' or self.scanner_state is None:
+            return
+        action = str(closed_trade.get('action', '')).upper()
+        if action == 'BUY':
+            bucket = self.scanner_state.setdefault('stopped_up_segments', [])
+            direction = 'UP'
+        elif action == 'SELL':
+            bucket = self.scanner_state.setdefault('stopped_down_segments', [])
+            direction = 'DOWN'
+        else:
+            return
+        if seg not in bucket:
+            bucket.append(seg)
+            logger.info(f"Scanner: marked {direction} segment {seg} STOPPED after LOSS")
 
     def run_once(self, candle_time=None, candles_by_tf=None, current_candle=None):
         """
@@ -564,6 +588,11 @@ class TraiderMainLoop:
                             mae_pip=t.get('mae_pip'),
                             mfe_pip=t.get('mfe_pip'),
                         )
+
+                    # Notebook v3.4 stop_segments: on LOSS of a Scanner trade,
+                    # mark its segment so the detector blocks new entries in
+                    # that same trend segment until the trend resets.
+                    self._record_scanner_loss_segment(t)
                     # Persist bot counters so a launcher restart doesn't reset
                     # consecutive_loss / realized_pnl mid-session.
                     if self.local_db and _BOT_ID:
@@ -727,11 +756,13 @@ class TraiderMainLoop:
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
             portfolio=self.balance,
-            mountain_state=self.mountain_state
+            mountain_state=self.mountain_state,
+            scanner_state=self.scanner_state,
         )
 
-        # Update mountain_state from Signal Engine output
+        # Update state from Signal Engine output (mutated in place by detectors)
         self.mountain_state = world_state.get('mountain_state')
+        self.scanner_state = world_state.get('scanner_state')
 
         # Update latest_candle for dashboard chart
         if current_candle and candle_time:
@@ -987,18 +1018,23 @@ class TraiderMainLoop:
 
         # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
         # when running under api_server with a bot_id assigned).
-        if self.local_db:
-            # Snapshot analytics fields at the moment we open — feed Risk/Money-
-            # mgmt design later. R55 captures volatility; signal.details carries
-            # pattern-specific strength (Mountain height, MaiRuay father_pct, etc.)
-            import json as _json
-            r55_at_open = (world_state.get('range') or {}).get('pip')
-            sig_details = getattr(signal, 'details', None) if signal else None
-            try:
-                details_json = _json.dumps(sig_details, default=str) if sig_details else None
-            except Exception:
-                details_json = None
+        # Snapshot analytics fields at the moment we open (used by both DB
+        # insert and position_monitor attachment). R55 captures volatility;
+        # signal.details carries pattern-specific strength (Mountain height,
+        # MaiRuay father_pct, Scanner segment_id, etc.)
+        import json as _json
+        r55_at_open = (world_state.get('range') or {}).get('pip')
+        sig_details = getattr(signal, 'details', None) if signal else None
+        try:
+            details_json = _json.dumps(sig_details, default=str) if sig_details else None
+        except Exception:
+            details_json = None
+        # Scanner v3.4 segment_id — stored on each trade so the stop-on-loss
+        # filter in scanner_state knows which segment was lost. None for
+        # non-Scanner trades (Mountain / MaiRuay don't use segments).
+        scanner_seg_id = (sig_details or {}).get('segment_id') if sig_details else None
 
+        if self.local_db:
             for order in orders_with_ids:
                 self.local_db.insert_trade({
                     'trade_id': order['trade_id'],
@@ -1026,7 +1062,14 @@ class TraiderMainLoop:
                     'trailing_sl': order['sl'],
                     'r55_pip_at_open': r55_at_open,
                     'pattern_details_json': details_json,
+                    'scanner_segment_id': scanner_seg_id,
                 })
+
+        # Attach scanner_segment_id to each order dict before handing to the
+        # position monitor — the close-path needs it to mark the segment as
+        # STOPPED on a LOSS (notebook v3.4 stop_segments behavior).
+        for _o in orders_with_ids:
+            _o['scanner_segment_id'] = scanner_seg_id
 
         # Add to position monitor (only orders that actually went into MT5)
         self.position_monitor.add_orders(orders_with_ids)
@@ -1203,6 +1246,14 @@ class TraiderMainLoop:
                             order['close_reason'] = broker_pos['close_reason']
                             order['pnl_usd'] = broker_pos['pnl']
                             order['timestamp_close'] = broker_pos['close_time']
+
+                            # Mark segment as STOPPED on a Scanner LOSS.
+                            self._record_scanner_loss_segment({
+                                'result': broker_pos['result'],
+                                'scanner_segment_id': order.get('scanner_segment_id'),
+                                'action': order.get('action'),
+                                'trade_id': trade_id,
+                            })
 
                             # Push close event to api_server so the Dashboard
                             # moves the order from Open → Closed in real time.

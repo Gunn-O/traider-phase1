@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS trades (
     mae_pip            REAL DEFAULT 0,   -- max adverse excursion while open (pip)
     mfe_pip            REAL DEFAULT 0,   -- max favorable excursion while open (pip)
     r55_pip_at_open    REAL,             -- 55-bar range at entry (volatility context)
-    pattern_details_json TEXT            -- json.dumps(signal.details) for pattern tuning
+    pattern_details_json TEXT,           -- json.dumps(signal.details) for pattern tuning
+    -- Scanner v3.4 stop_segments support (2026-05-12)
+    scanner_segment_id TEXT              -- ISO timestamp of first bar in trend segment; used to skip same-segment entries after LOSS
 );
 
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -127,6 +129,7 @@ _EXTRA_TRADE_COLUMNS = [
     ("mfe_pip",              "REAL DEFAULT 0"),
     ("r55_pip_at_open",      "REAL"),
     ("pattern_details_json", "TEXT"),
+    ("scanner_segment_id",   "TEXT"),
 ]
 
 
@@ -194,13 +197,13 @@ class LocalDB:
              technique, action, entry_price, sl_price, tp_price,
              lot_size, lot_total_plan, rr_ratio, confidence, rsi_14,
              session, ai_reason, llm_tokens, llm_cost_usd, result, trailing_sl,
-             r55_pip_at_open, pattern_details_json)
+             r55_pip_at_open, pattern_details_json, scanner_segment_id)
             VALUES
             (:trade_id, :bot_id, :plan_id, :order_num, :timestamp_open, :timeframe, :chart_type,
              :technique, :action, :entry_price, :sl_price, :tp_price,
              :lot_size, :lot_total_plan, :rr_ratio, :confidence, :rsi_14,
              :session, :ai_reason, :llm_tokens, :llm_cost_usd, :result, :trailing_sl,
-             :r55_pip_at_open, :pattern_details_json)
+             :r55_pip_at_open, :pattern_details_json, :scanner_segment_id)
         """, {
             'trade_id': trade['trade_id'],
             'bot_id': trade.get('bot_id'),
@@ -227,6 +230,7 @@ class LocalDB:
             'trailing_sl': trade.get('trailing_sl', trade['sl_price']),
             'r55_pip_at_open': trade.get('r55_pip_at_open'),
             'pattern_details_json': trade.get('pattern_details_json'),
+            'scanner_segment_id': trade.get('scanner_segment_id'),
         })
         self.conn.commit()
 

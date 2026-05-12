@@ -142,6 +142,8 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> Li
             'timestamp_close': candle['timestamp'].isoformat() if isinstance(candle['timestamp'], datetime) else candle['timestamp'],
             'mae_pip': order.get('mae_pip', 0.0),
             'mfe_pip': order.get('mfe_pip', 0.0),
+            'scanner_segment_id': order.get('scanner_segment_id'),
+            'action': action,  # BUY/SELL — needed so the scanner-state stop list picks the right direction bucket
         })
 
         logger.info(

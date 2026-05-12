@@ -165,7 +165,8 @@ def convert_candles_to_ohlc(candles: List[dict]) -> List[OHLC]:
 def run_signal_engine(
     candles_by_tf: Dict[str, List[dict]],
     portfolio: float,
-    mountain_state: Optional[dict] = None
+    mountain_state: Optional[dict] = None,
+    scanner_state: Optional[dict] = None,
 ) -> dict:
     """
     Run Signal Engine (replaces G1 pattern detection)
@@ -269,12 +270,20 @@ def run_signal_engine(
 
     # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v3.4) — wrapper picks BUY
     # first, falls back to SELL. Each variant gated by its own (pattern, TF) flag.
+    # `scanner_state` is loaded from portfolio_state_cache by the caller; the
+    # detector mutates it in place (updates current segment_id; consults
+    # stopped_*_segments to refuse re-entry on segments that already had a LOSS).
+    updated_scanner_state = scanner_state
     if (is_pattern_active_for_tf('UPTREND_SCANNER', current_tf)
             or is_pattern_active_for_tf('DOWNTREND_SCANNER', current_tf)):
         from strategies import uptrend_downtrend_scanner as _ud_scanner
-        # Use nested dict so we capture both BUY and SELL skip reasons separately.
+        from utils.xauusd_signal import ScannerSegmentState
+        _scan_state_obj = ScannerSegmentState.from_dict(scanner_state)
         _dbg_ud: dict = {'buy': {}, 'sell': {}}
-        sig_ud = _ud_scanner.find_signal(bars=ohlc_bars, portfolio=portfolio, debug=_dbg_ud)
+        sig_ud = _ud_scanner.find_signal(
+            bars=ohlc_bars, portfolio=portfolio, debug=_dbg_ud, state=_scan_state_obj
+        )
+        updated_scanner_state = _scan_state_obj.to_dict()
         if sig_ud is not None and is_pattern_active_for_tf(sig_ud.pattern, current_tf):
             candidates.append(sig_ud)
         else:
@@ -323,6 +332,7 @@ def run_signal_engine(
                 'range_55': round(range_usd, 2)
             },
             'mountain_state': mountain_state,  # Return unchanged
+            'scanner_state': updated_scanner_state,  # v3.4 segment tracking
             'skip_reasons': skip_reasons,       # Tier 2: per-strategy SKIP reasons
         }
 
@@ -402,6 +412,7 @@ def run_signal_engine(
             'signal_engine_version': '4.25'
         },
         'mountain_state': updated_mountain_state,  # Return updated state
+        'scanner_state': updated_scanner_state,    # v3.4 segment tracking
         'skip_reasons': skip_reasons,                # Tier 2: SKIPs from non-firing strategies
     }
 

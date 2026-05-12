@@ -812,6 +812,53 @@ _SCAN_FATHER_MIN_PCT  = 40.0   # anti-trend kill threshold (% R55, pip basis)
 _SCAN_FATHER_MAX_PCT  = 100.0
 
 
+# ── Stateful trend-segment tracking (mirror notebook v3.4 backtest behavior) ──
+# In the notebook, `scan_uptrend` + `scan_entries_bar_by_bar` walk every bar
+# sequentially and track:
+#   - is_trend (currently inside a trend window)
+#   - segment_start_we (timestamp of when the current trend segment started)
+#   - stop_segments (segments where a LOSS already happened → skip remaining
+#     entries until trend resets)
+#   - watch_list (active swings being watched; pruned on use/expiry)
+#
+# Live cycle is stateless — each cycle scans from scratch — so we carry just
+# enough state across cycles to reproduce the two filters that materially
+# change which signals fire:
+#   1. segment_id: timestamp of the bar where current trend segment started
+#                  (resets when criteria fail or anti-trend triggers)
+#   2. stop_segments: segment_ids where we already lost a trade — block new
+#                     Scanner signals in that segment
+# The notebook's watch_list / father-stateful-reset are equivalent in LIVE
+# because each cycle re-scans the full 55-bar window from scratch and G2's
+# duplicate-pip filter prevents re-entering on the same swing.
+@dataclass
+class ScannerSegmentState:
+    """Per-bot, persisted across LIVE cycles in portfolio_state_cache."""
+    up_segment_id:        Optional[str] = None      # ISO timestamp; None = not in uptrend
+    down_segment_id:      Optional[str] = None
+    stopped_up_segments:   set = field(default_factory=set)
+    stopped_down_segments: set = field(default_factory=set)
+
+    def to_dict(self) -> dict:
+        return {
+            "up_segment_id":         self.up_segment_id,
+            "down_segment_id":       self.down_segment_id,
+            "stopped_up_segments":   sorted(self.stopped_up_segments),
+            "stopped_down_segments": sorted(self.stopped_down_segments),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> "ScannerSegmentState":
+        if not d:
+            return cls()
+        return cls(
+            up_segment_id=d.get("up_segment_id"),
+            down_segment_id=d.get("down_segment_id"),
+            stopped_up_segments=set(d.get("stopped_up_segments") or []),
+            stopped_down_segments=set(d.get("stopped_down_segments") or []),
+        )
+
+
 def _scan_lookback_tuples(bars: list, lookback_bars: int = _SCAN_LOOKBACK) -> list:
     """Last `lookback_bars` bars BEFORE the 55-bar window. Empty list if not enough history."""
     if len(bars) <= _SCAN_WINDOW:
@@ -960,12 +1007,41 @@ def _scan_swing_pair_min_body_ok(window_t, swing, thresh_body_pip: float) -> boo
 
 # ── Public detectors ──────────────────────────────────────────────
 
-def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, debug: dict = None):
+def _scan_uptrend_criteria(window_t, lookback_t, L55, R55, R55_pip):
+    """Pure C1-C6 + anti-trend evaluation. Returns (passes, fail_reason).
+    Split out so the LIVE detector can update segment state regardless of
+    which criterion failed."""
+    if not _scan_c1_up(window_t, L55, R55):
+        return False, "C1 fail (close < 60% R55)"
+    if not _scan_c2_up(window_t, L55, R55):
+        return False, "C2 fail (recent Low 5bars < 55% R55)"
+    if not _scan_c3_up(window_t, R55):
+        return False, "C3 fail (drop from HH > 30% R55)"
+    if not _scan_c4_up(window_t, R55):
+        return False, "C4 fail (no bullish impulse 25% R55)"
+    if not _scan_c5_up(lookback_t, R55):
+        return False, "C5 fail (bearish bar > 30% R55 in lookback)"
+    if not _scan_c6_up(window_t, lookback_t, L55, R55):
+        return False, "C6 fail (early closes > 40% R55)"
+    if _scan_detect_father(window_t, R55_pip, direction='down'):
+        return False, "anti-trend: bearish father bar"
+    return True, None
+
+
+def _detect_uptrend_scanner(
+    bars: "list[OHLC]",
+    portfolio: float = 1000.0,
+    debug: dict = None,
+    state: "Optional[ScannerSegmentState]" = None,
+):
     """Scanner v3.4 BUY detector. Returns Signal or None.
 
     debug: optional dict — when supplied, writes 'skip' = '<reason>' on each
            early-exit so signal_engine can surface a per-pattern SKIP reason
            in the heartbeat (Tier 2). Strategy logic is unchanged.
+    state: optional ScannerSegmentState — when supplied, the detector tracks
+           the current uptrend segment and refuses to fire on segments that
+           already had a LOSS (notebook v3.4 stop_segments behavior).
 
     Pipeline:
       1. C1-C6 on the trailing 55-bar window (with 25-bar lookback for C5/C6)
@@ -993,23 +1069,29 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, debug
     R55_pip = R55 * 100
 
     if R55 < _SCAN_MIN_R55_USD:
+        if state is not None:
+            state.up_segment_id = None  # flat market → no trend
         return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
 
-    if not _scan_c1_up(window_t, L55, R55):
-        return _skip("C1 fail (close < 60% R55)")
-    if not _scan_c2_up(window_t, L55, R55):
-        return _skip("C2 fail (recent Low 5bars < 55% R55)")
-    if not _scan_c3_up(window_t, R55):
-        return _skip("C3 fail (drop from HH > 30% R55)")
-    if not _scan_c4_up(window_t, R55):
-        return _skip("C4 fail (no bullish impulse 25% R55)")
-    if not _scan_c5_up(lookback_t, R55):
-        return _skip("C5 fail (bearish bar > 30% R55 in lookback)")
-    if not _scan_c6_up(window_t, lookback_t, L55, R55):
-        return _skip("C6 fail (early closes > 40% R55)")
+    passes, fail_reason = _scan_uptrend_criteria(window_t, lookback_t, L55, R55, R55_pip)
 
-    if _scan_detect_father(window_t, R55_pip, direction='down'):
-        return _skip("anti-trend: bearish father bar")
+    # Maintain segment_id across cycles. Trend starts on the first cycle where
+    # criteria pass; continues while they keep passing; ends the moment they
+    # fail (or anti-trend triggers).
+    cur_ts = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
+    if state is not None:
+        if passes:
+            if state.up_segment_id is None:
+                state.up_segment_id = cur_ts
+        else:
+            state.up_segment_id = None
+
+    if not passes:
+        return _skip(fail_reason)
+
+    # If we've already lost a trade in this same segment, don't re-enter it.
+    if state is not None and state.up_segment_id in state.stopped_up_segments:
+        return _skip(f"segment {state.up_segment_id} stopped after prior LOSS")
 
     cur = window_t[-1]
     cur_low = _L(cur)
@@ -1070,14 +1152,41 @@ def _detect_uptrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, debug
             'sh_body_hi': round(sh_body_hi, 3),
             'zone_lo': round(zone_lo, 3),
             'zone_hi': round(zone_hi, 3),
+            'segment_id': state.up_segment_id if state is not None else None,
         },
     )
 
 
-def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, debug: dict = None):
+def _scan_downtrend_criteria(window_t, lookback_t, H55, R55, R55_pip):
+    """Pure C1D-C6D + anti-trend evaluation (mirror of _scan_uptrend_criteria)."""
+    if not _scan_c1_down(window_t, H55, R55):
+        return False, "C1D fail (close > 40% R55 top-down)"
+    if not _scan_c2_down(window_t, H55, R55):
+        return False, "C2D fail (recent High 5bars > 45% R55 top-down)"
+    if not _scan_c3_down(window_t, R55):
+        return False, "C3D fail (rise from LL > 30% R55)"
+    if not _scan_c4_down(window_t, R55):
+        return False, "C4D fail (no bearish impulse 25% R55)"
+    if not _scan_c5_down(lookback_t, R55):
+        return False, "C5D fail (bullish bar > 30% R55 in lookback)"
+    if not _scan_c6_down(window_t, lookback_t, H55, R55):
+        return False, "C6D fail (early closes < 60% R55)"
+    if _scan_detect_father(window_t, R55_pip, direction='up'):
+        return False, "anti-trend: bullish father bar"
+    return True, None
+
+
+def _detect_downtrend_scanner(
+    bars: "list[OHLC]",
+    portfolio: float = 1000.0,
+    debug: dict = None,
+    state: "Optional[ScannerSegmentState]" = None,
+):
     """Scanner v3.4 SELL detector. Mirror of the BUY path.
 
-    debug: optional dict — same usage as _detect_uptrend_scanner."""
+    debug: optional dict — same usage as _detect_uptrend_scanner.
+    state: optional ScannerSegmentState — tracks the current downtrend segment
+           and blocks new entries on segments where a prior LOSS occurred."""
     from utils.swing_v414 import scan_swings
 
     def _skip(reason: str):
@@ -1098,23 +1207,25 @@ def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, deb
     R55_pip = R55 * 100
 
     if R55 < _SCAN_MIN_R55_USD:
+        if state is not None:
+            state.down_segment_id = None
         return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
 
-    if not _scan_c1_down(window_t, H55, R55):
-        return _skip("C1D fail (close > 40% R55 top-down)")
-    if not _scan_c2_down(window_t, H55, R55):
-        return _skip("C2D fail (recent High 5bars > 45% R55 top-down)")
-    if not _scan_c3_down(window_t, R55):
-        return _skip("C3D fail (rise from LL > 30% R55)")
-    if not _scan_c4_down(window_t, R55):
-        return _skip("C4D fail (no bearish impulse 25% R55)")
-    if not _scan_c5_down(lookback_t, R55):
-        return _skip("C5D fail (bullish bar > 30% R55 in lookback)")
-    if not _scan_c6_down(window_t, lookback_t, H55, R55):
-        return _skip("C6D fail (early closes < 60% R55)")
+    passes, fail_reason = _scan_downtrend_criteria(window_t, lookback_t, H55, R55, R55_pip)
 
-    if _scan_detect_father(window_t, R55_pip, direction='up'):
-        return _skip("anti-trend: bullish father bar")
+    cur_ts = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
+    if state is not None:
+        if passes:
+            if state.down_segment_id is None:
+                state.down_segment_id = cur_ts
+        else:
+            state.down_segment_id = None
+
+    if not passes:
+        return _skip(fail_reason)
+
+    if state is not None and state.down_segment_id in state.stopped_down_segments:
+        return _skip(f"segment {state.down_segment_id} stopped after prior LOSS")
 
     cur = window_t[-1]
     cur_high = _H(cur)
@@ -1175,5 +1286,6 @@ def _detect_downtrend_scanner(bars: "list[OHLC]", portfolio: float = 1000.0, deb
             'sl_body_lo': round(sl_body_lo, 3),
             'zone_lo': round(zone_lo, 3),
             'zone_hi': round(zone_hi, 3),
+            'segment_id': state.down_segment_id if state is not None else None,
         },
     )
