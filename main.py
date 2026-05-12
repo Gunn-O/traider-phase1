@@ -473,7 +473,7 @@ class TraiderMainLoop:
 
         # Mountain state tracking (for Round 2 detection)
         self.mountain_state = None  # Will be updated by Signal Engine
-        # Notebook v3.8 stateful Scanner — segment tracking + stop_segments.
+        # Notebook v4.2 stateful Scanner — segment tracking + stop_segments.
         # Loaded from bot_state_snapshots.state_json on startup; persisted on
         # each plan_closed event so a launcher restart preserves it.
         self.scanner_state: Optional[dict] = None
@@ -604,7 +604,7 @@ class TraiderMainLoop:
                             mfe_pip=t.get('mfe_pip'),
                         )
 
-                    # Notebook v3.8 stop_segments: on LOSS of a Scanner trade,
+                    # Notebook v4.2 stop_segments: on LOSS of a Scanner trade,
                     # mark its segment so the detector blocks new entries in
                     # that same trend segment until the trend resets.
                     self._record_scanner_loss_segment(t)
@@ -1072,7 +1072,7 @@ class TraiderMainLoop:
             details_json = _json.dumps(sig_details, default=str) if sig_details else None
         except Exception:
             details_json = None
-        # Scanner v3.8 segment_id — stored on each trade so the stop-on-loss
+        # Scanner v4.2 segment_id — stored on each trade so the stop-on-loss
         # filter in scanner_state knows which segment was lost. None for
         # non-Scanner trades (Mountain / MaiRuay don't use segments).
         scanner_seg_id = (sig_details or {}).get('segment_id') if sig_details else None
@@ -1110,7 +1110,7 @@ class TraiderMainLoop:
 
         # Attach scanner_segment_id to each order dict before handing to the
         # position monitor — the close-path needs it to mark the segment as
-        # STOPPED on a LOSS (notebook v3.8 stop_segments behavior).
+        # STOPPED on a LOSS (notebook v4.2 stop_segments behavior).
         for _o in orders_with_ids:
             _o['scanner_segment_id'] = scanner_seg_id
 

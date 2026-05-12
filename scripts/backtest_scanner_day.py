@@ -153,7 +153,7 @@ def replay(rates, tf_name: str, portfolio: float = 1000.0,
         if close_time is not None:
             # Block re-scan until the closing bar (1-trade-at-a-time)
             open_trade_end_idx = end_idx + bars_held + 1
-        # Stateful stop: notebook v3.7 marks segment STOPPED on LOSS.
+        # Stateful stop: notebook v4.2 marks segment STOPPED on LOSS.
         if result == "LOSS" and seg:
             if sig.direction == "BUY":
                 state.stopped_up_segments.add(seg)

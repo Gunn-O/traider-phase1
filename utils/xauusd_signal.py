@@ -783,7 +783,7 @@ def format_signal(sig: Signal, cur_time: str = "") -> str:
 
 
 # ════════════════════════════════════════════════════════════════════
-# XAUUSD Uptrend + Downtrend Scanner v3.8
+# XAUUSD Uptrend + Downtrend Scanner v4.2
 # Ported from notebook XAUUSD_Uptrend_Downtrend_Scanner_v3.8.md
 # These are ADDITIVE — no existing function above is modified.
 # Public detectors:
@@ -791,7 +791,7 @@ def format_signal(sig: Signal, cur_time: str = "") -> str:
 #     _detect_downtrend_scanner(bars, portfolio) -> Optional[Signal]
 # ════════════════════════════════════════════════════════════════════
 
-# ── Scanner constants (notebook v3.8) ─────────────────────────────
+# ── Scanner constants (notebook v4.2) ─────────────────────────────
 _SCAN_WINDOW          = 55
 _SCAN_LOOKBACK        = 25
 _SCAN_C1_MIN          = 0.60   # Close in upper 60% of R55
@@ -810,9 +810,13 @@ _SCAN_ZONE_DOWN_HI    = 0.35
 _SCAN_FATHER_MAX_BARS = 8
 _SCAN_FATHER_MIN_PCT  = 40.0   # anti-trend kill threshold (% R55, pip basis)
 _SCAN_FATHER_MAX_PCT  = 100.0
+# v4.2: skip a signal if TP / SL distance is too small — protects against
+# low-volatility setups where a tight 1:1 R:R becomes a coin-flip with
+# broker spread. Notebook `simulate_trades` uses `if tp_dist*100 < 200: continue`.
+_SCAN_MIN_TP_PIP      = 200.0
 
 
-# ── Stateful trend-segment tracking (mirror notebook v3.8 backtest behavior) ──
+# ── Stateful trend-segment tracking (mirror notebook v4.2 backtest behavior) ──
 # In the notebook, `scan_uptrend` + `scan_entries_bar_by_bar` walk every bar
 # sequentially and track:
 #   - is_trend (currently inside a trend window)
@@ -835,7 +839,7 @@ _SCAN_FATHER_MAX_PCT  = 100.0
 class ScannerSegmentState:
     """Per-bot, persisted across LIVE cycles in portfolio_state_cache.
 
-    Segment lifecycle (matches notebook v3.8 `scan_entries_bar_by_bar`):
+    Segment lifecycle (matches notebook v4.2 `scan_entries_bar_by_bar`):
       - First passing cycle → segment_id = current bar's ISO timestamp
       - Subsequent passing cycles where window overlaps previous (cur_ws <
         last_confirmed_we) → segment_id stays the same (continuation)
@@ -964,7 +968,7 @@ def _scan_c4_down(window_t, R55):
     return False
 
 def _scan_c5_down(lookback_t, R55):
-    # Short-circuit when the lookback window is sparse (matches notebook v3.8
+    # Short-circuit when the lookback window is sparse (matches notebook v4.2
     # `check_c5d` — bot's LIVE mode often has <25 lookback bars after a fresh
     # symbol_select; v3.7 used to fall through and accidentally pass anyway,
     # v3.8 makes the early-return explicit).
@@ -977,25 +981,21 @@ def _scan_c5_down(lookback_t, R55):
     return True
 
 def _scan_c6_down(window_t, lookback_t, H55, R55):
-    """C6D — match notebook v3.8 `check_c6d`: at least one close in
-    (lookback + first 5 of window) must reach AT OR ABOVE the level
-    H55 - 40% R55 (the top 40% boundary of the 55-bar range).
+    """C6D v4.2 — match notebook `check_c6d`: ALL closes in
+    (lookback + first 5 of window) must be AT OR ABOVE level
+    H55 - 40%R55. Implemented as `min(closes) >= level`.
 
-    Semantic intent (downtrend): the start of the window must have been HIGH
-    — there should be an initial peak the price subsequently fell from.
-
-    Note: v3.7 had the inequality flipped (`max(closes) <= level`) which
-    required the start to be LOW — exactly opposite of a valid downtrend
-    setup. That was the bug v3.8 fixes.
-
-    Per CLAUDE.md, notebook engine code is the source of truth — this is NOT
-    a clean mirror of C6 UP (which uses `max <= level_low`); the asymmetry
-    is intentional in v3.8."""
+    This is a TRUE mirror of C6 UP (`max(closes) <= level_low`) — for both
+    directions every early close must sit on the correct side of the 40%
+    boundary, not just one. v3.8 used `max(closes) >= level` (any close
+    above) which was too permissive; v4.2 tightens this back to "all closes
+    in top 40%" so the downtrend setup is confirmed by a consistently high
+    initial period, not a single spike."""
     level = H55 - _SCAN_C6_MAX_START * R55
     closes = [_C(b) for b in window_t[: _SCAN_C6_START_BARS]]
     if lookback_t:
         closes += [_C(b) for b in lookback_t]
-    return (max(closes) >= level) if closes else True
+    return (min(closes) >= level) if closes else True
 
 
 # ── Anti-trend "father" filter ────────────────────────────────────
@@ -1072,14 +1072,14 @@ def _detect_uptrend_scanner(
     debug: dict = None,
     state: "Optional[ScannerSegmentState]" = None,
 ):
-    """Scanner v3.8 BUY detector. Returns Signal or None.
+    """Scanner v4.2 BUY detector. Returns Signal or None.
 
     debug: optional dict — when supplied, writes 'skip' = '<reason>' on each
            early-exit so signal_engine can surface a per-pattern SKIP reason
            in the heartbeat (Tier 2). Strategy logic is unchanged.
     state: optional ScannerSegmentState — when supplied, the detector tracks
            the current uptrend segment and refuses to fire on segments that
-           already had a LOSS (notebook v3.8 stop_segments behavior).
+           already had a LOSS (notebook v4.2 stop_segments behavior).
 
     Pipeline:
       1. C1-C6 on the trailing 55-bar window (with 25-bar lookback for C5/C6)
@@ -1113,7 +1113,7 @@ def _detect_uptrend_scanner(
 
     passes, fail_reason = _scan_uptrend_criteria(window_t, lookback_t, L55, R55, R55_pip)
 
-    # Maintain segment_id across cycles per notebook v3.8 merged-trend rule:
+    # Maintain segment_id across cycles per notebook v4.2 merged-trend rule:
     # segment continues as long as passing windows overlap. A FAIL does NOT
     # reset segment_id — it only stays the same. A new segment is detected
     # when the next PASS has cur_ws >= up_last_confirmed_we (no overlap).
@@ -1174,6 +1174,11 @@ def _detect_uptrend_scanner(
     risk_pip = tp_dist * 100
     if risk_pip <= 0:
         return _skip("risk_pip <= 0")
+    # v4.2: skip low-volatility setups where SL/TP is too tight (≤200 pip).
+    # Matches notebook `simulate_trades`. 1:1 R:R on <200 pip becomes a
+    # coin-flip after broker spread + 1 candle of noise.
+    if risk_pip < _SCAN_MIN_TP_PIP:
+        return _skip(f"TP/SL too tight: {risk_pip:.0f}pip < {_SCAN_MIN_TP_PIP:.0f}pip")
 
     return Signal(
         pattern='UPTREND_SCANNER',
@@ -1227,7 +1232,7 @@ def _detect_downtrend_scanner(
     debug: dict = None,
     state: "Optional[ScannerSegmentState]" = None,
 ):
-    """Scanner v3.8 SELL detector. Mirror of the BUY path.
+    """Scanner v4.2 SELL detector. Mirror of the BUY path.
 
     debug: optional dict — same usage as _detect_uptrend_scanner.
     state: optional ScannerSegmentState — tracks the current downtrend segment
@@ -1318,6 +1323,9 @@ def _detect_downtrend_scanner(
     risk_pip = tp_dist * 100
     if risk_pip <= 0:
         return _skip("risk_pip <= 0")
+    # v4.2: skip low-volatility setups (see _detect_uptrend_scanner)
+    if risk_pip < _SCAN_MIN_TP_PIP:
+        return _skip(f"TP/SL too tight: {risk_pip:.0f}pip < {_SCAN_MIN_TP_PIP:.0f}pip")
 
     return Signal(
         pattern='DOWNTREND_SCANNER',

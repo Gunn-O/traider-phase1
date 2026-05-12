@@ -4,8 +4,8 @@ Signal Engine Wrapper
 Active strategies (per config/strategies.json + 3 reference notebooks under strategy/):
   - MOUNTAIN              (notebook v4.61 — strategies/mountain.py)
   - MAI_RUAY              (Father/Mother — strategies/mai_ruay.py)
-  - UPTREND_SCANNER       (notebook v3.8 — strategies/uptrend_downtrend_scanner.py)
-  - DOWNTREND_SCANNER     (notebook v3.8 — strategies/uptrend_downtrend_scanner.py)
+  - UPTREND_SCANNER       (notebook v4.2 — strategies/uptrend_downtrend_scanner.py)
+  - DOWNTREND_SCANNER     (notebook v4.2 — strategies/uptrend_downtrend_scanner.py)
 
 Each strategy runs independently on M5 bars; signal_engine picks the best by R:R.
 Time filter: block trades 60min before market close (21:00 UTC).
@@ -268,7 +268,7 @@ def run_signal_engine(
         elif _dbg_mr.get('skip'):
             skip_reasons['MAI_RUAY'] = _dbg_mr['skip']
 
-    # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v3.8) — wrapper picks BUY
+    # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v4.2) — wrapper picks BUY
     # first, falls back to SELL. Each variant gated by its own (pattern, TF) flag.
     # `scanner_state` is loaded from portfolio_state_cache by the caller; the
     # detector mutates it in place (updates current segment_id; consults
@@ -332,7 +332,7 @@ def run_signal_engine(
                 'range_55': round(range_usd, 2)
             },
             'mountain_state': mountain_state,  # Return unchanged
-            'scanner_state': updated_scanner_state,  # v3.8 segment tracking
+            'scanner_state': updated_scanner_state,  # v4.2 segment tracking
             'skip_reasons': skip_reasons,       # Tier 2: per-strategy SKIP reasons
         }
 
@@ -344,8 +344,8 @@ def run_signal_engine(
     chart_type_mapping = {
         'MOUNTAIN': 'mountain',
         'MAI_RUAY': 'mai_ruay',             # Branch F (Father/Mother candle)
-        'UPTREND_SCANNER': 'uptrend',       # v3.8 scanner (BUY)
-        'DOWNTREND_SCANNER': 'downtrend',   # v3.8 scanner (SELL)
+        'UPTREND_SCANNER': 'uptrend',       # v4.2 scanner (BUY)
+        'DOWNTREND_SCANNER': 'downtrend',   # v4.2 scanner (SELL)
     }
     chart_type = chart_type_mapping.get(signal.pattern, 'unclear')
 
@@ -412,7 +412,7 @@ def run_signal_engine(
             'signal_engine_version': '4.25'
         },
         'mountain_state': updated_mountain_state,  # Return updated state
-        'scanner_state': updated_scanner_state,    # v3.8 segment tracking
+        'scanner_state': updated_scanner_state,    # v4.2 segment tracking
         'skip_reasons': skip_reasons,                # Tier 2: SKIPs from non-firing strategies
     }
 

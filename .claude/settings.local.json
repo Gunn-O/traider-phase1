@@ -123,7 +123,12 @@
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-11 --tfs M1 2>&1 | Select-Object -Last 12)",
       "Bash(git reset *)",
       "Bash(git status *)",
-      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-11 --tfs M1 2>&1 | Select-Object -Last 14)"
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-11 --tfs M1 2>&1 | Select-Object -Last 14)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('utils/xauusd_signal.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(npx vite *)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 2>&1 | Select-Object -Last 60)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python C:\\\\Users\\\\MSI\\\\Desktop\\\\Traider\\\\traider-phase1\\\\scripts\\\\backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 2>&1 | Select-Object -Last 80)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python C:\\\\Users\\\\MSI\\\\Desktop\\\\Traider\\\\traider-phase1\\\\scripts\\\\backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 --dup-pip 0 2>&1 | Select-Object -Last 50)"
     ],
     "additionalDirectories": [
       "/tmp",

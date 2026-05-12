@@ -14,7 +14,7 @@
 |----------|----------|--------|
 | `strategy/XAUUSD_Backtest_Mountain.md` | **ภูเขา** (Mountain v4.61) | `strategies/mountain.py` |
 | `strategy/XAUUSD_Backtest_MaiRuay.md` | **ไม้รวย** (Father/Mother) | `strategies/mai_ruay.py` |
-| `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v3.8.md` | **Uptrend/Downtrend Scanner v3.8** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
+| `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v4.2.md` | **Uptrend/Downtrend Scanner v4.2** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
 
 **กฎเหล็ก:** Python ต้องตรงกับ **engine code ใน notebook** เสมอ (markdown header ใน notebook อาจล้าสมัย — engine code คือ source of truth)
 **Strategies ทั้ง 3 ทำงานแยกกัน** — ไม่มีการ share state ข้าม strategy
@@ -25,7 +25,7 @@
 |------|-------|
 | `strategy/XAUUSD_System_Prompt_Reviewer.md` | ⚠️ Legacy — Reviewer per-trade is **disabled** (see Architecture below) |
 | `docs/TRAIDER_MASTER_PLAN_v2.1.md` | ✅ Architecture reference |
-| `utils/xauusd_signal.py` | ✅ Signal helpers + Scanner v3.8 detectors |
+| `utils/xauusd_signal.py` | ✅ Signal helpers + Scanner v4.2 detectors |
 | `utils/swing_v414.py` | ✅ Swing detection (pair_thresh = max(R55×1%, 100pip)) |
 | `config/strategies.json` | ✅ Pattern toggle + per-TF allowlist (4 active patterns = 3 strategies) |
 
@@ -78,7 +78,7 @@ Signal Engine: utils/signal_engine.py — รัน 3 strategy แบบ paralle
     MOUNTAIN          → strategies/mountain.py              (ภูเขา v4.61, M1/M5)
     MAI_RUAY          → strategies/mai_ruay.py              (พ่อ-แม่, M1/M5/M15/M30)
     UPTREND_SCANNER   ┐
-                      ├→ strategies/uptrend_downtrend_scanner.py (v3.8, M5 only)
+                      ├→ strategies/uptrend_downtrend_scanner.py (v4.2, M5 only)
     DOWNTREND_SCANNER ┘
     เลือก best by R:R → Signal object (Entry/SL/TP/Lot คำนวณเสร็จ)
     ↓ world_state + signal

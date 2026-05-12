@@ -54,10 +54,10 @@
     "UPTREND_SCANNER": {
       "active": false,
       "implemented": true,
-      "name": "Uptrend Scanner v3.8",
-      "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric.",
+      "name": "Uptrend Scanner v4.2",
+      "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric. MIN_TP_PIP=200.",
       "direction": "BUY",
-      "version": "3.8",
+      "version": "4.2",
       "validations": [
         "C1: Close >= 60% R55",
         "C2: Recent Low (5 bars) >= 55% R55",
@@ -65,7 +65,8 @@
         "C4: Bullish impulse 2-8 bars >= 25% R55",
         "C5: No bearish bar > 30% R55 in 25-bar lookback",
         "C6: max close in (lookback + first 5) <= L55 + 40% R55",
-        "Anti-trend: father bar 40-100% R55 in 1-8 bars blocks signal"
+        "Anti-trend: father bar 40-100% R55 in 1-8 bars blocks signal",
+        "MIN_TP_PIP: skip signal if TP distance < 200 pip (v4.2)"
       ],
       "priority": 6,
       "allowed_tfs": [
@@ -78,18 +79,19 @@
     "DOWNTREND_SCANNER": {
       "active": false,
       "implemented": true,
-      "name": "Downtrend Scanner v3.8",
-      "description": "Mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric. (v3.8: C6D inequality fix)",
+      "name": "Downtrend Scanner v4.2",
+      "description": "TRUE mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric. (v4.2: C6D min mirror + MIN_TP_PIP=200)",
       "direction": "SELL",
-      "version": "3.8",
+      "version": "4.2",
       "validations": [
         "C1D: Close <= 40% R55 (top-down)",
         "C2D: Recent High (5 bars) <= 45% R55 (top-down)",
         "C3D: Rise from LL <= 30% R55",
         "C4D: Bearish impulse 2-8 bars >= 25% R55",
         "C5D: No bullish bar > 30% R55 in 25-bar lookback",
-        "C6D: max close in (lookback + first 5) >= H55 - 40% R55 (v3.8 fix)",
-        "Anti-trend: father bar 40-100% R55 (mirror) blocks signal"
+        "C6D: min close in (lookback + first 5) >= H55 - 40% R55 (v4.2 true mirror)",
+        "Anti-trend: father bar 40-100% R55 (mirror) blocks signal",
+        "MIN_TP_PIP: skip signal if TP distance < 200 pip (v4.2)"
       ],
       "priority": 7,
       "allowed_tfs": [

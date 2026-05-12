@@ -1,4 +1,4 @@
-"""XAUUSD Uptrend / Downtrend Scanner v3.8 — Phase II wrapper.
+"""XAUUSD Uptrend / Downtrend Scanner v4.2 — Phase II wrapper.
 
 The criteria functions and `_detect_uptrend_scanner` / `_detect_downtrend_scanner`
 live in `utils/xauusd_signal.py` (additive — no existing function modified).
