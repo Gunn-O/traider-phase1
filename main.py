@@ -584,13 +584,19 @@ class TraiderMainLoop:
                     post_bot_event("plan_closed", f"{t['result']} {t.get('close_reason', '')}", {
                         "plan_id": t.get('plan_id', ''),
                         "trade_id": t.get('trade_id', ''),
+                        "action": t.get('action', ''),
                         "result": t.get('result', ''),
                         "close_reason": t.get('close_reason', ''),
                         "close_price": t.get('close_price', 0),
                         "pnl": t.get('pnl_usd', t.get('pnl', 0)),
-                        # Dashboard Closed Positions panel reads pattern +
-                        # close_time + open_time. Without these the Strategy
-                        # column shows "—" and Time is parsed from plan_id.
+                        # api_server replaces the open_orders dict with this
+                        # event.data verbatim when moving to closed_orders, so
+                        # the Dashboard Positions panel needs entry/SL/TP/lot
+                        # here too — otherwise those columns go blank.
+                        "entry": t.get('entry_price', t.get('entry', 0)),
+                        "sl":    t.get('sl_price', t.get('sl', 0)),
+                        "tp":    t.get('tp_price', t.get('tp', 0)),
+                        "lot":   t.get('lot_size', t.get('lot', 0)),
                         "pattern": (t.get('pattern') or t.get('chart_type') or '').upper(),
                         "close_time": str(t.get('timestamp_close', '') or t.get('close_time', '')),
                         "open_time": str(t.get('timestamp_open', '') or ''),
@@ -1388,12 +1394,17 @@ class TraiderMainLoop:
                                 {
                                     "plan_id": order.get('plan_id', ''),
                                     "trade_id": trade_id,
+                                    "action": order.get('action', ''),
                                     "result": broker_pos['result'],
                                     "close_reason": broker_pos['close_reason'],
                                     "close_price": broker_pos['close_price'],
                                     "pnl": broker_pos['pnl'],
                                     # See plan_closed at line ~584 for why
-                                    # Dashboard needs pattern + timestamps.
+                                    # Dashboard needs entry/SL/TP/lot here.
+                                    "entry": order.get('entry_price', order.get('entry', 0)),
+                                    "sl":    order.get('sl_price', order.get('sl', 0)),
+                                    "tp":    order.get('tp_price', order.get('tp', 0)),
+                                    "lot":   order.get('lot_size', order.get('lot', 0)),
                                     "pattern": (order.get('pattern') or order.get('chart_type') or '').upper(),
                                     "close_time": broker_pos.get('close_time', ''),
                                     "open_time": str(order.get('timestamp_open', '') or order.get('open_time', '')),

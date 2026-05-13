@@ -374,7 +374,6 @@ function PositionsPanel({ open, closed }) {
                 <th>Open Time</th>
                 <th>Bot</th>
                 <th>Strategy</th>
-                <th>Plan</th>
                 <th>Dir</th>
                 <th>Entry</th>
                 <th>SL</th>
@@ -388,7 +387,7 @@ function PositionsPanel({ open, closed }) {
             <tbody>
               {open.length > 0 && (
                 <tr className="positions-section">
-                  <td colSpan={12}>
+                  <td colSpan={11}>
                     <span className="positions-section-label">OPEN</span>
                     <span className="positions-section-count">{open.length}</span>
                   </td>
@@ -399,7 +398,7 @@ function PositionsPanel({ open, closed }) {
               ))}
               {closedByOpenTime.length > 0 && (
                 <tr className="positions-section">
-                  <td colSpan={12}>
+                  <td colSpan={11}>
                     <span className="positions-section-label">CLOSED</span>
                     <span className="positions-section-count">{closedByOpenTime.length}</span>
                   </td>
@@ -425,12 +424,18 @@ function PositionRow({ order: o, isOpen }) {
     : 'info'   // CANCELLED / other terminal but non-trade outcomes
   const dirCls = o.action === 'BUY' ? 'success' : 'warning'
   const openTime = fmtTime(o.open_time || o.candle_time) || planIdTime(o.plan_id)
+  // Hover tooltip with full plan_id + trade_id for debugging; removed
+  // the dedicated Plan column because shortPlanId rendered it as time,
+  // which duplicated the Open Time column.
+  const rowTitle = [
+    o.plan_id ? `plan: ${o.plan_id}` : null,
+    o.trade_id ? `trade: ${o.trade_id}` : null,
+  ].filter(Boolean).join('\n')
   return (
-    <tr>
+    <tr title={rowTitle}>
       <td className="text-mono text-muted">{openTime}</td>
       <td className="text-mono text-muted">{o.bot_id || '—'}</td>
       <td className="text-mono">{shortPattern(o.pattern || o.chart_type)}</td>
-      <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
       <td><span className={`badge ${dirCls}`}>{o.action || '—'}</span></td>
       <td className="text-mono">{fmt(o.entry)}</td>
       <td className="text-mono">{fmt(o.sl)}</td>

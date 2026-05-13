@@ -145,11 +145,14 @@ def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
             for r in open_rows
         ]
         # Closed = last 50 WIN/LOSS/CANCELLED for this bot, newest last.
-        # chart_type + timestamp_open same reason as above so the Closed panel
-        # can show Strategy / Open Time.
+        # Pull entry / SL / TP / lot too — Dashboard's unified Positions
+        # panel renders the same 12 columns for OPEN and CLOSED rows, so
+        # closed rows need the entry levels to populate Entry/SL/TP/Lot.
+        # Previously those columns were blank for any trade loaded from DB.
         closed_rows = con.execute(
-            "SELECT trade_id, plan_id, action, result, close_reason, close_price, "
-            "pnl_usd, timestamp_close, chart_type, timestamp_open FROM trades "
+            "SELECT trade_id, plan_id, action, entry_price, sl_price, tp_price, "
+            "lot_size, rr_ratio, result, close_reason, close_price, pnl_usd, "
+            "timestamp_close, chart_type, timestamp_open FROM trades "
             "WHERE bot_id = ? AND result IN ('WIN','LOSS','CANCELLED') "
             "ORDER BY timestamp_close ASC LIMIT 50",
             (bot_id,),
@@ -159,6 +162,12 @@ def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
                 "plan_id":      r["plan_id"],
                 "trade_id":     r["trade_id"],
                 "action":       r["action"],
+                "entry":        r["entry_price"],
+                "sl":           r["sl_price"],
+                "tp":           r["tp_price"],
+                "lot":          r["lot_size"],
+                "lot_size":     r["lot_size"],
+                "rr":           r["rr_ratio"],
                 "result":       r["result"],
                 "close_reason": r["close_reason"],
                 "close_price":  r["close_price"],
