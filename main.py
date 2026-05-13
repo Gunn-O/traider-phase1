@@ -1327,26 +1327,40 @@ class TraiderMainLoop:
             # treats them identically — only the result string differs.
             if cancelled_orphans:
                 newly_closed = (newly_closed or []) + cancelled_orphans
-            # Dedupe by trade_id: when a position fills and SL/TP-hits inside a
-            # single cycle window, `_known_open_tickets` may still hold the
-            # ticket (added in the cycle that observed it OPEN) AND
-            # `reconcile_pending` finds the 2-deal pair in history — both
-            # paths return the same close event. Without dedup the
-            # `plan_closed` event fires twice → Dashboard "Recently Closed"
-            # ring buffer shows the same trade as two rows even though DB +
-            # Sheets are idempotent UPDATEs and only have one row each.
+            # Dedupe by canonical (full) trade_id, accounting for MT5's
+            # 16-char comment truncation. When both update_positions and
+            # reconcile_pending detect the same close:
+            #   - reconcile_pending returns the FULL trade_id ("RT-…-N", 27 chars)
+            #   - update_positions returns hist.entry_comment = TRUNCATED ("RT-…-1641", 16 chars)
+            # Old dedup did exact string match — saw 2 different strings and
+            # kept both, causing 2 plan_closed events → Dashboard duplicate
+            # (verified at 16:43 BKK on 2026-05-13 in traider.log).
+            #
+            # New dedup: for each broker_pos, find the matching order in
+            # position_monitor.open_orders (using the same prefix-startswith
+            # rule the inner loop below uses), then dedup by ORDER's trade_id.
+            # Broker_pos with no match in open_orders falls back to its own
+            # trade_id key (rare path; only happens on orphan tickets).
             if newly_closed:
-                _seen_tids = set()
+                _seen_keys = set()
                 _deduped = []
                 for _bp in newly_closed:
-                    _tid = _bp.get('trade_id', '')
-                    if _tid and _tid in _seen_tids:
+                    _btid = _bp.get('trade_id', '') or ''
+                    _canonical = None
+                    for _ord in open_orders:
+                        _otid = _ord.get('trade_id', '') or ''
+                        if _otid and (_otid == _btid or _otid.startswith(_btid) or _btid.startswith(_otid)):
+                            _canonical = _otid
+                            break
+                    _key = _canonical or _btid
+                    if _key and _key in _seen_keys:
                         logger.info(
-                            f"⊘ Dedup duplicate close for {_tid} "
-                            f"(both update_positions + reconcile_pending detected it)"
+                            f"⊘ Dedup duplicate close for {_key} "
+                            f"(broker_pos.trade_id={_btid!r}; both detection paths fired)"
                         )
                         continue
-                    _seen_tids.add(_tid)
+                    if _key:
+                        _seen_keys.add(_key)
                     _deduped.append(_bp)
                 newly_closed = _deduped
 

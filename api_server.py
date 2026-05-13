@@ -451,25 +451,75 @@ async def get_bot(bot_id: str):
     return _serialize_bot(bots[bot_id])
 
 
+def _trade_ids_match(a: str, b: str) -> bool:
+    """Prefix-aware trade_id equality. MT5 brokers truncate the position
+    comment to 16 chars, so the same trade arrives here with different
+    trade_id strings depending on detection path:
+      - reconcile_pending → full id ("RT-20260513-164100-000000-1")
+      - update_positions → truncated entry_comment ("RT-20260513-1641")
+    Either string being a prefix of the other means they refer to the
+    same trade. Defense-in-depth dedup in the event handler relies on this."""
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def _already_in_closed(bot_id: str, trade_id: str) -> bool:
+    if not trade_id:
+        return False
+    for c in bots[bot_id].get("closed_orders", []):
+        if _trade_ids_match(trade_id, c.get("trade_id", "") or ""):
+            return True
+    return False
+
+
+def _already_in_open(bot_id: str, trade_id: str, plan_id: str) -> bool:
+    """True if an order with this trade_id OR plan_id is already in open_orders."""
+    for o in bots[bot_id].get("open_orders", []):
+        if trade_id and _trade_ids_match(trade_id, o.get("trade_id", "") or ""):
+            return True
+        if plan_id and o.get("plan_id") == plan_id:
+            return True
+    return False
+
+
 @app.post("/api/bots/{bot_id}/event")
 async def post_bot_event(bot_id: str, event: BotEvent):
     """Bot subprocess (main.py) POSTs significant events here so the UI sees them.
-    Some types also mutate bot state (open_orders, closed_orders)."""
+    Some types also mutate bot state (open_orders, closed_orders).
+
+    Defense-in-depth: plan_opened and plan_closed both dedup by trade_id
+    (prefix-aware to handle MT5's 16-char comment truncation). main.py also
+    dedupes upstream but if either path slips a duplicate through, the ring
+    buffer here stays clean."""
     if bot_id not in bots:
         raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
 
     _add_event(bot_id, event.type, event.msg, event.data)
 
     if event.type == "plan_opened":
-        bots[bot_id]["open_orders"].append(event.data)
+        tid = event.data.get("trade_id", "")
+        pid = event.data.get("plan_id", "")
+        if _already_in_open(bot_id, tid, pid):
+            logger.info(f"plan_opened dedup: {tid or pid} already in open_orders, skipping append")
+        else:
+            bots[bot_id]["open_orders"].append(event.data)
     elif event.type == "plan_closed":
         plan_id = event.data.get("plan_id")
+        tid     = event.data.get("trade_id", "")
+        # Always remove from open_orders (idempotent — filter by plan_id)
         bots[bot_id]["open_orders"] = [
             o for o in bots[bot_id]["open_orders"] if o.get("plan_id") != plan_id
         ]
         closed = bots[bot_id].setdefault("closed_orders", [])
-        closed.append(event.data)
-        bots[bot_id]["closed_orders"] = closed[-50:]
+        if _already_in_closed(bot_id, tid):
+            logger.info(
+                f"plan_closed dedup: {tid} already in closed_orders, skipping append "
+                "(prefix-aware — likely the MT5-truncated vs full-id pair)"
+            )
+        else:
+            closed.append(event.data)
+            bots[bot_id]["closed_orders"] = closed[-50:]
 
     await manager.broadcast({
         "event": "bot_event",
