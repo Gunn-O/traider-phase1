@@ -25,6 +25,13 @@ export default function Dashboard({ bots, onStop }) {
     return all.sort((a, b) => (b.ts || '').localeCompare(a.ts || '')).slice(0, 30)
   }, [visibleBots])
 
+  // trade_id format is `RT-YYYYMMDD-HHMMSS-XXXXXX-N` (or PT/SM/ prefix in
+  // backtest/sim modes), so sorting by trade_id string descending puts the
+  // newest order on top AND keeps multi-day history in correct order — which
+  // ISO time-only fields can't guarantee when bots run across midnight.
+  const _orderKey = (o) =>
+    String(o.trade_id || o.plan_id || o.open_time || o.candle_time || '')
+
   const openOrders = useMemo(() => {
     const all = []
     for (const b of visibleBots) {
@@ -32,12 +39,7 @@ export default function Dashboard({ bots, onStop }) {
         all.push({ ...o, bot_id: b.bot_id, tf: b.tf })
       }
     }
-    // Newest first — open_time / candle_time / plan_id all encode the order time;
-    // fall back to plan_id which embeds YYYYMMDD-HHMMSS so it sorts correctly.
-    return all.sort((a, b) =>
-      String(b.open_time || b.candle_time || b.plan_id || '')
-        .localeCompare(String(a.open_time || a.candle_time || a.plan_id || ''))
-    )
+    return all.sort((a, b) => _orderKey(b).localeCompare(_orderKey(a)))
   }, [visibleBots])
 
   const closedOrders = useMemo(() => {
@@ -47,12 +49,7 @@ export default function Dashboard({ bots, onStop }) {
         all.push({ ...o, bot_id: b.bot_id, tf: b.tf })
       }
     }
-    // Newest first by close_time (closed_orders is append-only; reverse puts
-    // most-recently-closed at top).
-    return all.sort((a, b) =>
-      String(b.close_time || b.plan_id || '')
-        .localeCompare(String(a.close_time || a.plan_id || ''))
-    ).slice(0, 30)
+    return all.sort((a, b) => _orderKey(b).localeCompare(_orderKey(a))).slice(0, 30)
   }, [visibleBots])
 
   return (
@@ -423,7 +420,7 @@ function PositionRow({ order: o, isOpen }) {
     : result === 'LOSS' ? 'error'
     : 'info'   // CANCELLED / other terminal but non-trade outcomes
   const dirCls = o.action === 'BUY' ? 'success' : 'warning'
-  const openTime = fmtTime(o.open_time || o.candle_time) || planIdTime(o.plan_id)
+  const openTime = fmtDateTime(o.open_time || o.candle_time) || planIdTime(o.plan_id)
   // Hover tooltip with full plan_id + trade_id for debugging; removed
   // the dedicated Plan column because shortPlanId rendered it as time,
   // which duplicated the Open Time column.
@@ -483,6 +480,23 @@ function fmtTime(iso) {
   try {
     const d = new Date(iso)
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch { return iso }
+}
+
+// Compact date+time for the Positions panel — sort key is trade_id (which
+// encodes the date), but the Open Time column previously showed only HH:MM:SS
+// which made multi-day history look out of order to the eye.
+function fmtDateTime(iso) {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mi = String(d.getMinutes()).padStart(2, '0')
+    const ss = String(d.getSeconds()).padStart(2, '0')
+    return `${mm}-${dd} ${hh}:${mi}:${ss}`
   } catch { return iso }
 }
 

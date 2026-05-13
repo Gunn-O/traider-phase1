@@ -1160,7 +1160,12 @@ def _detect_uptrend_scanner(
             triggered.append(sl)
     if not triggered:
         return _skip(f"ไม่มี swing low ใน zone [{zone_lo:.2f}, {zone_hi:.2f}] ที่ price แตะ")
-    sl_pick = max(triggered, key=lambda s: s['body_lo'])
+    # v4.2 notebook iterates `watch_list.keys()` in insertion order = chrono
+    # order swings were found by scan_swings. We pick `triggered[0]` to match
+    # (was `max(triggered, key=body_lo)`). Same reason as the SELL path —
+    # when multiple swing lows are in the 65-85% zone, "first chronologically"
+    # is the notebook's choice, not "highest body_lo."
+    sl_pick = triggered[0]
 
     sh_body_hi = max(h['body_hi'] for h in highs)
     if sh_body_hi <= sl_pick['body_lo']:
@@ -1309,7 +1314,15 @@ def _detect_downtrend_scanner(
             triggered.append(sh)
     if not triggered:
         return _skip(f"ไม่มี swing high ใน zone [{zone_lo:.2f}, {zone_hi:.2f}] ที่ price แตะ")
-    sh_pick = min(triggered, key=lambda s: s['body_hi'])
+    # v4.2 notebook (`scan_entries_bar_by_bar_down`) iterates `watch_list.keys()`
+    # in INSERTION ORDER (= chronological order swings were found) and picks
+    # the FIRST level where `entry_high >= level`, then breaks. We previously
+    # used `min(triggered, key=body_hi)` which picked the LOWEST body_hi —
+    # not the same as "first chronologically." For setups with multiple swing
+    # highs in the 15-35% zone the picks diverged and our entry sat at a
+    # different price than what the notebook (and the user reading v4.2 off
+    # the chart) expects.
+    sh_pick = triggered[0]
 
     sl_body_lo = min(s['body_lo'] for s in lows)
     if sl_body_lo >= sh_pick['body_hi']:
