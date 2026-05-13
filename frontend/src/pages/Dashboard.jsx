@@ -79,9 +79,8 @@ export default function Dashboard({ bots, onStop }) {
         <SignalEventsPanel events={signalEvents} />
       </div>
 
-      <div className="dashboard-row dashboard-row-split">
-        <OpenOrdersPanel orders={openOrders} />
-        <ClosedOrdersPanel orders={closedOrders} />
+      <div className="dashboard-row">
+        <PositionsPanel open={openOrders} closed={closedOrders} />
       </div>
     </div>
   )
@@ -344,91 +343,105 @@ function SignalEventsPanel({ events }) {
   )
 }
 
-function OpenOrdersPanel({ orders }) {
+// Single unified Positions panel — Open rows on top with PENDING status,
+// Closed rows below with WIN/LOSS/CANCELLED, both sorted by open_time desc.
+// Body scrolls after ~10 rows; section headers visually separate the two.
+function PositionsPanel({ open, closed }) {
+  // Both lists already arrive sorted by time desc (Dashboard() useMemo);
+  // re-sort closed by OPEN_TIME explicitly so the user's requested ordering
+  // ("ปิดแล้วก็เรียงตามเวลาเปิด") holds even if close_time is what came in
+  // from plan_closed events.
+  const closedByOpenTime = [...closed].sort((a, b) =>
+    String(b.open_time || b.plan_id || '')
+      .localeCompare(String(a.open_time || a.plan_id || ''))
+  )
+
   return (
     <div className="card">
-      <h2 className="card-title">Open Positions {orders.length > 0 && <span className="muted-count">({orders.length})</span>}</h2>
-      {orders.length === 0 ? (
-        <div className="empty-state">No open positions</div>
+      <h2 className="card-title">
+        Positions{' '}
+        <span className="muted-count">
+          ({open.length} open · {closedByOpenTime.length} closed)
+        </span>
+      </h2>
+      {open.length === 0 && closedByOpenTime.length === 0 ? (
+        <div className="empty-state">No positions yet</div>
       ) : (
-        <table className="orders-table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Bot</th>
-              <th>Strategy</th>
-              <th>Plan</th>
-              <th>Action</th>
-              <th>Entry</th>
-              <th>SL</th>
-              <th>TP</th>
-              <th>Lot</th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map((o, i) => (
-              <tr key={i}>
-                <td className="text-mono text-muted">{fmtTime(o.open_time || o.candle_time) || planIdTime(o.plan_id)}</td>
-                <td className="text-mono text-muted">{o.bot_id}</td>
-                <td className="text-mono">{shortPattern(o.pattern || o.chart_type)}</td>
-                <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
-                <td>
-                  <span className={`badge ${o.action === 'BUY' ? 'success' : 'warning'}`}>{o.action}</span>
-                </td>
-                <td className="text-mono">{fmt(o.entry)}</td>
-                <td className="text-mono">{fmt(o.sl)}</td>
-                <td className="text-mono">{fmt(o.tp)}</td>
-                <td className="text-mono">{o.lot}</td>
+        <div className="positions-scroll">
+          <table className="orders-table positions-table">
+            <thead>
+              <tr>
+                <th>Open Time</th>
+                <th>Bot</th>
+                <th>Strategy</th>
+                <th>Plan</th>
+                <th>Dir</th>
+                <th>Entry</th>
+                <th>SL</th>
+                <th>TP</th>
+                <th>Lot</th>
+                <th>Close</th>
+                <th>P/L</th>
+                <th>Status</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {open.length > 0 && (
+                <tr className="positions-section">
+                  <td colSpan={12}>
+                    <span className="positions-section-label">OPEN</span>
+                    <span className="positions-section-count">{open.length}</span>
+                  </td>
+                </tr>
+              )}
+              {open.map((o, i) => (
+                <PositionRow key={`o-${o.trade_id || o.plan_id || i}`} order={o} isOpen />
+              ))}
+              {closedByOpenTime.length > 0 && (
+                <tr className="positions-section">
+                  <td colSpan={12}>
+                    <span className="positions-section-label">CLOSED</span>
+                    <span className="positions-section-count">{closedByOpenTime.length}</span>
+                  </td>
+                </tr>
+              )}
+              {closedByOpenTime.map((o, i) => (
+                <PositionRow key={`c-${o.trade_id || o.plan_id || i}`} order={o} isOpen={false} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
 }
 
-function ClosedOrdersPanel({ orders }) {
+function PositionRow({ order: o, isOpen }) {
+  const result = isOpen ? 'PENDING' : (o.result || '—')
+  const badgeCls = isOpen
+    ? 'warning'
+    : result === 'WIN'  ? 'success'
+    : result === 'LOSS' ? 'error'
+    : 'info'   // CANCELLED / other terminal but non-trade outcomes
+  const dirCls = o.action === 'BUY' ? 'success' : 'warning'
+  const openTime = fmtTime(o.open_time || o.candle_time) || planIdTime(o.plan_id)
   return (
-    <div className="card">
-      <h2 className="card-title">Recently Closed {orders.length > 0 && <span className="muted-count">({orders.length})</span>}</h2>
-      {orders.length === 0 ? (
-        <div className="empty-state">No closed positions yet</div>
-      ) : (
-        <table className="orders-table">
-          <thead>
-            <tr>
-              <th>Close Time</th>
-              <th>Bot</th>
-              <th>Strategy</th>
-              <th>Plan</th>
-              <th>Result</th>
-              <th>Reason</th>
-              <th>Close</th>
-              <th>P/L</th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.map((o, i) => (
-              <tr key={i}>
-                <td className="text-mono text-muted">{fmtTime(o.close_time) || planIdTime(o.plan_id)}</td>
-                <td className="text-mono text-muted">{o.bot_id}</td>
-                <td className="text-mono">{shortPattern(o.pattern || o.chart_type)}</td>
-                <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
-                <td>
-                  <span className={`badge ${o.result === 'WIN' ? 'success' : o.result === 'LOSS' ? 'error' : 'warning'}`}>{o.result}</span>
-                </td>
-                <td className="text-muted">{o.close_reason}</td>
-                <td className="text-mono">{fmt(o.close_price)}</td>
-                <td className={`text-mono ${(o.pnl || 0) >= 0 ? 'profit' : 'loss'}`}>
-                  {(o.pnl || 0) >= 0 ? '+' : ''}{fmt(o.pnl, 2)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+    <tr>
+      <td className="text-mono text-muted">{openTime}</td>
+      <td className="text-mono text-muted">{o.bot_id || '—'}</td>
+      <td className="text-mono">{shortPattern(o.pattern || o.chart_type)}</td>
+      <td className="text-mono text-muted">{shortPlanId(o.plan_id)}</td>
+      <td><span className={`badge ${dirCls}`}>{o.action || '—'}</span></td>
+      <td className="text-mono">{fmt(o.entry)}</td>
+      <td className="text-mono">{fmt(o.sl)}</td>
+      <td className="text-mono">{fmt(o.tp)}</td>
+      <td className="text-mono">{fmt(o.lot, 2)}</td>
+      <td className="text-mono">{isOpen ? '—' : fmt(o.close_price)}</td>
+      <td className={`text-mono ${isOpen ? 'text-muted' : ((o.pnl || 0) >= 0 ? 'profit' : 'loss')}`}>
+        {isOpen ? '—' : `${(o.pnl || 0) >= 0 ? '+' : ''}${fmt(o.pnl, 2)}`}
+      </td>
+      <td><span className={`badge ${badgeCls}`}>{result}</span></td>
+    </tr>
   )
 }
 

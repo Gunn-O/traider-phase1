@@ -75,6 +75,50 @@
   background-color: var(--agent-analyst);
 }
 
+/* Positions panel — scrollable body with sticky header */
+.positions-scroll {
+  /* ~10 data rows (33px each) + 2 section headers (28px) + thead (34px) */
+  max-height: 430px;
+  overflow-y: auto;
+  /* Pull the right edge in so the scrollbar doesn't crowd the last column */
+  margin-right: -4px;
+  padding-right: 4px;
+}
+
+.positions-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: var(--bg-card);
+}
+
+.positions-table tbody tr.positions-section td {
+  padding: 6px 10px;
+  background-color: rgba(255, 255, 255, 0.025);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.positions-table tbody tr.positions-section:hover td {
+  /* Override .orders-table tbody tr:hover */
+  background-color: rgba(255, 255, 255, 0.025);
+}
+.positions-section-label {
+  font-weight: 700;
+}
+.positions-section-count {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background-color: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
 /* Bots table */
 .bots-table,
 .orders-table {
