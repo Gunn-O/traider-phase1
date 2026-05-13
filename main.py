@@ -1321,6 +1321,28 @@ class TraiderMainLoop:
             # treats them identically — only the result string differs.
             if cancelled_orphans:
                 newly_closed = (newly_closed or []) + cancelled_orphans
+            # Dedupe by trade_id: when a position fills and SL/TP-hits inside a
+            # single cycle window, `_known_open_tickets` may still hold the
+            # ticket (added in the cycle that observed it OPEN) AND
+            # `reconcile_pending` finds the 2-deal pair in history — both
+            # paths return the same close event. Without dedup the
+            # `plan_closed` event fires twice → Dashboard "Recently Closed"
+            # ring buffer shows the same trade as two rows even though DB +
+            # Sheets are idempotent UPDATEs and only have one row each.
+            if newly_closed:
+                _seen_tids = set()
+                _deduped = []
+                for _bp in newly_closed:
+                    _tid = _bp.get('trade_id', '')
+                    if _tid and _tid in _seen_tids:
+                        logger.info(
+                            f"⊘ Dedup duplicate close for {_tid} "
+                            f"(both update_positions + reconcile_pending detected it)"
+                        )
+                        continue
+                    _seen_tids.add(_tid)
+                    _deduped.append(_bp)
+                newly_closed = _deduped
 
             # Sync closed positions to PositionMonitor + Sheets + LocalDB + Dashboard
             if newly_closed:
