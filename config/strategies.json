@@ -29,19 +29,20 @@
     "MAI_RUAY": {
       "active": true,
       "implemented": true,
-      "name": "ไม้รวย (Branch F)",
-      "description": "Father/Mother candle — พ่อ 1-8 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ (ตาม notebook engine)",
+      "name": "ไม้รวย (Branch F) v2",
+      "description": "Father/Mother candle — พ่อ 1-8 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ (notebook v2: ลบ obs→entry redirect, ใส่ 6%R55 buffer ใน SL ฝั่งอุปสรรค)",
       "direction": "BOTH",
-      "version": "1.0",
+      "version": "2.0",
       "validations": [
         "พ่อ 1-8 แท่ง สีเดียวกัน body 60-100% R55 (MAX_FATHER=8 ใน engine)",
         "พ่อ all-same length=5 ต้องมี trio open→close > 60% R55",
         "แม่สวนทิศพ่อ body 4-30% ของพ่อ",
         "Entry rule: <10% close แม่ / 10-30% midpoint / >30% tech_point",
-        "SL = tech ± 70% body พ่อ (หรือ obs_dist ถ้ามีอุปสรรค)",
+        "SL = tech ± 70% body พ่อ (หรือ obstacle ± 6%R55 buffer ถ้ามีอุปสรรค — v2)",
         "TP3 default = 75% body พ่อ (หรือ obstacle ± 6% R55)",
         "Anti-trend filter (ไม่เทรดสวน slope 20 แท่ง)",
-        "Lot = portfolio × 10% / SL (pip)"
+        "Lot = portfolio × 10% / SL (pip)",
+        "v2: เอา obs→entry redirect ออก — entry ยึดที่ตำแหน่งจากกฎ 10%/30%"
       ],
       "priority": 5,
       "allowed_tfs": [
@@ -52,7 +53,7 @@
       ]
     },
     "UPTREND_SCANNER": {
-      "active": true,
+      "active": false,
       "implemented": true,
       "name": "Uptrend Scanner v4.2",
       "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric. MIN_TP_PIP=200.",
@@ -77,7 +78,7 @@
       ]
     },
     "DOWNTREND_SCANNER": {
-      "active": true,
+      "active": false,
       "implemented": true,
       "name": "Downtrend Scanner v4.2",
       "description": "TRUE mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric. (v4.2: C6D min mirror + MIN_TP_PIP=200)",

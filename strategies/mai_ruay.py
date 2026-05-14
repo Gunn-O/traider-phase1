@@ -404,24 +404,28 @@ def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float, debug: Option
             tech_point=tech_point, r55=r55,
         )
 
-    # ปรับ entry ถ้าอุปสรรคใกล้กว่า TP1
-    if obs is not None:
-        tp1_dist = abs(tp1 - tech_point)
-        obs_dist = abs(obs - tech_point)
-        if obs_dist < tp1_dist:
-            entry      = tech_point
-            entry_rule = f'obs < TP1 → entry = tech_point'
+    # v2: removed the obstacle→entry redirect block. v1 redirected entry to
+    # tech_point when an obstacle sat closer than TP1, but the notebook v2
+    # spec drops that — entry stays at whatever the 10%/30% mother-rule
+    # produced. SL still uses the obstacle below.
 
-    # SL
+    # SL — notebook v2: place SL just inside the obstacle with a 6%R55 buffer.
+    # For SELL, obs is above entry → swing_price = obs - buf (just below obs);
+    # for BUY, obs is below entry → swing_price = obs + buf (just above obs).
+    # The resulting SL ends up at obs ∓ buf. Previous Python omitted the
+    # buffer (used raw obs as the swing price), which gave a slightly tighter
+    # SL than the notebook spec.
     if obs is not None:
-        obs_dist = abs(obs - tech_point) / PIP
-        offset   = obs_dist * PIP
+        _sl_buf      = r55 * 0.06 * PIP
+        _sl_swing    = obs - _sl_buf if direction == 'SELL' else obs + _sl_buf
+        obs_dist     = abs(_sl_swing - tech_point) / PIP
+        offset       = obs_dist * PIP
         if direction == 'BUY':
             sl = tech_point - offset
-            sl_label = f'tech−obs_dist({obs_dist:.0f}pip)'
+            sl_label = f'tech−swing_dist({obs_dist:.0f}pip)'
         else:
             sl = tech_point + offset
-            sl_label = f'tech+obs_dist({obs_dist:.0f}pip)'
+            sl_label = f'tech+swing_dist({obs_dist:.0f}pip)'
     else:
         sl, sl_label = _calc_sl(tech_point, direction, f_body)
 
