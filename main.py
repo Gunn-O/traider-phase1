@@ -983,6 +983,23 @@ class TraiderMainLoop:
 
         # Generate trade IDs for each order and set initial state
         orders_with_ids = []
+        # Pre-compute the open timestamp once. We store the SAME value the
+        # DB row gets (candle_time.isoformat() or now()) so that when the
+        # plan_closed event fires later and reads `order['timestamp_open']`,
+        # it matches what's in the DB row and the Dashboard "Open Time"
+        # column populates. Previously this field was only set on the DB
+        # row at insert_trade(...) below — but the in-memory order dict
+        # (which is what gets shoved into position_monitor.open_orders
+        # AND what plan_closed reads) never got it, so CANCELLED close
+        # events from reconcile_pending shipped with open_time='' and the
+        # Dashboard rendered "—" in the Open Time column. The user reported
+        # this regression multiple times — root cause was the missing
+        # attachment here, NOT in the close path.
+        _open_ts_iso = (
+            candle_time.isoformat()
+            if hasattr(candle_time, 'isoformat')
+            else (str(candle_time) if candle_time else datetime.now().isoformat())
+        )
         for order in plan['orders']:
             order['trade_id'] = generate_trade_id(plan_id, order['order_num'], candle_time=candle_time, mode=id_mode)
             order['plan_id'] = plan_id  # Required for portfolio state updates
@@ -991,6 +1008,11 @@ class TraiderMainLoop:
             order['sl_price'] = order['sl']
             order['tp_price'] = order['tp']
             order['lot_size'] = order['lot']
+            # Stamp the open time on the in-memory order. Both key names are
+            # set so any downstream consumer (plan_closed event, position
+            # monitor, reconcile recovery) finds it without guessing.
+            order['timestamp_open'] = _open_ts_iso
+            order['open_time'] = _open_ts_iso
             # Attach pattern so the per-pattern-slot cleanup at line 647-661 can
             # tell which slot this order keeps occupied. Previously this field
             # was absent → cleanup wiped active_plans_by_pattern every cycle →
@@ -1140,9 +1162,12 @@ class TraiderMainLoop:
                 "tp": order.get('tp_price', order.get('tp', 0)),
                 "lot": order.get('lot_size', order.get('lot', 0)),
                 "pattern": (signal.pattern if signal else ''),
-                # Dashboard Open Positions panel reads open_time for its
-                # "Time" column and to sort newest-first.
-                "open_time": str(candle_time) if candle_time else '',
+                # Same ISO string we stamped on the order dict above so the
+                # Dashboard's "Open Time" column matches the DB's
+                # timestamp_open exactly (was `str(candle_time)` which used
+                # space-separator format and could drift if candle_time was
+                # already a string vs a datetime).
+                "open_time": order.get('timestamp_open', '') or order.get('open_time', ''),
             })
 
         # Update portfolio state (14 fields)

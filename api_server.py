@@ -507,10 +507,45 @@ async def post_bot_event(bot_id: str, event: BotEvent):
     elif event.type == "plan_closed":
         plan_id = event.data.get("plan_id")
         tid     = event.data.get("trade_id", "")
-        # Always remove from open_orders (idempotent — filter by plan_id)
+        # Always remove from open_orders (idempotent — filter by plan_id).
+        # Snapshot the matching open_order FIRST so we can backfill missing
+        # fields on the close event (open_time / entry / sl / tp / lot etc).
+        # Reconcile_pending CANCELLED events historically arrived with
+        # open_time='' because old subprocesses didn't stamp it on the in-
+        # memory order; now we recover it from the open_order on its way
+        # out.
+        _open_snap = next(
+            (o for o in bots[bot_id]["open_orders"] if o.get("plan_id") == plan_id),
+            None,
+        )
+        if _open_snap:
+            for _k in ("open_time", "entry", "sl", "tp", "lot", "lot_size",
+                       "pattern", "action", "rr"):
+                _have = event.data.get(_k)
+                if not _have and _open_snap.get(_k):
+                    event.data[_k] = _open_snap[_k]
         bots[bot_id]["open_orders"] = [
             o for o in bots[bot_id]["open_orders"] if o.get("plan_id") != plan_id
         ]
+        # Last-resort backfill: if open_time STILL empty after pulling from
+        # open_orders (e.g., bot subprocess never opened this trade in the
+        # current api_server session), look up DB.
+        if not event.data.get("open_time") and tid:
+            try:
+                import sqlite3 as _sql
+                _db = _localdb_paths()[0] if _localdb_paths() else None
+                if _db:
+                    _con = _sql.connect(_db)
+                    _row = _con.execute(
+                        "SELECT timestamp_open FROM trades WHERE trade_id = ? LIMIT 1",
+                        (tid,),
+                    ).fetchone()
+                    _con.close()
+                    if _row and _row[0]:
+                        event.data["open_time"] = _row[0]
+                        logger.info(f"plan_closed: backfilled open_time={_row[0]} for {tid} from DB")
+            except Exception as _e:
+                logger.warning(f"plan_closed open_time backfill failed for {tid}: {_e}")
         closed = bots[bot_id].setdefault("closed_orders", [])
         if _already_in_closed(bot_id, tid):
             logger.info(
