@@ -14,7 +14,7 @@ Gap filter: wait 80 bars after opening gap > 20% R55.
 
 import logging
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import pytz
 
 from utils.xauusd_signal import find_signal, OHLC, Signal, format_signal
@@ -31,41 +31,41 @@ def is_near_market_close(candle_time: datetime,
                         close_minute: int = 0,
                         buffer_minutes: int = 120) -> bool:
     """
-    V4.25: Block trades before market close
+    V4.25: Block trades within `buffer_minutes` of Friday's market close.
 
     Args:
-        candle_time: Current candle timestamp
-        close_hour: Market close hour in UTC (default 21)
+        candle_time: Current candle timestamp. Aware datetime is converted
+                     to UTC; naive datetime is INTERPRETED AS SYSTEM LOCAL
+                     and converted (prior version mislabeled naive as UTC
+                     which shifted the block window by the system offset —
+                     e.g. on a Bangkok PC, "21:00 UTC close" was firing at
+                     14:00 UTC because the BKK wall-clock said 21:00).
+        close_hour: Market close hour IN UTC (default 21)
         close_minute: Market close minute (default 0)
-        buffer_minutes: Minutes before close to block (default 60)
+        buffer_minutes: Minutes before close to block (default 120 = 2h)
 
     Returns:
         True if within buffer zone (block trading), False otherwise
     """
-    # Convert to UTC if not already
     if candle_time.tzinfo is None:
-        utc_time = pytz.UTC.localize(candle_time)
+        # Interpret naive as local wall-clock, convert to UTC. .astimezone()
+        # on a naive datetime treats it as system local per stdlib.
+        utc_time = candle_time.astimezone(timezone.utc)
     else:
-        utc_time = candle_time.astimezone(pytz.UTC)
+        utc_time = candle_time.astimezone(timezone.utc)
 
     # V65: Only block on Friday (weekday 4)
     if utc_time.weekday() != 4:
         return False
 
-    # Check if in 19:00-21:00 UTC range (120min before 21:00 close)
-    hour = utc_time.hour
-    minute = utc_time.minute
-
-    # With 120min buffer: block from 19:00-21:00
-    # If hour is 19 or 20, block
-    if hour in [close_hour - 2, close_hour - 1]:
-        return True
-
-    # If exactly at close hour and within first few minutes
-    if hour == close_hour and minute <= close_minute:
-        return True
-
-    return False
+    # Compute the close moment and the block-window start
+    from datetime import timedelta as _td
+    close_at = utc_time.replace(hour=close_hour, minute=close_minute,
+                                second=0, microsecond=0)
+    block_from = close_at - _td(minutes=buffer_minutes)
+    # Block window is [block_from, close_at]; the original hour-based check
+    # didn't handle non-zero buffer_minutes or close_minute correctly.
+    return block_from <= utc_time <= close_at
 
 
 def check_opening_gap(candles: List[dict], R55: float,
@@ -214,10 +214,30 @@ def run_signal_engine(
             'skip_reason': 'insufficient_data'
         }
 
-    # V4.25: Time filter — Block trades near market close
+    # V4.25: Time filter — Block trades near Friday market close.
+    # Read close_hour + buffer from config so toggling the JSON takes effect
+    # on the next cycle (no restart). Previously hard-coded to defaults and
+    # the log string was wrong too ("< 60min" though buffer default = 120).
     current_timestamp = candles[-1].get('timestamp', datetime.now())
-    if is_near_market_close(current_timestamp):
-        logger.info("V4.25 Time filter: Near market close (< 60min before 21:00 UTC) — SKIP")
+    try:
+        from utils.strategy_loader import load_config as _load_cfg
+        _tf_cfg = (_load_cfg().get('global_settings', {}).get('time_filter') or {})
+    except Exception:
+        _tf_cfg = {}
+    _close_h   = int(_tf_cfg.get('close_hour_utc', 21))
+    _close_min = int(_tf_cfg.get('close_minute_utc', 0))
+    _buf_min   = int(_tf_cfg.get('buffer_minutes', 120))
+    _filter_on = bool(_tf_cfg.get('enabled', True))
+    if _filter_on and is_near_market_close(
+        current_timestamp,
+        close_hour=_close_h,
+        close_minute=_close_min,
+        buffer_minutes=_buf_min,
+    ):
+        logger.info(
+            f"V4.25 Time filter: within {_buf_min}min of "
+            f"{_close_h:02d}:{_close_min:02d} UTC Friday close — SKIP"
+        )
         return {
             'selected_tf': timeframe,
             'chart_type': 'unclear',

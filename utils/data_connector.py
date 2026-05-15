@@ -6,7 +6,7 @@ Data Connector - รองรับ 2 modes: simulate, live
 
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 import pandas as pd
 import numpy as np
@@ -586,7 +586,14 @@ class MT5Connector:
         for r in rates:
             candles.append({
                 "time": pd.to_datetime(r["time"], unit='s'),
-                "timestamp": datetime.fromtimestamp(r["time"]),
+                # MT5 returns r["time"] as Unix epoch seconds (timezone-agnostic).
+                # Use tz=timezone.utc so consumers get an unambiguous aware
+                # datetime; calling fromtimestamp(epoch) without a tz returned
+                # NAIVE LOCAL (e.g. 22:21 BKK for epoch that's 15:21 UTC),
+                # which downstream code mislabeled as UTC and shifted the
+                # market-close filter by the system's local offset (the
+                # "block at 20:00 BKK" bug the user reported on Friday).
+                "timestamp": datetime.fromtimestamp(r["time"], tz=timezone.utc),
                 "open": float(r["open"]),
                 "high": float(r["high"]),
                 "low": float(r["low"]),
