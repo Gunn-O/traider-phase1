@@ -701,6 +701,31 @@ class TraiderMainLoop:
             portfolio_state = self.sheets_logger.get_portfolio_state()
             logger.debug(f"Simulate mode: reloaded from Sheets")
 
+            # Per-pattern slot housekeeping for LIVE — Sheets doesn't store
+            # active_plans_by_pattern, so we have to maintain it from cache.
+            # Same logic as the backtest branch above: any slot whose plan_id
+            # has no PENDING orders in position_monitor anymore gets cleared.
+            # Without this, a SL_HIT on yesterday's MAI_RUAY would clear
+            # active_plan_id but leave the per-pattern slot pinned; the
+            # defensive check at execute then ABORTs today's MAI_RUAY signal
+            # with "already has active plan {yesterday's plan_id}" — exactly
+            # the case the user reported at 11:24:47 on 2026-05-15.
+            portfolio_state['active_plans_by_pattern'] = dict(
+                self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+            )
+            _open_pat = {(o.get('pattern') or o.get('chart_type') or '').upper()
+                         for o in self.position_monitor.get_open_orders()}
+            _open_pat.discard('')
+            _cleaned_pat = {
+                pat: pid for pat, pid in portfolio_state['active_plans_by_pattern'].items()
+                if pat in _open_pat
+            }
+            if len(_cleaned_pat) != len(portfolio_state['active_plans_by_pattern']):
+                _cleared = set(portfolio_state['active_plans_by_pattern']) - set(_cleaned_pat)
+                logger.info(f"LIVE per-pattern cache cleanup — cleared: {sorted(_cleared)}")
+            portfolio_state['active_plans_by_pattern'] = _cleaned_pat
+            self.portfolio_state_cache['active_plans_by_pattern'] = dict(_cleaned_pat)
+
         # Debug: Log portfolio state for Guardian checks
         logger.info(f"Portfolio state: active_plan={portfolio_state.get('active_plan_id', '')}, "
                     f"last_tech_price={portfolio_state.get('last_technical_price', 0):.2f}")
@@ -1531,6 +1556,21 @@ class TraiderMainLoop:
                                 portfolio_state['open_orders_count'] = 0
                                 portfolio_state['total_open_lot'] = 0.0
                                 logger.info(f"[{plan_id}] Cleared active plan from portfolio state")
+
+                            # Also clear the per-pattern slot. Without this,
+                            # active_plans_by_pattern carries the closed
+                            # plan_id forever in LIVE mode (the in-cycle
+                            # cleanup block only runs in backtest branch).
+                            # Symptom: next signal of the same pattern gets
+                            # ABORTed at the execute defensive check with
+                            # "already has active plan {yesterday's plan_id}".
+                            _pat_map = self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+                            _stale = [p for p, pid in _pat_map.items() if pid == plan_id]
+                            if _stale:
+                                new_map = {p: pid for p, pid in _pat_map.items() if pid != plan_id}
+                                self.portfolio_state_cache['active_plans_by_pattern'] = new_map
+                                portfolio_state['active_plans_by_pattern'] = dict(new_map)
+                                logger.info(f"[{plan_id}] Cleared per-pattern slot(s): {_stale}")
 
                             if not filled:
                                 # Pure CANCELLED plan (e.g., LIMIT never filled) —
