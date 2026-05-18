@@ -320,6 +320,14 @@ class TraiderMainLoop:
         self.mode = 'winrate_test' if args.winrate_test else 'simulate'
         self.is_backtest = args.backtest if hasattr(args, 'backtest') else False
 
+        # Signal the rest of the codebase (signal_engine etc.) about backtest
+        # vs. live so they can switch time-based decisions to candle-time
+        # instead of wall-clock. Set early so any import-time check sees it.
+        if self.is_backtest:
+            os.environ['TRAIDER_BACKTEST_ACTIVE'] = '1'
+        else:
+            os.environ.pop('TRAIDER_BACKTEST_ACTIVE', None)
+
         # CLI args win over bot_state (subprocesses don't share bot_state with api_server)
         self.symbol = (
             getattr(args, 'symbol', None)

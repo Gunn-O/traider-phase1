@@ -216,8 +216,16 @@ def run_signal_engine(
 
     # V4.25: Time filter — Block trades near Friday market close.
     # Read close_hour + buffer from config so toggling the JSON takes effect
-    # on the next cycle (no restart). Previously hard-coded to defaults and
-    # the log string was wrong too ("< 60min" though buffer default = 120).
+    # on the next cycle (no restart).
+    #
+    # IMPORTANT — use REAL `datetime.now(UTC)`, not the candle timestamp:
+    # during weekend the market is closed and MT5 returns STALE Friday-near-
+    # close candles. Using candle time made the filter trip continuously
+    # through Saturday-Sunday (and bleed into Monday morning until fresh
+    # candles arrived) because Friday near-close timestamps kept satisfying
+    # the window. Real wall-clock UTC is what "near close" actually means.
+    # Backtest mode still passes candle time via current_timestamp through
+    # is_backtest detection below.
     current_timestamp = candles[-1].get('timestamp', datetime.now())
     try:
         from utils.strategy_loader import load_config as _load_cfg
@@ -228,15 +236,22 @@ def run_signal_engine(
     _close_min = int(_tf_cfg.get('close_minute_utc', 0))
     _buf_min   = int(_tf_cfg.get('buffer_minutes', 120))
     _filter_on = bool(_tf_cfg.get('enabled', True))
+    # Detect backtest by env var (set by main.py when --backtest is active)
+    # vs. live cycle. In live we want clock-time semantics; in backtest the
+    # candle IS the clock as far as the strategy is concerned.
+    import os as _os_for_filter
+    _is_backtest_mode = bool(_os_for_filter.getenv('TRAIDER_BACKTEST_ACTIVE'))
+    _filter_time = current_timestamp if _is_backtest_mode else datetime.now(timezone.utc)
     if _filter_on and is_near_market_close(
-        current_timestamp,
+        _filter_time,
         close_hour=_close_h,
         close_minute=_close_min,
         buffer_minutes=_buf_min,
     ):
         logger.info(
             f"V4.25 Time filter: within {_buf_min}min of "
-            f"{_close_h:02d}:{_close_min:02d} UTC Friday close — SKIP"
+            f"{_close_h:02d}:{_close_min:02d} UTC Friday close — SKIP "
+            f"(check_time={_filter_time.isoformat() if hasattr(_filter_time, 'isoformat') else _filter_time})"
         )
         return {
             'selected_tf': timeframe,
