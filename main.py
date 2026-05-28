@@ -1173,12 +1173,34 @@ class TraiderMainLoop:
             # fill/cancel/expire pipeline. Mountain LIMITs (zone-retest) fill at
             # entry via the broker side and skip this gate — `filled` defaults
             # to True (not set), so SL/TP check runs as usual.
+            #
+            # Notebook same-bar fill (run_backtest:972-979): when the child
+            # bar's low/high already touched the LIMIT entry price the moment
+            # we generate the signal, the order fills on THAT bar (no waiting).
+            # Without this check, every LIMIT goes into pending state for ≥1
+            # extra bar, which lets the cancel-near-TP filter trip before the
+            # fill — diverging from notebook trade-for-trade.
             if (order['pattern'] == 'MAI_RUAY'
                     and order.get('order_type', '').upper() == 'LIMIT'):
                 _sig_details_for_order = getattr(signal, 'details', None) or {}
-                order['filled'] = False
-                order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
-                order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
+                _child_low = (current_candle or {}).get('low', 0) or 0
+                _child_high = (current_candle or {}).get('high', 0) or 0
+                _ep = order['entry']
+                _act = order['action']
+                _filled_on_child = (
+                    (_act == 'BUY'  and _child_low  and _child_low  <= _ep) or
+                    (_act == 'SELL' and _child_high and _child_high >= _ep)
+                )
+                if _filled_on_child:
+                    order['filled'] = True
+                    logger.info(
+                        f"   - #{order['order_num']} same-bar fill on child "
+                        f"(low={_child_low:.3f} high={_child_high:.3f} vs entry={_ep:.3f})"
+                    )
+                else:
+                    order['filled'] = False
+                    order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
+                    order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
             # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
             if is_mountain:
                 d = signal.details or {}
