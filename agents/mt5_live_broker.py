@@ -398,6 +398,43 @@ class MT5LiveBroker:
 
     # ------------------------------------------------------------------ trailing SL
 
+    def cancel_pending_by_ticket(self, ticket: int) -> bool:
+        """Cancel an MT5 pending order by ticket. Used by main.py when the
+        MaiRuay v2 position_monitor watcher detects cancel-near-TP and we
+        need to keep MT5 in sync (MT5's native expiration only catches the
+        5-bar timeout, not the early TP-proximity cancel).
+
+        Returns True on success, False on failure (already filled, missing,
+        or other MT5 error). Safe to call on a ticket that's already gone.
+        """
+        try:
+            order = mt5.orders_get(ticket=int(ticket))
+        except Exception as e:
+            logger.warning(f"cancel_pending: orders_get failed for ticket={ticket}: {e}")
+            return False
+        if not order:
+            # Already filled or expired — caller's in-memory CANCELLED state
+            # is harmless because the trade has already moved on (a fill would
+            # have surfaced through update_positions diff).
+            logger.info(f"cancel_pending: ticket={ticket} no longer pending — skip")
+            return False
+        request = {
+            "action":   mt5.TRADE_ACTION_REMOVE,
+            "order":    int(ticket),
+            "symbol":   self.symbol,
+            "magic":    self.magic,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.warning(
+                f"cancel_pending: ticket={ticket} mt5.order_send failed | "
+                f"retcode={result.retcode if result else None} "
+                f"comment={result.comment if result else mt5.last_error()}"
+            )
+            return False
+        logger.info(f"💹 MT5 pending cancelled | ticket={ticket}")
+        return True
+
     def _modify_sl(self, position, new_sl: float, new_tp: Optional[float] = None) -> bool:
         """ส่ง mt5.order_send ปรับ SL (และ TP ถ้าระบุ) ของ position ที่ broker"""
         request = {

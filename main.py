@@ -624,6 +624,20 @@ class TraiderMainLoop:
                     elif _plan_pnl > 0 and self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
                         # WIN clears any pending R2 — no ไม้แก้ after a TP win.
                         self.mai_ruay_state = {}
+            # MaiRuay v2 cancel-near-TP → cancel the MT5 pending order so the
+            # broker matches our in-memory CANCELLED state. Backtest skips
+            # this (PaperBroker has no native pending state to clean up).
+            if closed and self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket'):
+                for _t in closed:
+                    if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED')
+                            and _t.get('broker_ticket')
+                            and (_t.get('pattern') or '').upper() == 'MAI_RUAY'):
+                        try:
+                            self.broker.cancel_pending_by_ticket(int(_t['broker_ticket']))
+                        except Exception as e:
+                            logger.warning(
+                                f"[{_t.get('trade_id')}] cancel_pending_by_ticket failed: {e}"
+                            )
             if closed:
                 for t in closed:
                     logger.info(
