@@ -20,7 +20,7 @@ V4.25 Changes:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Tuple
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from swing_v414 import scan_swings
@@ -52,8 +52,27 @@ class OHLC:
 
 
 @dataclass
+class EntryPoint:
+    """หนึ่ง entry ของ multi-entry signal (MaiRuay v2.04)
+
+    price       — ราคา fill ตั้งใจ
+    label       — ป้ายอธิบาย เช่น "จุด1:market(open_child)"
+    lot         — lot ของ entry นี้ (รวมแล้วเท่ากับ Signal.lot)
+    is_market   — True = MARKET (fill ทันที), False = LIMIT (รอ 5 แท่ง)
+    tp          — TP per-entry (ปรับแล้ว: ถ้า TP_dist < SL_dist → entry±SL_dist เพื่อให้ RR=1.0)
+    sl          — SL per-entry (เท่ากับ Signal.sl เสมอ — เก็บไว้สะดวก)
+    """
+    price:      float
+    label:      str
+    lot:        float
+    is_market:  bool
+    tp:         float = 0.0
+    sl:         float = 0.0
+
+
+@dataclass
 class Signal:
-    pattern:    str           # 'DOWNTREND_IMPULSE' | 'UPTREND_IMPULSE' | 'MOUNTAIN' | 'MOUNTAIN_R2'
+    pattern:    str           # 'DOWNTREND_IMPULSE' | 'UPTREND_IMPULSE' | 'MOUNTAIN' | 'MOUNTAIN_R2' | 'MAI_RUAY'
     direction:  str           # 'BUY' | 'SELL'
     quality:    str           # '100%✓' | '~60%⚠️'
     entry:      float
@@ -68,6 +87,12 @@ class Signal:
     lot:        float = 0.0
     R55:        float = 0.0
     details:    dict  = field(default_factory=dict)
+    # ── MaiRuay v2.04 optional fields ──────────────────────────────
+    # default = None/False/'' → Mountain และ Scanner ใช้ตามเดิมโดยไม่ต้องแก้
+    entries:     Optional[List[EntryPoint]] = None  # 3 จุดเข้า — None = single entry (Mountain/Scanner)
+    is_round2:   bool  = False                       # True = ไม้รวยรอบ 2 (R2 หลัง SL)
+    father_pass: str   = ''                          # 'Pass1 ...' | 'R2 ...' — debug label
+    vol_ratio:   float = 0.0                         # Volatility Ratio (father avg ÷ pre-20 avg)
 
 
 # ═══════════════════════════════════════════════════════════════════

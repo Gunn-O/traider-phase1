@@ -13,8 +13,11 @@
 | Notebook | Strategy | Python |
 |----------|----------|--------|
 | `strategy/XAUUSD_Backtest_Mountain.md` | **ภูเขา** (Mountain v4.61) | `strategies/mountain.py` |
-| `strategy/XAUUSD_Backtest_MaiRuay.md` | **ไม้รวย** (Father/Mother) | `strategies/mai_ruay.py` |
+| `strategy/Mairuay_Basic_Father_V2.04_M1.md` | **ไม้รวย v2.04** (Basic Father, M1 only) | `strategies/mai_ruay.py` |
 | `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v4.2.md` | **Uptrend/Downtrend Scanner v4.2** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
+
+**Legacy (อ้างอิงเท่านั้น — ไม่ใช่ source of truth):**
+- `strategy/legacy/XAUUSD_Backtest_MaiRuay_v1.md` — engine v1 ถูกแทนที่ด้วย v2.04 แล้ว (no Python implementation)
 
 **กฎเหล็ก:** Python ต้องตรงกับ **engine code ใน notebook** เสมอ (markdown header ใน notebook อาจล้าสมัย — engine code คือ source of truth)
 **Strategies ทั้ง 3 ทำงานแยกกัน** — ไม่มีการ share state ข้าม strategy
@@ -37,10 +40,14 @@
 - **Strategy modules:** `strategies/mountain.py`, `strategies/mai_ruay.py`, `strategies/uptrend_downtrend_scanner.py`
   - คำนวณ Entry/SL/TP/Lot ทั้งหมด — ตรงกับ engine code ใน notebook 3 ไฟล์
   - แก้ได้เมื่อ notebook engine update (อย่าแก้ตามใจ — ต้อง diff กับ notebook ก่อน)
+  - **MaiRuay = v2.04 เท่านั้น** (multi-entry + Round 2, notebook `Mairuay_Basic_Father_V2.04_M1`)
 - **Signal helpers:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
   - แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing_v414 pair_thresh 0.5%→1%)
   - ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec ของ notebook
-- **Single TF:** M5 (MaiRuay เปิด M1/M15/M30 ด้วย; Mountain เปิด M1+M5)
+- **TF policy (config/strategies.json):**
+  - MOUNTAIN: M1/M5/M15/M30
+  - MAI_RUAY v2: **M1 only** (notebook ระบุ V2.04_M1)
+  - Scanner: M1/M5/M15/M30
 - Phase II: ใช้ใน BACKTEST, SIM, LIVE ทั้งหมด
 
 **Claude Role (Phase II — refreshed 2026-05-11):**
@@ -142,10 +149,21 @@ winrate_test_lot = 0.01
 **Strategy Modules — strategies/{mountain,mai_ruay,uptrend_downtrend_scanner}.py:**
 - [ ] **ตรวจ diff กับ notebook engine** ก่อนทุกครั้งที่แก้ — ถือว่า notebook = source of truth
 - [ ] Mountain: pair_thresh = max(R55×1%, 100pip), buffer 5%×height, TP3=80%×height, SL=60%×height (notebook v4.61)
-- [ ] MaiRuay: MAX_FATHER=8, father body 60-100%R55, mother body 4-30% ของพ่อ (engine; markdown header ของ notebook ระบุไม่ตรง — ใช้ engine)
+- [ ] **MaiRuay v2 (notebook V2.04):**
+  - พ่อ 1-10 แท่งสีเดียวห้ามแทรก (R1) / 1-8 อนุญาตแทรก 1 ≤10%R55 (R2)
+  - พ่อ body รวม >60%R55 (R1) / >35%R55 (R2)
+  - พ่อแต่ละแท่ง >4%R55 (อนุโลม 2 แท่ง >2% ถ้าเสียงข้างมาก >10%)
+  - Volatility Ratio >1 (R1 เท่านั้น)
+  - แม่ 3-25% **ของ R55** (ไม่ใช่ของพ่อ)
+  - 3 จุดเข้าพร้อมกัน split lot/3, ไม้ 2-3 = LIMIT pending 5 แท่ง
+  - SL = 40%×father (ตายตัว), TP = 45%×father (ตายตัว)
+  - TP30/SL45 special trigger จาก 50 แท่งก่อนพ่อ no-touch
+  - TP < 200 pip → skip
+  - Round 2 ภายใน 16 แท่งหลัง SL — ทิศเดิม, TP/SL ใช้พ่อรวม
+  - ไม่มี anti-trend, ไม่มี obstacle scanner, ไม่มี spread buffer
 - [ ] Scanner: C1≥60%, C2≥55% (5bars), C3≤30%, C4≥25%, C5≤30%, C6≤40% (start 5 bars)
 - [ ] ทั้ง 3 strategy ทำงานแยกกัน — ไม่มี state แชร์
-- [ ] Output: Signal object พร้อม entry/sl/tp/lot/rr
+- [ ] Output: Signal object พร้อม entry/sl/tp/lot/rr (MaiRuay v2: เพิ่ม `entries`, `is_round2`, `father_pass`, `vol_ratio`)
 
 **Signal Helpers — utils/xauusd_signal.py + utils/swing_v414.py:**
 - [ ] แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing pair_thresh)
@@ -153,10 +171,12 @@ winrate_test_lot = 0.01
 - [ ] Workflow: TradingView/Colab → backtest match > 90% → port to Python → run audit
 
 **G2 Pre-filter — agents/g2_prefilter.py:**
-- [ ] Block ก่อน execute: มี active_plan_id อยู่แล้ว (1 plan ต่อครั้ง)
+- [ ] Block ก่อน execute: มี active_plan_id อยู่แล้ว (1 plan ต่อครั้ง per-pattern)
 - [ ] Block ก่อน execute: consecutive_loss ≥ 3
 - [ ] Block ก่อน execute: R:R < 1.0
 - [ ] **Block ก่อน execute: duplicate signal** (entry ใหม่ ± 50pip ของ active plan)
+- [ ] **MaiRuay v2 R2 bypass:** ถ้า `signal.is_round2=True` → bypass duplicate ±50pip + cooldown
+- [ ] **MaiRuay v2 multi-entry:** G2 รันต่อ candle ครั้งเดียว — 3 orders ใน plan เดียวไม่ต้องตรวจซ้ำกันเอง
 
 **Step 3a/3b — main.py (no AI):**
 - [ ] Step 3a: AUTO_APPROVE — ห้ามเพิ่ม Claude call กลับมา
@@ -172,6 +192,7 @@ winrate_test_lot = 0.01
 - [ ] R:R block: ใช้ `RISK_CONFIG['min_rr_ratio']` (default 0.0 = ปิด)
 - [ ] ไม่มี confidence threshold (Signal Engine = 1.0 เสมอ)
 - [ ] ไม่มี Claude/AI call ใน Guardian — Python rules ล้วน
+- [ ] **MaiRuay v2 R2 bypass:** ถ้า `decision['is_round2']=True` → bypass consecutive_loss ≥ 3 (notebook spec อนุญาต R2 เข้าทันทีหลัง R1 SL)
 
 **G4 Position Monitor — agents/g4_position_monitor.py:**
 - [ ] check_and_update() ถูกเรียกทุก candle close ใน backtest/sim/live loop
@@ -191,6 +212,21 @@ winrate_test_lot = 0.01
 **G4 Notify — agents/g4_notify.py:**
 - [ ] ทำงานเฉพาะ SIM/LIVE mode (ปิดใน BACKTEST)
 - [ ] LINE_NOTIFY_ENABLED=false ระหว่าง backtest
+
+**MaiRuay v2 Multi-Entry + R2 — signal_engine.py + main.py + position_monitor.py:**
+- [ ] `strategies/mai_ruay.py` = v2.04 engine (notebook `Mairuay_Basic_Father_V2.04_M1`)
+- [ ] signal_engine ส่ง/รับ `mai_ruay_state` (parallel กับ mountain_state, scanner_state)
+- [ ] signal_engine ส่ง `bar_offset_in_window` ใน round2_info (สำหรับ 6-bar check ใน analyze_bar)
+- [ ] position_monitor.get_pending_limits() → ใช้ block plan ใหม่ของ pattern เดียวกัน
+- [ ] position_monitor._process_pending_limit: cancel-near-TP (10%R55), fill, expire (5 bars)
+- [ ] main.py mark LIMIT orders ของ MaiRuay เท่านั้นเป็น filled=False (Mountain LIMIT ผ่าน path เดิม)
+- [ ] signal_engine R2 retry: ถ้า R1 ส่ง None + มี r1_info + ภายใน 16 แท่ง → ลอง R2
+- [ ] R2 fires → clear r1_info (no R3); 16 bars passed → clear stale r1_info
+- [ ] main.py: `signal.entries` non-None → สร้าง orders จาก list (1 plan, N orders, plan_id เดียว, order_num=1..N)
+- [ ] main.py: Mountain path (`entries=None`) ต้องไม่กระทบ (ตรวจ Mountain regression)
+- [ ] main.py: order มี `r1_capture` field สำหรับ MaiRuay v2 R1 (เก็บ tech, f_open_r1, entry_bar, direction)
+- [ ] main.py: เมื่อ plan SL + มี r1_capture → set `self.mai_ruay_state['r1_info']`
+- [ ] main.py: เมื่อ plan WIN → clear `self.mai_ruay_state`
 
 **main.py — Backtest/Simulation/Live:**
 - [ ] **Mode switching:**

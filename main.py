@@ -23,6 +23,8 @@ import os
 import sys
 import argparse
 import logging
+import math
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List
@@ -472,6 +474,19 @@ class TraiderMainLoop:
         # Initialize Broker (Paper/Micro/Live)
         self.broker = create_broker(self.trading_mode, self.symbol)
 
+        # Pre-fetch cache — background thread keeps candle data warm so run_once()
+        # Step 1 doesn't pay the 2-8s network wait inside the critical path.
+        # Skipped in backtest (uses historical data passed via run_once kwargs).
+        self._candles_cache: Dict = {}
+        self._cache_lock = threading.Lock()
+        self._cache_ready = threading.Event()
+        if not self.is_backtest:
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_worker, daemon=True, name="PrefetchWorker"
+            )
+            self._prefetch_thread.start()
+            logger.info("✓ Pre-fetch background thread started")
+
         # Weekly/Monthly/Daily state tracking
         self.last_weekly_date = None
         self.last_monthly_date = None
@@ -485,6 +500,10 @@ class TraiderMainLoop:
         # Loaded from bot_state_snapshots.state_json on startup; persisted on
         # each plan_closed event so a launcher restart preserves it.
         self.scanner_state: Optional[dict] = None
+        # MaiRuay v2 state — carries r1_info after a SL so signal_engine can
+        # retry R2 within 16 bars. Persisted on plan_closed; cleared on R2 fire
+        # or after 16 bars expire (handled inside signal_engine).
+        self.mai_ruay_state: Optional[dict] = None
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -581,6 +600,30 @@ class TraiderMainLoop:
         if current_candle:
             # check_and_update() expects candle dict (not separate params)
             closed = self.position_monitor.check_and_update(candle=current_candle)
+            # ── MaiRuay v2 R2 arm — group closed trades by plan_id; if any plan
+            # closed with negative P&L AND has r1_capture, arm r1_info so the
+            # next signal_engine cycle retries as ไม้แก้ within 16 bars.
+            if closed:
+                from collections import defaultdict as _dd
+                _by_plan = _dd(list)
+                for _t in closed:
+                    _by_plan[_t.get('plan_id', '')].append(_t)
+                for _plan_id, _plan_trades in _by_plan.items():
+                    # Only consider fully-closed plans (all trades filled with WIN/LOSS).
+                    # If a multi-entry plan has pending limits left, skip — wait for next cycle.
+                    if not all(_t.get('result') in ('WIN', 'LOSS') for _t in _plan_trades):
+                        continue
+                    _plan_pnl = sum((_t.get('pnl_usd') or _t.get('pnl') or 0) for _t in _plan_trades)
+                    _r1_cap = next((_t.get('r1_capture') for _t in _plan_trades if _t.get('r1_capture')), None)
+                    if _plan_pnl < 0 and _r1_cap:
+                        self.mai_ruay_state = {'r1_info': _r1_cap}
+                        logger.info(
+                            f"[{_plan_id}] MaiRuay v2 R1 SL — armed r1_info "
+                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']}, pnl=${_plan_pnl:.2f})"
+                        )
+                    elif _plan_pnl > 0 and self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
+                        # WIN clears any pending R2 — no ไม้แก้ after a TP win.
+                        self.mai_ruay_state = {}
             if closed:
                 for t in closed:
                     logger.info(
@@ -775,8 +818,20 @@ class TraiderMainLoop:
 
         # Step 1: Fetch data
         if candles_by_tf is None:
-            logger.info("\n[STEP 1] Fetching market data...")
-            candles_by_tf = self._fetch_data_all_tf()
+            # Live/sim path: prefer the warm cache from _prefetch_worker so we
+            # don't pay 2-8s of network latency inside the critical path.
+            # Fall back to direct fetch only if the worker hasn't filled the
+            # cache yet (first cycle after startup).
+            if not self.is_backtest and self._cache_ready.is_set():
+                with self._cache_lock:
+                    candles_by_tf = dict(self._candles_cache)  # snapshot
+                logger.info("\n[STEP 1] Using pre-fetched cache (no network wait)")
+                for tf in TIMEFRAMES:
+                    if tf in candles_by_tf and candles_by_tf[tf]:
+                        logger.info(f"✓ {tf}: {len(candles_by_tf[tf])} candles (cached)")
+            else:
+                logger.info("\n[STEP 1] Fetching market data (cache not ready yet)...")
+                candles_by_tf = self._fetch_data_all_tf()
         else:
             logger.info("\n[STEP 1] Fetching market data...")
             # Log pre-fetched data from backtest
@@ -822,11 +877,15 @@ class TraiderMainLoop:
             portfolio=self.balance,
             mountain_state=self.mountain_state,
             scanner_state=self.scanner_state,
+            mai_ruay_state=self.mai_ruay_state,
         )
 
         # Update state from Signal Engine output (mutated in place by detectors)
         self.mountain_state = world_state.get('mountain_state')
         self.scanner_state = world_state.get('scanner_state')
+        # MaiRuay v2 r1_info — signal_engine drops it after R2 fires (no R3) or
+        # after 16 bars expire; we mirror the latest value here for next cycle.
+        self.mai_ruay_state = world_state.get('mai_ruay_state') or {}
 
         # Update latest_candle for dashboard chart
         if current_candle and candle_time:
@@ -893,6 +952,21 @@ class TraiderMainLoop:
 
         # Step 3: G2 Pre-filter
         logger.info("\n[STEP 3] G2 Pre-filter...")
+        # MaiRuay v2 spec (notebook run_backtest:929): an unfilled LIMIT still
+        # occupies the 1-plan slot for its pattern — block new signals of the
+        # same pattern until those LIMITs fill or cancel. position_monitor is
+        # the single source of truth for pending state.
+        try:
+            _pending = self.position_monitor.get_pending_limits()
+        except Exception:
+            _pending = []
+        if _pending:
+            _pending_by_pat: dict = {}
+            for _p in _pending:
+                _ppat = (_p.get('pattern') or '').upper()
+                if _ppat:
+                    _pending_by_pat[_ppat] = _pending_by_pat.get(_ppat, 0) + 1
+            portfolio_state['pending_limits_by_pattern'] = _pending_by_pat
         # Note: portfolio_state already reloaded after Step 0
         prefilter_result = self.g2.check(world_state, portfolio_state)
 
@@ -924,7 +998,10 @@ class TraiderMainLoop:
             'rr_ratio': signal.rr,
             'confidence': 1.0,  # Signal Engine is deterministic
             'setup': signal.pattern.lower() if hasattr(signal, 'pattern') else 'unknown',
-            'skip_reason': None
+            'skip_reason': None,
+            # MaiRuay v2 R2 flag — G3 uses this to bypass consecutive_loss limit
+            # so the ไม้แก้ retry can fire within 16 bars of the R1 SL.
+            'is_round2': bool(getattr(signal, 'is_round2', False)),
         }
 
         # llm_log kept for Sheets/LocalDB schema compatibility — always $0/no tokens.
@@ -977,27 +1054,67 @@ class TraiderMainLoop:
             sl_distance_pip = abs(decision['entry'] - decision['sl']) * 100
             max_loss_usd = (sl_distance_pip / 100.0) * lot
 
-        # Create order (1 order per plan)
-        order = {
-            'order_num': 1,
-            'order_type': 'MARKET',
-            'action': decision['action'],
-            'entry': decision['entry'],
-            'sl': decision['sl'],
-            'tp': decision['tp'],
-            'lot': lot,
-            'rr_ratio': decision.get('rr_ratio', 0)
-        }
+        # Order type: read from signal.details when the strategy specifies it
+        # (MAI_RUAY sets 'MARKET' for แม่ 4-10% and 'LIMIT' for 10-30%).
+        # Mountain doesn't set it → falls through to broker auto-detect (legacy
+        # zone-retest LIMIT behavior). Logged on the order dict for audit.
+        sig_details = getattr(signal, 'details', None) or {}
+        sig_order_type = sig_details.get('order_type', 'MARKET')
 
-        plan = {
-            'lot_total': lot,
-            'total_orders': 1,
-            'max_loss_usd': max_loss_usd,
-            'orders': [order]
-        }
-
-        logger.info(f"✓ Order created: {order['action']} @ {order['entry']:.2f}, "
-                    f"lot={lot:.2f}, R:R={order['rr_ratio']:.2f}")
+        # ── Multi-entry vs single-entry ──────────────────────────────────
+        # MaiRuay v2 produces signal.entries = [3 EntryPoint objects], each
+        # with its own price/lot/is_market/tp. Mountain + Scanner + MaiRuay v1
+        # produce signal.entries = None → single order path (1 plan = 1 order).
+        sig_entries = getattr(signal, 'entries', None)
+        if sig_entries:
+            orders_list = []
+            for _ix, ep in enumerate(sig_entries):
+                # Per-entry SL/TP override the plan-level decision.sl/decision.tp
+                _ep_lot = ep.lot if ep.lot and ep.lot > 0 else 0.01  # broker requires >0
+                _ep_rr = (abs(ep.tp - ep.price) / abs(ep.price - ep.sl)) if abs(ep.price - ep.sl) > 0 else 0.0
+                orders_list.append({
+                    'order_num': _ix + 1,
+                    'order_type': 'MARKET' if ep.is_market else 'LIMIT',
+                    'action': decision['action'],
+                    'entry': ep.price,
+                    'sl': ep.sl,
+                    'tp': ep.tp,
+                    'lot': _ep_lot,
+                    'rr_ratio': _ep_rr,
+                    'entry_label': ep.label,
+                })
+            plan = {
+                'lot_total': lot,
+                'total_orders': len(orders_list),
+                'max_loss_usd': max_loss_usd,
+                'orders': orders_list,
+            }
+            logger.info(f"✓ Multi-entry plan: {len(orders_list)} orders @ {decision['action']}, total_lot={lot:.2f}")
+            for o in orders_list:
+                logger.info(
+                    f"   - #{o['order_num']} {o['order_type']:6} E={o['entry']:.2f} "
+                    f"TP={o['tp']:.2f} SL={o['sl']:.2f} lot={o['lot']} RR={o['rr_ratio']:.2f}"
+                )
+        else:
+            # Single-entry (Mountain / Scanner / MaiRuay v1)
+            order = {
+                'order_num': 1,
+                'order_type': sig_order_type,
+                'action': decision['action'],
+                'entry': decision['entry'],
+                'sl': decision['sl'],
+                'tp': decision['tp'],
+                'lot': lot,
+                'rr_ratio': decision.get('rr_ratio', 0),
+            }
+            plan = {
+                'lot_total': lot,
+                'total_orders': 1,
+                'max_loss_usd': max_loss_usd,
+                'orders': [order],
+            }
+            logger.info(f"✓ Order created: {order['action']} @ {order['entry']:.2f}, "
+                        f"lot={lot:.2f}, R:R={order['rr_ratio']:.2f}")
 
         # Determine mode for plan/trade ID prefix
         # PT- backtest | SM- simulate (paper broker, real-time data) | RT- live (real orders)
@@ -1052,6 +1169,16 @@ class TraiderMainLoop:
             # next signal trivially passed G2/G3 → double-trade. This is the
             # root cause of the user's "เบิ้ลไม้" report.
             order['pattern'] = (getattr(signal, 'pattern', '') or '').upper()
+            # MaiRuay v2 multi-entry: ONLY MaiRuay LIMITs use the position_monitor
+            # fill/cancel/expire pipeline. Mountain LIMITs (zone-retest) fill at
+            # entry via the broker side and skip this gate — `filled` defaults
+            # to True (not set), so SL/TP check runs as usual.
+            if (order['pattern'] == 'MAI_RUAY'
+                    and order.get('order_type', '').upper() == 'LIMIT'):
+                _sig_details_for_order = getattr(signal, 'details', None) or {}
+                order['filled'] = False
+                order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
+                order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
             # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
             if is_mountain:
                 d = signal.details or {}
@@ -1061,6 +1188,29 @@ class TraiderMainLoop:
                     'tp2_base':   float(d.get('tp2_base') or d.get('tp2') or 0),
                     'tech_point': float(d.get('tech_point') or d.get('base_lo') or 0),
                     'height':     float(d.get('height') or 0),  # pip
+                }
+            # MaiRuay v2 R2 prep: capture the info needed to retry as ไม้แก้
+            # if THIS plan ends in LOSS. signal_engine consumes r1_info on the
+            # next cycle to call find_signal(..., round2_info=r1_info).
+            # signal.is_round2 means we're ALREADY R2 — don't capture again
+            # (no R3 allowed by notebook spec).
+            if (order['pattern'] == 'MAI_RUAY'
+                    and not bool(getattr(signal, 'is_round2', False))):
+                d = signal.details or {}
+                _fs = d.get('father_start')
+                # bars in world_state are 0-indexed; entry_bar = bar_idx (= last bar = mother_idx + 1)
+                # Use len(candles)-1 as bar_idx since signal was just produced at last bar.
+                _last_idx = len(candles_by_tf.get(active_tf, [])) - 1
+                # Pull the father's open price (R1) from the OHLC list — needed
+                # for the "father_combined" TP/SL calc in the R2 analyzer.
+                _f_open_r1 = 0.0
+                if _fs is not None and 0 <= _fs < len(candles_by_tf.get(active_tf, [])):
+                    _f_open_r1 = float(candles_by_tf[active_tf][_fs].get('open', 0.0))
+                order['r1_capture'] = {
+                    'tech':       float(d.get('tech_point', 0.0)),
+                    'f_open_r1':  _f_open_r1,
+                    'entry_bar':  _last_idx,
+                    'direction':  signal.direction,
                 }
             orders_with_ids.append(order)
 
@@ -1100,8 +1250,16 @@ class TraiderMainLoop:
             trail_meta = None
             if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
                 trail_meta = getattr(signal, 'details', None) or {}
+            # MaiRuay v2 LIMIT extras — broker uses these to expire / cancel
+            # pending limits per the notebook spec (5 bars, cancel within 10%R55
+            # of TP). Mountain/Scanner do not set these → broker uses defaults.
+            _sig_details = getattr(signal, 'details', None) or {}
+            _pending_bars = int(_sig_details.get('pending_bars', 5))
+            _tp_cancel_buf = float(_sig_details.get('tp_cancel_buffer_pips', 0.0))
+
             for order in orders_with_ids:
-                ticket = self.broker.open_position(
+                _ot = order.get('order_type') or 'MARKET'
+                _open_kwargs = dict(
                     action=order['action'],
                     lot=order['lot'],
                     sl=order['sl'],
@@ -1111,10 +1269,42 @@ class TraiderMainLoop:
                     trade_id=order['trade_id'],
                     entry_price=order.get('entry'),
                     trail_meta=trail_meta,
+                    order_type=_ot,
+                    technique=(order.get('pattern') or '').lower() or 'unknown',
                 )
+                # Only pass pending kwargs to PaperBroker (MT5 broker handles
+                # expiration server-side via order_send expiration field).
+                if _ot == 'LIMIT' and order['pattern'] == 'MAI_RUAY':
+                    try:
+                        _open_kwargs['pending_bars'] = _pending_bars
+                        _open_kwargs['tp_cancel_buffer_pips'] = _tp_cancel_buf
+                        ticket = self.broker.open_position(**_open_kwargs)
+                    except TypeError:
+                        # Broker doesn't accept pending_bars/tp_cancel_buffer_pips
+                        # (e.g. live MT5 broker) — retry without them.
+                        _open_kwargs.pop('pending_bars', None)
+                        _open_kwargs.pop('tp_cancel_buffer_pips', None)
+                        ticket = self.broker.open_position(**_open_kwargs)
+                else:
+                    ticket = self.broker.open_position(**_open_kwargs)
                 if ticket:
                     order['broker_ticket'] = ticket
-                    logger.info(f"✓ Order {order['trade_id']} opened as ticket #{ticket}")
+                    logger.info(
+                        f"✓ Order {order['trade_id']} opened as ticket #{ticket} "
+                        f"(order_type={_ot})"
+                    )
+                    # MARKET orders fill immediately — overwrite signal.entry
+                    # with the actual fill price so LocalDB / position_monitor
+                    # work against reality (slippage-adjusted) instead of the
+                    # requested price. For LIMIT we keep the requested price;
+                    # position_monitor's reconcile path picks up the real fill
+                    # when MT5 turns it into a position.
+                    if str(_ot).upper() == 'MARKET' and hasattr(self.broker, 'get_fill_price'):
+                        fp = self.broker.get_fill_price(ticket)
+                        if fp:
+                            order['entry'] = fp
+                            order['entry_price'] = fp
+                            logger.info(f"  ↳ market fill_price={fp:.3f} → entry updated")
                 else:
                     logger.error(f"✗ Failed to open order {order['trade_id']} — will not be tracked")
 
@@ -1123,8 +1313,21 @@ class TraiderMainLoop:
                 logger.warning("All orders failed at broker — aborting plan (no Sheets/DB/monitor entries)")
                 return
 
-        # Log to Sheets
-        self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision_for_sheets, world_state, llm_log, candle_time=candle_time)
+        # Log to Sheets (async — orders are already at the broker; don't block
+        # the cycle on the Sheets API round-trip). LocalDB + update_portfolio_state
+        # below stay sync since position_monitor + Guardian read them back.
+        if self.sheets_logger.enabled:
+            self._log_async(
+                self.sheets_logger.log_plan_open,
+                plan_id, orders_with_ids, decision_for_sheets,
+                world_state, llm_log,
+                candle_time=candle_time,
+            )
+        else:
+            self.sheets_logger.log_plan_open(
+                plan_id, orders_with_ids, decision_for_sheets,
+                world_state, llm_log, candle_time=candle_time,
+            )
 
         # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
         # when running under api_server with a bot_id assigned).
@@ -1245,6 +1448,28 @@ class TraiderMainLoop:
         logger.info("\n" + "="*70)
         logger.info("✅ Trading cycle completed successfully!")
         logger.info("="*70)
+
+    def _prefetch_worker(self):
+        """Background thread — fetch bars every 10s and cache them so run_once()
+        can read instantly without waiting on network. Daemon → dies with main."""
+        while True:
+            try:
+                data = self._fetch_data_all_tf()
+                if data:
+                    with self._cache_lock:
+                        self._candles_cache = data
+                    self._cache_ready.set()
+                    logger.debug("Pre-fetch: cache updated")
+            except Exception as e:
+                logger.warning(f"Pre-fetch error (will retry): {e}")
+            time.sleep(10)
+
+    def _log_async(self, fn, *args, **kwargs):
+        """Fire `fn` in a daemon thread so the caller doesn't block on slow I/O
+        (e.g. Sheets API). Use ONLY for fire-and-forget logs — never for things
+        downstream code reads back (LocalDB, position_monitor, Guardian state)."""
+        t = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
+        t.start()
 
     def _fetch_data_all_tf(self) -> Dict:
         """
@@ -1589,8 +1814,23 @@ class TraiderMainLoop:
                                 logger.info(f"[{plan_id}] Plan fully closed: {plan_result} (P&L: ${plan_pnl:.2f})")
                                 if plan_result == 'LOSS':
                                     portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
+                                    # MaiRuay v2 R2 capture: if this plan was MaiRuay R1, save r1_info
+                                    # so signal_engine can retry as ไม้แก้ within the next 16 bars.
+                                    _r1_cap = next(
+                                        (o.get('r1_capture') for o in filled if o.get('r1_capture')),
+                                        None,
+                                    )
+                                    if _r1_cap:
+                                        self.mai_ruay_state = {'r1_info': _r1_cap}
+                                        logger.info(
+                                            f"[{plan_id}] MaiRuay v2 R1 SL — armed r1_info "
+                                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']})"
+                                        )
                                 else:
                                     portfolio_state['consecutive_loss'] = 0
+                                    # WIN clears any pending R2 — no ไม้แก้ after a TP win.
+                                    if self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
+                                        self.mai_ruay_state = {}
                                 portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + plan_pnl
 
                             self.sheets_logger.update_portfolio_state(portfolio_state)
@@ -1962,19 +2202,30 @@ def main():
             traider.run_once()
 
         else:
-            # Run continuously — poll interval = active TF duration (capped 1h)
-            # ตั้ง interval ตาม TF: M1=60s, M5=300s, M15=900s, M30=1800s, H1/H4=3600s
+            # Run continuously — sleep aligned to bar boundary (not from cycle end).
+            # time.sleep(poll_secs) drifts because cycle work (fetch + signal +
+            # logs) takes seconds; over time the bot wakes mid-bar. Aligning to
+            # ceil(now / tf_sec) * tf_sec + 2s ensures every wake-up lands just
+            # after a fresh bar close.
             tf_seconds = {
                 'M1': 60, 'M5': 300, 'M15': 900,
                 'M30': 1800, 'H1': 3600, 'H4': 3600,
             }
             active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
-            poll_secs = tf_seconds.get(active_tf, 300)
-            logger.info(f"Running in continuous mode... TF={active_tf}, poll every {poll_secs}s (Ctrl+C to stop)")
+            tf_sec = tf_seconds.get(active_tf, 300)
+            logger.info(f"Running in continuous mode... TF={active_tf}, bar-aligned sleep (Ctrl+C to stop)")
             while True:
                 traider.run_once()
                 traider.monitor_positions()
-                time.sleep(poll_secs)
+
+                now = time.time()
+                next_bar_ts = math.ceil(now / tf_sec) * tf_sec
+                sleep_sec = max(2.0, next_bar_ts - now + 2.0)
+                logger.info(
+                    f"⏰ Sleeping {sleep_sec:.1f}s → next bar at "
+                    f"{datetime.fromtimestamp(next_bar_ts)}"
+                )
+                time.sleep(sleep_sec)
 
     except KeyboardInterrupt:
         logger.info("\n\n👋 Shutting down gracefully...")

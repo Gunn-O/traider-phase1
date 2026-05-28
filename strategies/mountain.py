@@ -302,6 +302,11 @@ def _detect_mountain_r1(
             'tp2_base': tp2_base, 'tp2_adj': tp2_adj,
             'is_adjacent': is_adjacent,
             'X': X, 'Y': Y,
+            # Mountain is a zone-retest setup — broker must place a pending
+            # LIMIT at entry (= min(H_cur, zone_hi)) and wait for price to
+            # come back. main.py reads this; without it the default 'MARKET'
+            # would fire the order at current price → wrong fill, wrong R:R.
+            'order_type': 'LIMIT',
             # swing_bar_nums: tracked here (Signal class doesn't expose this field)
             'swing_bar_nums': set(base_sw['bar_nums']),
         },

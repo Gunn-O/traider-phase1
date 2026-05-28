@@ -1,6 +1,6 @@
 {
   "version": "66",
-  "last_updated": "2026-05-13",
+  "last_updated": "2026-05-22",
   "patterns": {
     "MOUNTAIN": {
       "active": true,
@@ -27,29 +27,35 @@
       ]
     },
     "MAI_RUAY": {
-      "active": true,
+      "active": false,
       "implemented": true,
-      "name": "ไม้รวย (Branch F) v2",
-      "description": "Father/Mother candle — พ่อ 1-8 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ (notebook v2: ลบ obs→entry redirect, ใส่ 6%R55 buffer ใน SL ฝั่งอุปสรรค)",
+      "name": "ไม้รวย Basic Father V2.04 (M1)",
+      "description": "Father/Mother candle v2.04 — พ่อสีเดียว 1-10 แท่ง >60% R55, Vol Ratio>1, แม่ 3-25% R55, 3 จุดเข้าพร้อมกัน (split lot/3), Round 2 หลัง SL ใน 16 แท่ง. Engine: strategies/mai_ruay.py",
       "direction": "BOTH",
-      "version": "2.0",
+      "version": "2.04",
       "validations": [
-        "พ่อ 1-8 แท่ง สีเดียวกัน body 60-100% R55 (MAX_FATHER=8 ใน engine)",
-        "พ่อ all-same length=5 ต้องมี trio open→close > 60% R55",
-        "แม่สวนทิศพ่อ body 4-30% ของพ่อ",
-        "Entry rule: <10% close แม่ / 10-30% midpoint / >30% tech_point",
-        "SL = tech ± 70% body พ่อ (หรือ obstacle ± 6%R55 buffer ถ้ามีอุปสรรค — v2)",
-        "TP3 default = 75% body พ่อ (หรือ obstacle ± 6% R55)",
-        "Anti-trend filter (ไม่เทรดสวน slope 20 แท่ง)",
-        "Lot = portfolio × 10% / SL (pip)",
-        "v2: เอา obs→entry redirect ออก — entry ยึดที่ตำแหน่งจากกฎ 10%/30%"
+        "พ่อ 1-10 แท่งสีเดียว ห้ามแทรก (R1) / 1-8 แท่ง อนุญาตแทรก 1 ≤10%R55 (R2)",
+        "พ่อ body รวม > 60% R55 (R1) / > 35% R55 (R2)",
+        "พ่อ แต่ละแท่ง body > 4% R55 (อนุโลม 2 แท่ง >2% ถ้าเสียงข้างมาก >10%)",
+        "Volatility Ratio > 1 (father avg ÷ pre-20 avg) — R1 เท่านั้น",
+        "หยุดพ่อที่ Doji (body ≤ 2% R55)",
+        "แม่สวนทิศพ่อ body 3-25% **ของ R55** (ไม่ใช่ของพ่อ)",
+        "3 จุดเข้าพร้อมกัน: [market/mid_แม่, tech, tech±10%พ่อ] split lot/3",
+        "ไม้ 2-3 = LIMIT pending 5 แท่ง / ยกเลิกถ้า TP ใกล้ภายใน 10% R55",
+        "TP per-entry adjustment: ถ้า TP_dist < SL_dist → TP = entry ± SL_dist (RR=1.0)",
+        "SL = 40% × father_body (ตายตัว — ไม่ใช้ obstacle scanner)",
+        "TP = 45% × father_body (ตายตัว)",
+        "TP30/SL45 special: ถ้า 50 แท่งก่อนพ่อ no low<60%/no high>40% R55 → TP=30%, SL=45%",
+        "TP < 200 pip → skip signal",
+        "Round 2 หลัง SL: ภายใน 16 แท่ง ลอง R2 (ทิศเดียวกัน), TP=45%×พ่อรวม, SL=30%×พ่อรวม",
+        "ไม่มี anti-trend filter (v2.04 ลบทิ้ง)",
+        "ไม่มี obstacle scanner (v2.04 ลบทิ้ง)",
+        "ไม่มี spread buffer TP_ORD_BUF (v2.04 ลบทิ้ง — sync ตาม notebook)",
+        "Lot = portfolio × 10% / SL_pip; แม่ 17-25% → /2; พ่อ >90% R55 → ×2"
       ],
       "priority": 5,
       "allowed_tfs": [
-        "M1",
-        "M5",
-        "M15",
-        "M30"
+        "M1"
       ]
     },
     "UPTREND_SCANNER": {

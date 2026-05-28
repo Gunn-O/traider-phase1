@@ -69,6 +69,14 @@ class PaperBroker:
             logger.error(f"Failed to get price for {self.symbol}: {e}")
             raise
 
+    def get_fill_price(self, ticket: int) -> Optional[float]:
+        """Return the actual fill price for an opened ticket.
+        Paper broker has no slippage — fill_price == entry the caller passed."""
+        pos = self.positions.get(ticket)
+        if not pos:
+            return None
+        return float(pos.get("entry") or pos.get("entry_price") or 0.0) or None
+
     def open_position(
         self,
         action: str,       # BUY / SELL
@@ -83,6 +91,14 @@ class PaperBroker:
         beauty_score: Optional[int] = None,  # V4.3
         entry_price: Optional[float] = None,  # For backtest mode
         trail_meta: Optional[dict] = None,    # Mountain trailing metadata
+        order_type: Optional[str] = None,     # 'MARKET' | 'LIMIT' | None (auto)
+        # MaiRuay v2 pending kwargs are accepted (and ignored) here. The fill /
+        # cancel-near-TP / candle-expire logic for LIMITs lives in
+        # position_monitor (the single owner of order state) — paper_broker
+        # only records the order. Accepting these kwargs prevents TypeError
+        # when main.py uses the unified call site.
+        pending_bars: int = 5,
+        tp_cancel_buffer_pips: float = 0.0,
     ) -> Optional[int]:
         """
         เปิด virtual position (V4.3: รองรับ metadata เพิ่มเติม)
@@ -125,6 +141,11 @@ class PaperBroker:
                     'height_usd': float(trail_meta.get('height') or 0) / 100.0,
                 }
 
+            # PaperBroker fills MARKET and LIMIT identically (no order-book
+            # simulation). MaiRuay v2 pending-LIMIT fill/cancel/expire logic
+            # lives in position_monitor (the single source of truth for order
+            # state). PaperBroker just records what the caller asked for.
+            ot_upper = (order_type or "MARKET").upper()
             self.positions[ticket] = {
                 "ticket": ticket,
                 "trade_id": trade_id or f"PAPER-{ticket}",
@@ -145,14 +166,14 @@ class PaperBroker:
                 "technique": technique or "unknown",
                 "session": session or "Unknown",
                 "beauty_score_used": beauty_score or 100,
+                "order_type": ot_upper,
                 # Trailing state (None for non-Mountain)
                 "trail": trail,
             }
-
             logger.info(
                 f"📄 Paper {action} opened | "
                 f"ticket={ticket} entry={entry:.2f} "
-                f"sl={sl:.2f} tp={tp:.2f} lot={lot}"
+                f"sl={sl:.2f} tp={tp:.2f} lot={lot} order_type={ot_upper}"
             )
             return ticket
 
@@ -282,6 +303,7 @@ class PaperBroker:
             List of position dicts
         """
         return list(self.positions.values())
+
 
     def close_all(self, candle_time: datetime) -> List[dict]:
         """

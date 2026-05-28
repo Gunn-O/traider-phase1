@@ -167,6 +167,7 @@ def run_signal_engine(
     portfolio: float,
     mountain_state: Optional[dict] = None,
     scanner_state: Optional[dict] = None,
+    mai_ruay_state: Optional[dict] = None,
 ) -> dict:
     """
     Run Signal Engine (replaces G1 pattern detection)
@@ -175,6 +176,8 @@ def run_signal_engine(
         candles_by_tf: Dict of candles by timeframe (e.g., {'M5': [candle1, candle2, ...]})
         portfolio: Current portfolio balance (USD)
         mountain_state: Mountain state for round 2 detection (from portfolio_state)
+        mai_ruay_state: MaiRuay v2 state — carries r1_info after a SL for R2 retry
+                        {'r1_info': {'tech', 'f_open_r1', 'entry_bar', 'direction'}, 'r1_bar_idx': int}
 
     Returns:
         world_state dict compatible with G2/G3 pipeline:
@@ -189,7 +192,8 @@ def run_signal_engine(
             'current_price': float,
             'session': str,
             'metadata': dict,
-            'mountain_state': dict (updated)
+            'mountain_state': dict (updated),
+            'mai_ruay_state': dict (updated — r1_info cleared on R2 hit or stale)
         }
     """
     # Active timeframe — config-driven (default M5, override via env BACKTEST_TIMEFRAME)
@@ -272,6 +276,8 @@ def run_signal_engine(
     import os as _os
     from utils.strategy_loader import is_pattern_active_for_tf
     from strategies import mountain as _mountain_strat
+    # MaiRuay v2.04 (notebook Mairuay_Basic_Father_V2.04_M1) — multi-entry +
+    # Round 2 via mai_ruay_state['r1_info'].
     from strategies import mai_ruay as _mai_ruay_strat
 
     current_tf = _os.getenv("BACKTEST_TIMEFRAME", "M5").upper()
@@ -294,10 +300,61 @@ def run_signal_engine(
         elif _dbg_mtn.get('skip'):
             skip_reasons['MOUNTAIN'] = _dbg_mtn['skip']
 
-    # MAI_RUAY — Father/Mother candle (notebook engine 1-8 / 60-100% / 4-30%)
+    # MAI_RUAY v2.04 — Father/Mother candle with multi-entry + Round 2
+    #   notebook: strategy/Mairuay_Basic_Father_V2.04_M1.md
+    #   engine:   strategies/mai_ruay.py
+    updated_mai_ruay_state = dict(mai_ruay_state) if mai_ruay_state else {}
     if is_pattern_active_for_tf('MAI_RUAY', current_tf):
+        # Tick the R2 countdown every cycle the engine runs (regardless of
+        # whether R1 fires). We use bars_elapsed (incremented per cycle) rather
+        # than (len(bars)-curr_bar) because main.py passes a SLIDE WINDOW to
+        # signal_engine — len(bars)-1 is always ~RANGE_WINDOW-1, so positional
+        # math vs the R1 entry bar is meaningless. The counter is the only
+        # cycle-accurate clock available to us.
+        _r1 = updated_mai_ruay_state.get('r1_info')
+        if _r1 is not None:
+            updated_mai_ruay_state['r1_bars_elapsed'] = updated_mai_ruay_state.get('r1_bars_elapsed', 0) + 1
+            if updated_mai_ruay_state['r1_bars_elapsed'] > 16:
+                logger.info(
+                    f"MaiRuay v2 r1_info expired (bars_elapsed="
+                    f"{updated_mai_ruay_state['r1_bars_elapsed']} > 16) → drop"
+                )
+                updated_mai_ruay_state.pop('r1_info', None)
+                updated_mai_ruay_state.pop('r1_bars_elapsed', None)
+                _r1 = None
+
         _dbg_mr: dict = {}
         sig_mr = _mai_ruay_strat.find_signal(bars=ohlc_bars, portfolio=portfolio, debug=_dbg_mr)
+
+        # v2 R2 retry — only when:
+        #   - v2 engine is active
+        #   - round 1 produced None
+        #   - we have stored r1_info from a prior SL (still within 16-bar window)
+        if sig_mr is None and _r1:
+            # Recompute R1's child-bar index inside the CURRENT slide window so
+            # the engine's 6-bar father-start check is valid even though main.py
+            # passes a rolling window. r1_bars_elapsed counts cycles since arm;
+            # the R1 child sat at the last index when armed, so it has slid
+            # back by r1_bars_elapsed each cycle.
+            _bars_elapsed = updated_mai_ruay_state.get('r1_bars_elapsed', 0)
+            _r1_with_offset = dict(_r1)
+            _r1_with_offset['bar_offset_in_window'] = (len(ohlc_bars) - 1) - _bars_elapsed
+            _dbg_r2: dict = {}
+            sig_mr = _mai_ruay_strat.find_signal(
+                bars=ohlc_bars, portfolio=portfolio,
+                round2_info=_r1_with_offset, debug=_dbg_r2,
+            )
+            if sig_mr is not None:
+                logger.info(
+                    f"MaiRuay v2 R2 hit: bars_elapsed="
+                    f"{updated_mai_ruay_state.get('r1_bars_elapsed', 0)} dir={_r1['direction']}"
+                )
+                # R2 fired → consume r1_info (no R3 allowed)
+                updated_mai_ruay_state.pop('r1_info', None)
+                updated_mai_ruay_state.pop('r1_bars_elapsed', None)
+            elif _dbg_r2.get('skip'):
+                skip_reasons['MAI_RUAY_R2'] = _dbg_r2['skip']
+
         if sig_mr is not None:
             candidates.append(sig_mr)
         elif _dbg_mr.get('skip'):
@@ -368,6 +425,7 @@ def run_signal_engine(
             },
             'mountain_state': mountain_state,  # Return unchanged
             'scanner_state': updated_scanner_state,  # v4.2 segment tracking
+            'mai_ruay_state': updated_mai_ruay_state,  # v2 r1_info for R2 retry
             'skip_reasons': skip_reasons,       # Tier 2: per-strategy SKIP reasons
         }
 
@@ -448,6 +506,7 @@ def run_signal_engine(
         },
         'mountain_state': updated_mountain_state,  # Return updated state
         'scanner_state': updated_scanner_state,    # v4.2 segment tracking
+        'mai_ruay_state': updated_mai_ruay_state,  # v2 r1_info for R2 retry
         'skip_reasons': skip_reasons,                # Tier 2: SKIPs from non-firing strategies
     }
 

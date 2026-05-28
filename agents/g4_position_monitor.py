@@ -22,7 +22,85 @@ from config import RISK_CONFIG
 logger = logging.getLogger(__name__)
 
 
-def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> List[dict]:
+def _process_pending_limit(order: dict, candle: dict, bars_seen: int) -> Optional[dict]:
+    """Process an unfilled MaiRuay v2 LIMIT order against this candle.
+
+    Notebook v2.04 spec (run_backtest:684-711):
+      1. Cancel-near-TP — if high/low has already moved within 10%R55 of TP,
+         cancel the LIMIT (entering near the exit is bad RR)
+      2. Fill check — touch entry price → mark filled (no update, fall through
+         to SL/TP check on same bar — same_bar injection)
+      3. Expire — bars_seen > expire_at_bar → cancel
+
+    Returns:
+      dict update (CANCELLED) → caller must skip SL/TP, OR
+      None → no event; if filled, order.filled=True; if waiting, no change
+    """
+    PIP = 0.01
+    _tp = order.get('tp_price', order.get('tp', 0))
+    _entry = order.get('entry_price', order.get('entry', 0))
+    _dir = order['action']
+    _trade_id = order['trade_id']
+    _tp_buf = float(order.get('tp_cancel_buffer_pips') or 0.0) * PIP
+    _hi = candle.get('high', 0) or 0
+    _lo = candle.get('low', 0) or 0
+
+    # (1) Cancel-near-TP
+    if _tp_buf > 0:
+        if _dir == 'BUY' and _hi >= (_tp - _tp_buf):
+            order['result'] = 'CANCELLED'
+            order['filled'] = False  # never filled
+            logger.info(f"[{_trade_id}] LIMIT cancelled (near TP) — high {_hi:.2f} ≥ tp-buf {_tp - _tp_buf:.2f}")
+            return {
+                'trade_id': _trade_id, 'type': 'close',
+                'result': 'CANCELLED', 'close_reason': 'CANCEL_NEAR_TP',
+                'close_price': _entry, 'pnl_usd': 0.0,
+                'timestamp_close': candle['timestamp'].isoformat() if isinstance(candle.get('timestamp'), datetime) else str(candle.get('timestamp', '')),
+                'action': _dir,
+            }
+        if _dir == 'SELL' and _lo <= (_tp + _tp_buf):
+            order['result'] = 'CANCELLED'
+            order['filled'] = False
+            logger.info(f"[{_trade_id}] LIMIT cancelled (near TP) — low {_lo:.2f} ≤ tp+buf {_tp + _tp_buf:.2f}")
+            return {
+                'trade_id': _trade_id, 'type': 'close',
+                'result': 'CANCELLED', 'close_reason': 'CANCEL_NEAR_TP',
+                'close_price': _entry, 'pnl_usd': 0.0,
+                'timestamp_close': candle['timestamp'].isoformat() if isinstance(candle.get('timestamp'), datetime) else str(candle.get('timestamp', '')),
+                'action': _dir,
+            }
+
+    # (2) Fill check — touch entry
+    _filled = False
+    if _dir == 'BUY' and _lo <= _entry:
+        _filled = True
+    elif _dir == 'SELL' and _hi >= _entry:
+        _filled = True
+    if _filled:
+        order['filled'] = True
+        order['order_type'] = 'MARKET'  # promoted — no longer pending
+        logger.info(f"[{_trade_id}] LIMIT filled @ {_entry:.2f} on candle {candle.get('timestamp', '')}")
+        return None  # caller falls through to SL/TP check on same bar
+
+    # (3) Expire
+    if bars_seen > int(order.get('expire_at_bar', 0)):
+        order['result'] = 'CANCELLED'
+        order['filled'] = False
+        logger.info(f"[{_trade_id}] LIMIT expired (bars_seen={bars_seen} > expire_at_bar={order.get('expire_at_bar')})")
+        return {
+            'trade_id': _trade_id, 'type': 'close',
+            'result': 'CANCELLED', 'close_reason': 'EXPIRED',
+            'close_price': _entry, 'pnl_usd': 0.0,
+            'timestamp_close': candle['timestamp'].isoformat() if isinstance(candle.get('timestamp'), datetime) else str(candle.get('timestamp', '')),
+            'action': _dir,
+        }
+
+    # Still pending
+    return None
+
+
+def check_positions_on_candle_close(candle: dict, open_orders: List[dict],
+                                      bars_seen: int = 0) -> List[dict]:
     """
     เรียกทุก candle close (M5 หรือ TF ที่ใช้)
     ตรวจแต่ละ order ว่า hit SL หรือ TP ไหม
@@ -64,6 +142,24 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict]) -> Li
     for order in open_orders:
         if order.get('result') != 'PENDING':
             continue
+
+        # ── MaiRuay v2 pending LIMIT processing ────────────────────────────
+        # Unfilled LIMITs sit in open_orders with filled=False. They MUST NOT
+        # be SL/TP-checked yet (price hasn't reached entry). Run the notebook
+        # fill / cancel-near-TP / expire pipeline first; if filled, the order
+        # gets `filled=True` and falls through to the SL/TP check below on the
+        # SAME bar (the fill bar can also TP/SL — notebook same_bar injection).
+        if (order.get('order_type', '').upper() == 'LIMIT'
+                and not order.get('filled', True)):
+            _pl_update = _process_pending_limit(order, candle, bars_seen)
+            if _pl_update is not None:
+                updates.append(_pl_update)
+                # CANCELLED → done; don't fall through to SL/TP check
+                continue
+            if not order.get('filled', False):
+                # Still waiting to fill — skip SL/TP check this bar
+                continue
+            # Filled this bar → fall through to SL/TP check (same_bar logic)
 
         action = order['action']
         entry = order['entry_price']
@@ -350,12 +446,40 @@ class PositionMonitor:
         """
         self.sheets_logger = sheets_logger
         self.open_orders = []
+        # Candle counter — ++ every check_and_update() call. Drives MaiRuay v2
+        # LIMIT expiry (notebook spec: expire after N bars).
+        self.bars_seen: int = 0
         logger.info("PositionMonitor initialized")
 
     def add_orders(self, orders: List[dict]):
-        """เพิ่ม orders เข้า tracking list"""
+        """เพิ่ม orders เข้า tracking list.
+
+        MaiRuay v2 LIMIT entries arrive with `order_type='LIMIT'` and
+        `filled=False`. They sit in open_orders pending fill; SL/TP checks
+        are skipped until they fill. See `_process_pending_limit()`."""
+        # Stamp expire_at_bar on any unfilled LIMITs so the expiry check is
+        # candle-deterministic regardless of when they entered the queue.
+        for o in orders:
+            if o.get('order_type', '').upper() == 'LIMIT' and not o.get('filled', True):
+                _pb = int(o.get('pending_bars', 5))
+                o['expire_at_bar'] = self.bars_seen + max(1, _pb)
         self.open_orders.extend(orders)
         logger.info(f"Added {len(orders)} orders to monitor (total: {len(self.open_orders)})")
+
+    def get_pending_limits(self) -> List[dict]:
+        """Unfilled LIMIT orders queued (MaiRuay v2 multi-entry).
+
+        Used by main.py to inject pending-count into G2 portfolio_state so a
+        new plan of the same pattern is blocked while any LIMIT is still
+        waiting to fill — matches notebook run_backtest:929 spec
+        `if open_positions or pending_limits or _just_closed: continue`.
+        """
+        return [
+            o for o in self.open_orders
+            if o.get('result') == 'PENDING'
+            and o.get('order_type', '').upper() == 'LIMIT'
+            and not o.get('filled', True)
+        ]
 
     def check_and_update(self, candle: dict):
         """
@@ -367,6 +491,11 @@ class PositionMonitor:
         Returns:
             List of closed trades (with updated result, pnl, etc.)
         """
+        # Tick the candle counter EVERY call, even when no orders are queued —
+        # otherwise MaiRuay v2 LIMITs added later would compare against a
+        # stale bars_seen and never expire.
+        self.bars_seen += 1
+
         if not self.open_orders:
             return []
 
@@ -376,7 +505,7 @@ class PositionMonitor:
 
         logger.info(f"Checking {len(pending_orders)} pending orders...")
 
-        updates = check_positions_on_candle_close(candle, pending_orders)
+        updates = check_positions_on_candle_close(candle, pending_orders, bars_seen=self.bars_seen)
 
         if not updates:
             return []

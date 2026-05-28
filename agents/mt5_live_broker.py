@@ -78,6 +78,11 @@ class MT5LiveBroker:
         # ticket → {stage, direction, tp1, tp2, tech_point, height_usd}
         # ⚠️ In-memory only — lost on restart (broker still holds last-known SL)
         self._trail_state: Dict[int, dict] = {}
+        # Per-ticket actual fill price returned by MT5 (market orders only —
+        # for pending LIMIT, fill happens later inside MT5 and we'd need to
+        # query history for the real fill price). Used by main.py to overwrite
+        # signal.entry with the real slippage-adjusted fill on MARKET orders.
+        self._fill_prices: Dict[int, float] = {}
 
         self._verify_environment()
         logger.info(
@@ -129,6 +134,13 @@ class MT5LiveBroker:
 
     # ------------------------------------------------------------------ open
 
+    def get_fill_price(self, ticket: int) -> Optional[float]:
+        """Return MT5's actual fill price for a MARKET ticket we opened in this
+        session. Pending LIMIT tickets are absent until they fill — callers
+        should treat None as "not filled yet, use the requested entry price"."""
+        price = self._fill_prices.get(ticket)
+        return float(price) if price is not None else None
+
     def open_position(
         self,
         action: str,
@@ -143,10 +155,15 @@ class MT5LiveBroker:
         beauty_score: Optional[int] = None,
         entry_price: Optional[float] = None,  # required: zone level for pending limit
         trail_meta: Optional[dict] = None,    # Mountain trailing: {tp1, tp2_base, tech_point, height_pip}
+        order_type: Optional[str] = None,     # 'MARKET' | 'LIMIT' | None (legacy auto-detect)
     ) -> Optional[int]:
         """
-        ส่ง pending LIMIT order ที่ entry_price (zone level) — รอราคากลับมาแตะ.
-        Fallback เป็น market order ถ้าราคาเลย entry ไปแล้ว (ไม่สามารถตั้ง limit ได้).
+        ส่ง order ไปที่ MT5. Mode:
+            order_type='MARKET' → TRADE_ACTION_DEAL ทันที (สำหรับ MAI_RUAY แม่ 4-10%)
+            order_type='LIMIT'  → TRADE_ACTION_PENDING ที่ entry_price; fallback เป็น market
+                                  ถ้าราคาเลยไปแล้ว
+            order_type=None     → legacy auto-detect (Mountain ใช้ branch นี้):
+                                  LIMIT ถ้า entry ยังอยู่ฝั่ง "wait", market fallback ถ้าไม่
 
         Expiration = PENDING_EXPIRY_BARS × current_TF (auto-scale ตาม TF)
 
@@ -174,12 +191,20 @@ class MT5LiveBroker:
         #   BUY_LIMIT: entry < ask (need price to drop)
         #   SELL_LIMIT: entry > bid (need price to rise)
         # If price already past entry, use market order as fallback (zone touched + bounced fast).
-        is_pending = False
-        if entry_price is not None and entry_price > 0:
-            if action == 'BUY' and entry_price < ask:
-                is_pending = True
-            elif action == 'SELL' and entry_price > bid:
-                is_pending = True
+        #
+        # New behavior: caller can force MARKET via order_type='MARKET'
+        # (MAI_RUAY แม่ 4-10% needs immediate fill, no retest wait). When
+        # order_type='LIMIT' or None we keep the legacy auto-detect path.
+        ot_upper = (order_type or '').upper()
+        if ot_upper == 'MARKET':
+            is_pending = False
+        else:
+            is_pending = False
+            if entry_price is not None and entry_price > 0:
+                if action == 'BUY' and entry_price < ask:
+                    is_pending = True
+                elif action == 'SELL' and entry_price > bid:
+                    is_pending = True
 
         # Spread adjustment (same logic as before — applied to broker SL/TP for SELL)
         if action == 'BUY':
@@ -205,10 +230,13 @@ class MT5LiveBroker:
             order_type = mt5.ORDER_TYPE_BUY if action == 'BUY' else mt5.ORDER_TYPE_SELL
             price = ask if action == 'BUY' else bid
             trade_action = mt5.TRADE_ACTION_DEAL
-            logger.info(
-                f"  ⚡ Market order fallback (price already past entry: "
-                f"entry={entry_price} bid/ask={bid:.3f}/{ask:.3f})"
-            )
+            if ot_upper == 'MARKET':
+                logger.info(f"  ⚡ MARKET order (caller forced) bid/ask={bid:.3f}/{ask:.3f}")
+            else:
+                logger.info(
+                    f"  ⚡ Market order fallback (price already past entry: "
+                    f"entry={entry_price} bid/ask={bid:.3f}/{ask:.3f})"
+                )
 
         # Expiration: N × TF duration (auto-scale)
         active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
@@ -264,6 +292,15 @@ class MT5LiveBroker:
 
         ticket = int(result.order)
         self._known_open_tickets.add(ticket)
+        # For market orders (and the LIMIT→MARKET fallback above), MT5 fills
+        # immediately and result.price is the real fill — record it so the
+        # caller can stamp the order with slippage-adjusted entry. For pending
+        # LIMITs, result.price echoes the requested limit price; we still
+        # record it so get_fill_price returns the placement price.
+        try:
+            self._fill_prices[ticket] = float(result.price)
+        except Exception:
+            pass
         # Register trailing state if metadata provided (Mountain only)
         if trail_meta:
             self._trail_state[ticket] = {
