@@ -1329,18 +1329,30 @@ class TraiderMainLoop:
                         f"✓ Order {order['trade_id']} opened as ticket #{ticket} "
                         f"(order_type={_ot})"
                     )
-                    # MARKET orders fill immediately — overwrite signal.entry
-                    # with the actual fill price so LocalDB / position_monitor
-                    # work against reality (slippage-adjusted) instead of the
-                    # requested price. For LIMIT we keep the requested price;
-                    # position_monitor's reconcile path picks up the real fill
-                    # when MT5 turns it into a position.
-                    if str(_ot).upper() == 'MARKET' and hasattr(self.broker, 'get_fill_price'):
+                    # Record MT5's actual fill price whenever the broker has
+                    # one — this catches BOTH true MARKET orders AND LIMIT
+                    # orders that MT5 fell back to MARKET (when entry_price
+                    # had already crossed bid/ask). Without this, the LocalDB
+                    # log shows the REQUESTED limit price while MT5 actually
+                    # filled at a different price — the "log != MT5" mismatch
+                    # the user observed on the chart.
+                    # True pending LIMITs (still queued in MT5) return None
+                    # here; their fill price gets picked up via the
+                    # reconcile_pending path once MT5 turns them into a
+                    # position.
+                    if hasattr(self.broker, 'get_fill_price'):
                         fp = self.broker.get_fill_price(ticket)
                         if fp:
+                            _req = order.get('entry')
                             order['entry'] = fp
                             order['entry_price'] = fp
-                            logger.info(f"  ↳ market fill_price={fp:.3f} → entry updated")
+                            if _req and abs(fp - _req) > 0.005:
+                                logger.info(
+                                    f"  ↳ {_ot} fill_price={fp:.3f} (requested {_req:.3f}, "
+                                    f"diff={(fp - _req) * 100:+.1f}pip) → entry updated"
+                                )
+                            else:
+                                logger.info(f"  ↳ {_ot} fill_price={fp:.3f} → entry updated")
                 else:
                     logger.error(f"✗ Failed to open order {order['trade_id']} — will not be tracked")
 
