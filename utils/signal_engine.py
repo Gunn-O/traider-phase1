@@ -323,8 +323,50 @@ def run_signal_engine(
                 updated_mai_ruay_state.pop('r1_bars_elapsed', None)
                 _r1 = None
 
+        # ── Live mode: append a SYNTHETIC CHILD bar ────────────────────────
+        # Notebook spec: in `analyze_bar`, `child = bars[bar_idx]` and entry =
+        # `child.open` (= the moment mother closed). In a backtest loop this
+        # bar already exists in df. In live, the bot wakes ~2s after mother
+        # close — the new bar (child) has JUST started and its only known
+        # price point is "current market" ≈ mother.close.
+        #
+        # If we skip this synthesis, `bars[-1]` is the bar that just closed,
+        # the engine treats THAT as the child, and `child.open` ends up being
+        # GRANDMOTHER's close — entry shifts back by 1 candle (the delay the
+        # user saw on the chart). Appending a synthetic child fixes the lag
+        # without changing any analyzer logic.
+        #
+        # Backtest path is unchanged. Mountain + Scanner use the original
+        # `ohlc_bars` below — no behavior change there.
+        _bars_for_mr = ohlc_bars
+        if not _is_backtest_mode and ohlc_bars:
+            _last = ohlc_bars[-1]
+            _tf_sec_map = {'M1': 60, 'M5': 300, 'M15': 900,
+                           'M30': 1800, 'H1': 3600, 'H4': 14400}
+            _tf_sec = _tf_sec_map.get(current_tf, 60)
+            try:
+                from datetime import timedelta as _td_synth
+                from dateutil import parser as _dtp_synth
+                _last_dt = _dtp_synth.parse(str(_last.time))
+                _next_time = (_last_dt + _td_synth(seconds=_tf_sec)).isoformat()
+            except Exception:
+                _next_time = str(_last.time)
+            _synth_child = OHLC(
+                time=_next_time,
+                open=_last.close,
+                high=_last.close,
+                low=_last.close,
+                close=_last.close,
+                bar_num=(_last.bar_num + 1) if _last.bar_num else len(ohlc_bars) + 1,
+            )
+            _bars_for_mr = ohlc_bars + [_synth_child]
+            logger.debug(
+                f"MaiRuay live: synthetic child appended @ {_next_time} "
+                f"open={_last.close:.3f} (= mother close)"
+            )
+
         _dbg_mr: dict = {}
-        sig_mr = _mai_ruay_strat.find_signal(bars=ohlc_bars, portfolio=portfolio, debug=_dbg_mr)
+        sig_mr = _mai_ruay_strat.find_signal(bars=_bars_for_mr, portfolio=portfolio, debug=_dbg_mr)
 
         # v2 R2 retry — only when:
         #   - v2 engine is active
@@ -338,10 +380,10 @@ def run_signal_engine(
             # back by r1_bars_elapsed each cycle.
             _bars_elapsed = updated_mai_ruay_state.get('r1_bars_elapsed', 0)
             _r1_with_offset = dict(_r1)
-            _r1_with_offset['bar_offset_in_window'] = (len(ohlc_bars) - 1) - _bars_elapsed
+            _r1_with_offset['bar_offset_in_window'] = (len(_bars_for_mr) - 1) - _bars_elapsed
             _dbg_r2: dict = {}
             sig_mr = _mai_ruay_strat.find_signal(
-                bars=ohlc_bars, portfolio=portfolio,
+                bars=_bars_for_mr, portfolio=portfolio,
                 round2_info=_r1_with_offset, debug=_dbg_r2,
             )
             if sig_mr is not None:

@@ -1197,8 +1197,19 @@ class TraiderMainLoop:
             if (order['pattern'] == 'MAI_RUAY'
                     and order.get('order_type', '').upper() == 'LIMIT'):
                 _sig_details_for_order = getattr(signal, 'details', None) or {}
-                _child_low = (current_candle or {}).get('low', 0) or 0
-                _child_high = (current_candle or {}).get('high', 0) or 0
+                # Backtest: current_candle = the closed "child" bar, we have
+                # its full high/low.
+                # Live: signal_engine appended a synthetic child whose
+                # open=high=low=close = mother.close (point-in-time). The
+                # only real price we know is mother.close (= current market
+                # estimate). Use that for both bounds so the fill check
+                # mirrors the synthetic bar.
+                if self.is_backtest:
+                    _child_low = (current_candle or {}).get('low', 0) or 0
+                    _child_high = (current_candle or {}).get('high', 0) or 0
+                else:
+                    _ref = (current_candle or {}).get('close', 0) or 0
+                    _child_low = _child_high = _ref
                 _ep = order['entry']
                 _act = order['action']
                 _filled_on_child = (
