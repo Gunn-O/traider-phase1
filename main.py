@@ -459,8 +459,11 @@ class TraiderMainLoop:
         else:
             self.local_db = None
 
-        self.position_monitor = PositionMonitor(sheets_logger=self.sheets_logger)
-        logger.info("✓ Position Monitor initialized")
+        self.position_monitor = PositionMonitor(
+            sheets_logger=self.sheets_logger,
+            is_backtest=self.is_backtest,
+        )
+        logger.info(f"✓ Position Monitor initialized (is_backtest={self.is_backtest})")
 
         # Set references for API server
         from api_server import set_sheets_logger, set_position_monitor, set_connector
@@ -598,6 +601,18 @@ class TraiderMainLoop:
         logger.info("\n[STEP 0] Monitoring positions...")
         closed = None  # Initialize before if-else block
         if current_candle:
+            # In live/sim: ask MT5 first (authoritative for fill/expire), then
+            # let position_monitor handle in-memory SL/TP tracking. Unfilled
+            # LIMITs in open_orders are NOT fill-simulated in live mode
+            # (see PositionMonitor.is_backtest gate) — so MT5's view is the
+            # only source of truth for whether a LIMIT actually filled.
+            # Backtest skips this — PaperBroker has no real order book and
+            # check_and_update simulates fills from candle range.
+            if not self.is_backtest:
+                try:
+                    self.monitor_positions(current_candle=current_candle)
+                except Exception as e:
+                    logger.error(f"Live broker monitor failed (continuing): {e}")
             # check_and_update() expects candle dict (not separate params)
             closed = self.position_monitor.check_and_update(candle=current_candle)
             # ── MaiRuay v2 R2 arm — group closed trades by plan_id; if any plan

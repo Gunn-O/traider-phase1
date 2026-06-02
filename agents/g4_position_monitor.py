@@ -100,7 +100,8 @@ def _process_pending_limit(order: dict, candle: dict, bars_seen: int) -> Optiona
 
 
 def check_positions_on_candle_close(candle: dict, open_orders: List[dict],
-                                      bars_seen: int = 0) -> List[dict]:
+                                      bars_seen: int = 0,
+                                      is_backtest: bool = False) -> List[dict]:
     """
     เรียกทุก candle close (M5 หรือ TF ที่ใช้)
     ตรวจแต่ละ order ว่า hit SL หรือ TP ไหม
@@ -145,12 +146,24 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict],
 
         # ── MaiRuay v2 pending LIMIT processing ────────────────────────────
         # Unfilled LIMITs sit in open_orders with filled=False. They MUST NOT
-        # be SL/TP-checked yet (price hasn't reached entry). Run the notebook
-        # fill / cancel-near-TP / expire pipeline first; if filled, the order
-        # gets `filled=True` and falls through to the SL/TP check below on the
-        # SAME bar (the fill bar can also TP/SL — notebook same_bar injection).
+        # be SL/TP-checked yet (price hasn't reached entry).
+        #
+        # BACKTEST: run the notebook fill / cancel-near-TP / expire pipeline
+        # against this candle's high/low (PaperBroker has no real order book,
+        # so we simulate fill from the bar range).
+        #
+        # LIVE/SIM: SKIP the pipeline. MT5 owns the real pending LIMITs and
+        # decides fill vs. expiry from the tick stream — using candle.low as
+        # a proxy diverges from real ticks (the bug Plan 2026-06-01 13:13
+        # exposed). main.py's call to broker.update_positions() +
+        # broker.reconcile_pending() each cycle is the authority: it converts
+        # MT5 EXPIRED orders into CANCELLED close-events and filled positions
+        # into trackable rows. Unfilled LIMITs in open_orders just wait.
         if (order.get('order_type', '').upper() == 'LIMIT'
                 and not order.get('filled', True)):
+            if not is_backtest:
+                # Live/sim: don't simulate — wait for broker reconciliation
+                continue
             _pl_update = _process_pending_limit(order, candle, bars_seen)
             if _pl_update is not None:
                 updates.append(_pl_update)
@@ -439,17 +452,31 @@ class PositionMonitor:
     ใช้ track open positions และ update เมื่อ hit SL/TP
     """
 
-    def __init__(self, sheets_logger=None):
+    def __init__(self, sheets_logger=None, is_backtest: bool = False):
         """
         Args:
             sheets_logger: G4 SheetsLogger instance (optional)
+            is_backtest:   True → run the in-memory pending LIMIT pipeline
+                           (fill/cancel-near-TP/expire driven by candle
+                            high/low — PaperBroker has no real order book).
+                           False (live/sim) → SKIP the pipeline. MT5 owns the
+                           real pending LIMITs; main.py calls
+                           broker.update_positions() + broker.reconcile_pending()
+                           each cycle, and that diff is the authoritative
+                           source for fill/expire events. Running the in-memory
+                           pipeline alongside MT5 caused diverging state when
+                           MT5 expired a pending before the M1 candle low
+                           "would have" filled it (Plan 2026-06-01 13:13:
+                           Python reported 3 SL losses, MT5 actually filled
+                           only 1).
         """
         self.sheets_logger = sheets_logger
+        self.is_backtest = bool(is_backtest)
         self.open_orders = []
         # Candle counter — ++ every check_and_update() call. Drives MaiRuay v2
-        # LIMIT expiry (notebook spec: expire after N bars).
+        # LIMIT expiry (notebook spec: expire after N bars). Backtest only.
         self.bars_seen: int = 0
-        logger.info("PositionMonitor initialized")
+        logger.info(f"PositionMonitor initialized (is_backtest={self.is_backtest})")
 
     def add_orders(self, orders: List[dict]):
         """เพิ่ม orders เข้า tracking list.
@@ -505,7 +532,11 @@ class PositionMonitor:
 
         logger.info(f"Checking {len(pending_orders)} pending orders...")
 
-        updates = check_positions_on_candle_close(candle, pending_orders, bars_seen=self.bars_seen)
+        updates = check_positions_on_candle_close(
+            candle, pending_orders,
+            bars_seen=self.bars_seen,
+            is_backtest=self.is_backtest,
+        )
 
         if not updates:
             return []
