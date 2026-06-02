@@ -13,7 +13,8 @@
 | Notebook | Strategy | Python |
 |----------|----------|--------|
 | `strategy/XAUUSD_Backtest_Mountain.md` | **ภูเขา** (Mountain v4.61) | `strategies/mountain.py` |
-| `strategy/Mairuay_Basic_Father_V2.04 Bugfix1.ipynb` | **ไม้รวย v2.04 Bugfix1** (Basic Father, M1 only) | `strategies/mai_ruay.py` |
+| `strategy/Mairuay_Basic_Father_V2.15M5_M1Karpathy.ipynb` | **ไม้รวย** Karpathy (Basic Father multi-TF, M1/M5/M15/M30) | `strategies/mai_ruay_karpathy.py` (pattern=`MAI_RUAY`) |
+| `strategy/Mairuay_Basic_Father_V2.04_M1.ipynb` | **ไม้รวยM1** v2.04 Bugfix1 (Basic Father, M1 only) | `strategies/mai_ruay.py` (pattern=`MAI_RUAY_M1`) |
 | `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v4.2.md` | **Uptrend/Downtrend Scanner v4.2** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
 
 **Legacy (อ้างอิงเท่านั้น — ไม่ใช่ source of truth):**
@@ -40,13 +41,16 @@
 - **Strategy modules:** `strategies/mountain.py`, `strategies/mai_ruay.py`, `strategies/uptrend_downtrend_scanner.py`
   - คำนวณ Entry/SL/TP/Lot ทั้งหมด — ตรงกับ engine code ใน notebook 3 ไฟล์
   - แก้ได้เมื่อ notebook engine update (อย่าแก้ตามใจ — ต้อง diff กับ notebook ก่อน)
-  - **MaiRuay = v2.04 Bugfix1 เท่านั้น** (multi-entry + Round 2, notebook `Mairuay_Basic_Father_V2.04 Bugfix1`). Bugfix1 ปรับ entry bucket จาก `3 ≤ m_pct < 10` → `2 ≤ m_pct < 10` เพื่อให้แม่ 2-3% เข้า MARKET ตามที่ validate_mother รับเข้ามาตั้งแต่แรก
+  - **MaiRuay มี 2 variants ที่เปิดควบคู่ได้:**
+    - `MAI_RUAY` (Karpathy, multi-TF M1/M5/M15/M30) — notebook `V2.15M5_M1Karpathy`, engine `strategies/mai_ruay_karpathy.py`. 2 entries (ENTRY_SMALL/MEDIUM), obstacle scanner, RR floor 0.5, ไม่มี R2.
+    - `MAI_RUAY_M1` (V2.04 Bugfix1, M1 only) — notebook `V2.04_M1`, engine `strategies/mai_ruay.py`. 3 entries, multi-entry split lot/3, Round 2, ไม่มี obstacle.
 - **Signal helpers:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
   - แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing_v414 pair_thresh 0.5%→1%)
   - ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec ของ notebook
 - **TF policy (config/strategies.json):**
   - MOUNTAIN: M1/M5/M15/M30
-  - MAI_RUAY v2: **M1 only** (notebook ระบุ V2.04_M1)
+  - MAI_RUAY (Karpathy): M1/M5/M15/M30
+  - MAI_RUAY_M1 (V2.04 Bugfix1): **M1 only**
   - Scanner: M1/M5/M15/M30
 - Phase II: ใช้ใน BACKTEST, SIM, LIVE ทั้งหมด
 

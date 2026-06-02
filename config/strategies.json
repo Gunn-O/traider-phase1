@@ -27,9 +27,45 @@
       ]
     },
     "MAI_RUAY": {
+      "active": false,
+      "implemented": true,
+      "name": "ไม้รวย (Karpathy multi-TF)",
+      "description": "Father/Mother candle v2.15M5_M1Karpathy — พ่อ 1-8 แท่ง อนุญาตแทรก 1 ตัว ≤5%R55, body รวม 60-100% R55, แม่ 4-30% **ของพ่อ**, 2 จุดเข้า (ENTRY_SMALL/MEDIUM lists) split lot, ไม่มี R2, มี obstacle scanner + obstacle→entry redirect, RR floor 0.5. Engine: strategies/mai_ruay_karpathy.py",
+      "direction": "BOTH",
+      "version": "2.15M5_M1Karpathy",
+      "validations": [
+        "พ่อ 1-8 แท่ง อนุญาตแทรกสีตรงข้าม 1 ตัว body ≤ 5% R55 (V1 spec)",
+        "พ่อ body รวม 60-100% R55 (capped)",
+        "all-same length=5 ต้องมี trio open→close > 60% R55",
+        "ไม่มี Vol Ratio gate / ไม่มี per-bar body check",
+        "แม่สวนทิศพ่อ body 4-30% **ของ father_body** (NOT R55)",
+        "Entries config: ENTRY_SMALL (m_pct 4-10%) / ENTRY_MEDIUM (m_pct 10-30%) — default 2 จุด",
+        "ENTRY_SMALL default = [market(child.open), tech(LIMIT)]",
+        "ENTRY_MEDIUM default = [market(child.open), mid_mother(LIMIT)]",
+        "LIMIT entries ตรวจ fill บน child bar เท่านั้น — ไม่ filled → discard",
+        "LIMIT gap-fill: ถ้า child.open ผ่าน limit → fill ที่ child.open",
+        "Obstacle scanner 43-bar lookback (swing high/low + 6%R55 buffer)",
+        "obs < TP1 → entry redirect = tech_point (เหลือ 1 entry)",
+        "SL: obstacle ± 6%R55 OR tech ± 70%×f_body (ไม่มี obstacle)",
+        "TP: obstacle ± 6%R55 OR TP3 (75%×f_body) OR 45%×f_body (พ่อ>80%R55 + obs>60%พ่อ)",
+        "TP30/SL45 special: เปิดเสมอ — 50 แท่งก่อนพ่อ no-touch level",
+        "TP < 200 pip → skip signal",
+        "RR floor: ถ้า rr < 0.5 → ปรับ tp_sel ให้ rr = 0.5",
+        "Lot = portfolio × 10% / SL_pip (no extra adjustment); auto-split = lot / len(entries)",
+        "ไม่มี R2 / Round 2 / pending queue / anti-trend"
+      ],
+      "priority": 4,
+      "allowed_tfs": [
+        "M1",
+        "M5",
+        "M15",
+        "M30"
+      ]
+    },
+    "MAI_RUAY_M1": {
       "active": true,
       "implemented": true,
-      "name": "ไม้รวย Basic Father V2.04 Bugfix1 (M1)",
+      "name": "ไม้รวยM1 Basic Father V2.04 Bugfix1",
       "description": "Father/Mother candle v2.04 Bugfix1 — พ่อสีเดียว 1-10 แท่ง >60% R55, Vol Ratio>1, แม่ 2-25% R55 (validate min 2%), 3 จุดเข้าพร้อมกัน (split lot/3) [2-10% → MARKET, 10-25% → LIMIT mid_แม่], Round 2 หลัง SL ใน 16 แท่ง. Engine: strategies/mai_ruay.py",
       "direction": "BOTH",
       "version": "2.04-bugfix1",

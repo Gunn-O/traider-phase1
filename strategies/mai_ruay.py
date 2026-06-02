@@ -28,7 +28,7 @@ from utils.xauusd_signal import OHLC, Signal, EntryPoint
 
 logger = logging.getLogger(__name__)
 
-PATTERN_NAME = "MAI_RUAY"
+PATTERN_NAME = "MAI_RUAY_M1"
 
 # ─── Constants (ตรงกับ notebook v2.04) ─────────────────────────────
 PIP           = 0.01

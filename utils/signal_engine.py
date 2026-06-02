@@ -276,9 +276,13 @@ def run_signal_engine(
     import os as _os
     from utils.strategy_loader import is_pattern_active_for_tf
     from strategies import mountain as _mountain_strat
-    # MaiRuay v2.04 (notebook Mairuay_Basic_Father_V2.04_M1) — multi-entry +
-    # Round 2 via mai_ruay_state['r1_info'].
-    from strategies import mai_ruay as _mai_ruay_strat
+    # Two MaiRuay variants — both can be active per-TF independently:
+    #   MAI_RUAY     = Karpathy multi-TF (notebook V2.15M5_M1Karpathy)
+    #                  → strategies/mai_ruay_karpathy.py
+    #   MAI_RUAY_M1  = V2.04 Bugfix1 M1-only (notebook V2.04_M1)
+    #                  → strategies/mai_ruay.py
+    from strategies import mai_ruay as _mai_ruay_m1_strat
+    from strategies import mai_ruay_karpathy as _mai_ruay_karp_strat
 
     current_tf = _os.getenv("BACKTEST_TIMEFRAME", "M5").upper()
 
@@ -300,11 +304,11 @@ def run_signal_engine(
         elif _dbg_mtn.get('skip'):
             skip_reasons['MOUNTAIN'] = _dbg_mtn['skip']
 
-    # MAI_RUAY v2.04 — Father/Mother candle with multi-entry + Round 2
-    #   notebook: strategy/Mairuay_Basic_Father_V2.04_M1.md
+    # MAI_RUAY_M1 — V2.04 Bugfix1 (M1 only) with multi-entry + Round 2
+    #   notebook: strategy/Mairuay_Basic_Father_V2.04_M1.ipynb
     #   engine:   strategies/mai_ruay.py
     updated_mai_ruay_state = dict(mai_ruay_state) if mai_ruay_state else {}
-    if is_pattern_active_for_tf('MAI_RUAY', current_tf):
+    if is_pattern_active_for_tf('MAI_RUAY_M1', current_tf):
         # Tick the R2 countdown every cycle the engine runs (regardless of
         # whether R1 fires). We use bars_elapsed (incremented per cycle) rather
         # than (len(bars)-curr_bar) because main.py passes a SLIDE WINDOW to
@@ -368,7 +372,7 @@ def run_signal_engine(
             )
 
         _dbg_mr: dict = {}
-        sig_mr = _mai_ruay_strat.find_signal(bars=_bars_for_mr, portfolio=portfolio, debug=_dbg_mr)
+        sig_mr = _mai_ruay_m1_strat.find_signal(bars=_bars_for_mr, portfolio=portfolio, debug=_dbg_mr)
 
         # v2 R2 retry — only when:
         #   - v2 engine is active
@@ -384,20 +388,20 @@ def run_signal_engine(
             _r1_with_offset = dict(_r1)
             _r1_with_offset['bar_offset_in_window'] = (len(_bars_for_mr) - 1) - _bars_elapsed
             _dbg_r2: dict = {}
-            sig_mr = _mai_ruay_strat.find_signal(
+            sig_mr = _mai_ruay_m1_strat.find_signal(
                 bars=_bars_for_mr, portfolio=portfolio,
                 round2_info=_r1_with_offset, debug=_dbg_r2,
             )
             if sig_mr is not None:
                 logger.info(
-                    f"MaiRuay v2 R2 hit: bars_elapsed="
+                    f"MaiRuay_M1 R2 hit: bars_elapsed="
                     f"{updated_mai_ruay_state.get('r1_bars_elapsed', 0)} dir={_r1['direction']}"
                 )
                 # R2 fired → consume r1_info (no R3 allowed)
                 updated_mai_ruay_state.pop('r1_info', None)
                 updated_mai_ruay_state.pop('r1_bars_elapsed', None)
             elif _dbg_r2.get('skip'):
-                skip_reasons['MAI_RUAY_R2'] = _dbg_r2['skip']
+                skip_reasons['MAI_RUAY_M1_R2'] = _dbg_r2['skip']
 
         if sig_mr is not None:
             # When the synthetic child was used, the signal's effective candle
@@ -415,7 +419,57 @@ def run_signal_engine(
                     pass
             candidates.append(sig_mr)
         elif _dbg_mr.get('skip'):
-            skip_reasons['MAI_RUAY'] = _dbg_mr['skip']
+            skip_reasons['MAI_RUAY_M1'] = _dbg_mr['skip']
+
+    # MAI_RUAY — Karpathy multi-TF (M1/M5/M15/M30)
+    #   notebook: strategy/Mairuay_Basic_Father_V2.15M5_M1Karpathy.ipynb
+    #   engine:   strategies/mai_ruay_karpathy.py
+    # No R2 / Round 2. Uses the same synthetic child mechanic as MAI_RUAY_M1
+    # in live mode so the entry timestamp = child start = mother close.
+    if is_pattern_active_for_tf('MAI_RUAY', current_tf):
+        _bars_for_karp = ohlc_bars
+        _synth_time_k: Optional[str] = None
+        if not _is_backtest_mode and ohlc_bars:
+            _last_k = ohlc_bars[-1]
+            _tf_sec_map_k = {'M1': 60, 'M5': 300, 'M15': 900,
+                             'M30': 1800, 'H1': 3600, 'H4': 14400}
+            _tf_sec_k = _tf_sec_map_k.get(current_tf, 60)
+            try:
+                from datetime import timedelta as _td_synth_k
+                from dateutil import parser as _dtp_synth_k
+                _last_dt_k = _dtp_synth_k.parse(str(_last_k.time))
+                _next_time_k = (_last_dt_k + _td_synth_k(seconds=_tf_sec_k)).isoformat()
+            except Exception:
+                _next_time_k = str(_last_k.time)
+            _synth_child_k = OHLC(
+                time=_next_time_k,
+                open=_last_k.close,
+                high=_last_k.close,
+                low=_last_k.close,
+                close=_last_k.close,
+                bar_num=(_last_k.bar_num + 1) if _last_k.bar_num else len(ohlc_bars) + 1,
+            )
+            _bars_for_karp = ohlc_bars + [_synth_child_k]
+            _synth_time_k = _next_time_k
+            logger.debug(
+                f"MaiRuay Karpathy live: synthetic child appended @ {_next_time_k} "
+                f"open={_last_k.close:.3f} (= mother close)"
+            )
+
+        _dbg_karp: dict = {}
+        sig_karp = _mai_ruay_karp_strat.find_signal(
+            bars=_bars_for_karp, portfolio=portfolio, debug=_dbg_karp,
+        )
+        if sig_karp is not None:
+            if _synth_time_k is not None:
+                try:
+                    sig_karp.details = dict(sig_karp.details or {})
+                    sig_karp.details['synthetic_candle_time'] = _synth_time_k
+                except Exception:
+                    pass
+            candidates.append(sig_karp)
+        elif _dbg_karp.get('skip'):
+            skip_reasons['MAI_RUAY'] = _dbg_karp['skip']
 
     # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v4.2) — wrapper picks BUY
     # first, falls back to SELL. Each variant gated by its own (pattern, TF) flag.
@@ -490,24 +544,27 @@ def run_signal_engine(
     logger.info(f"Signal Engine: {signal.pattern} {signal.direction} "
                 f"(quality={signal.quality}, R:R={signal.rr:.2f})")
 
-    # Map pattern to chart_type — only the 3 active strategies
+    # Map pattern to chart_type
     chart_type_mapping = {
-        'MOUNTAIN': 'mountain',
-        'MAI_RUAY': 'mai_ruay',             # Branch F (Father/Mother candle)
-        'UPTREND_SCANNER': 'uptrend',       # v4.2 scanner (BUY)
-        'DOWNTREND_SCANNER': 'downtrend',   # v4.2 scanner (SELL)
+        'MOUNTAIN':          'mountain',
+        'MAI_RUAY':          'mai_ruay',      # Karpathy multi-TF
+        'MAI_RUAY_M1':       'mai_ruay',      # V2.04 Bugfix1 M1-only — same chart_type for dashboard filter
+        'UPTREND_SCANNER':   'uptrend',       # v4.2 scanner (BUY)
+        'DOWNTREND_SCANNER': 'downtrend',     # v4.2 scanner (SELL)
     }
     chart_type = chart_type_mapping.get(signal.pattern, 'unclear')
 
     # Parse quality string from xauusd_signal.py
     quality = _parse_quality(signal.quality)
 
-    # Determine technique based on pattern
+    # Determine technique based on pattern (technique stored in LocalDB —
+    # keep both MaiRuay variants under 'mai_ruay' so the dashboard's existing
+    # filter catches them. The variant is distinguishable via signal.pattern.)
     if signal.pattern == 'MOUNTAIN':
         technique = 'mountain'
-    elif signal.pattern == 'MAI_RUAY':
+    elif signal.pattern in ('MAI_RUAY', 'MAI_RUAY_M1'):
         technique = 'mai_ruay'
-    elif signal.pattern in ['UPTREND_SCANNER', 'DOWNTREND_SCANNER']:
+    elif signal.pattern in ('UPTREND_SCANNER', 'DOWNTREND_SCANNER'):
         technique = 'scanner_v34'
     else:
         technique = 'skip'

@@ -646,7 +646,7 @@ class TraiderMainLoop:
                 for _t in closed:
                     if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED')
                             and _t.get('broker_ticket')
-                            and (_t.get('pattern') or '').upper() == 'MAI_RUAY'):
+                            and (_t.get('pattern') or '').upper() in ('MAI_RUAY', 'MAI_RUAY_M1')):
                         try:
                             self.broker.cancel_pending_by_ticket(int(_t['broker_ticket']))
                         except Exception as e:
@@ -1235,7 +1235,7 @@ class TraiderMainLoop:
             # Without this check, every LIMIT goes into pending state for ≥1
             # extra bar, which lets the cancel-near-TP filter trip before the
             # fill — diverging from notebook trade-for-trade.
-            if (order['pattern'] == 'MAI_RUAY'
+            if (order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1')
                     and order.get('order_type', '').upper() == 'LIMIT'):
                 _sig_details_for_order = getattr(signal, 'details', None) or {}
                 # Backtest: current_candle = the closed "child" bar, we have
@@ -1281,8 +1281,9 @@ class TraiderMainLoop:
             # if THIS plan ends in LOSS. signal_engine consumes r1_info on the
             # next cycle to call find_signal(..., round2_info=r1_info).
             # signal.is_round2 means we're ALREADY R2 — don't capture again
-            # (no R3 allowed by notebook spec).
-            if (order['pattern'] == 'MAI_RUAY'
+            # (no R3 allowed by notebook spec). R2 logic only applies to the
+            # M1 variant (Karpathy has no R2).
+            if (order['pattern'] == 'MAI_RUAY_M1'
                     and not bool(getattr(signal, 'is_round2', False))):
                 d = signal.details or {}
                 _fs = d.get('father_start')
@@ -1362,7 +1363,7 @@ class TraiderMainLoop:
                 )
                 # Only pass pending kwargs to PaperBroker (MT5 broker handles
                 # expiration server-side via order_send expiration field).
-                if _ot == 'LIMIT' and order['pattern'] == 'MAI_RUAY':
+                if _ot == 'LIMIT' and order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1'):
                     try:
                         _open_kwargs['pending_bars'] = _pending_bars
                         _open_kwargs['tp_cancel_buffer_pips'] = _tp_cancel_buf
