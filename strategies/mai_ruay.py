@@ -360,10 +360,17 @@ def _analyze_bar(
     _e_tech    = tech_point
     _e_far     = tech_point - _e3_offset if direction == 'BUY' else tech_point + _e3_offset
 
-    # Notebook v2.04 (analyze_bar:467-482): 2-way bucket only.
-    # m_pct ∈ [3, 10)  → ไม้1 MARKET (close_child... actually child.open ใน engine)
-    # otherwise       → ไม้1 LIMIT mid_แม่  (covers ทุก m_pct ≥ 10 และ m_pct < 3)
-    if 3 <= m_pct < 10:
+    # Notebook v2.04 Bugfix1 (analyze_bar:426): 2-way bucket only.
+    # m_pct ∈ [2, 10)  → ไม้1 MARKET (child.open) — Bugfix1 lowered the lower
+    #                    bound from 3 to 2 so very-thin mothers (m_pct 2-3%)
+    #                    enter via MARKET like the rest of the thin-mother
+    #                    bucket, instead of falling into the else branch and
+    #                    waiting at mid_แม่ as a LIMIT (which usually never
+    #                    fills because price gaps past it on a thin mother).
+    # otherwise        → ไม้1 LIMIT mid_แม่  (covers m_pct ≥ 10 and m_pct < 2,
+    #                    but validate_mother rejects m_pct < 2 so in practice
+    #                    only the 10-25% bucket reaches this branch).
+    if 2 <= m_pct < 10:
         _e1       = bars[bar_idx].open
         _e1_label = 'จุด1:market(open_child)'
         _e1_is_market = True

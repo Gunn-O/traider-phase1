@@ -1,9 +1,9 @@
 {
   "version": "66",
-  "last_updated": "2026-05-22",
+  "last_updated": "2026-06-01",
   "patterns": {
     "MOUNTAIN": {
-      "active": true,
+      "active": false,
       "implemented": true,
       "name": "Mountain Round 1",
       "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 5%height (notebook v4.61)",
@@ -27,20 +27,20 @@
       ]
     },
     "MAI_RUAY": {
-      "active": false,
+      "active": true,
       "implemented": true,
-      "name": "ไม้รวย Basic Father V2.04 (M1)",
-      "description": "Father/Mother candle v2.04 — พ่อสีเดียว 1-10 แท่ง >60% R55, Vol Ratio>1, แม่ 3-25% R55, 3 จุดเข้าพร้อมกัน (split lot/3), Round 2 หลัง SL ใน 16 แท่ง. Engine: strategies/mai_ruay.py",
+      "name": "ไม้รวย Basic Father V2.04 Bugfix1 (M1)",
+      "description": "Father/Mother candle v2.04 Bugfix1 — พ่อสีเดียว 1-10 แท่ง >60% R55, Vol Ratio>1, แม่ 2-25% R55 (validate min 2%), 3 จุดเข้าพร้อมกัน (split lot/3) [2-10% → MARKET, 10-25% → LIMIT mid_แม่], Round 2 หลัง SL ใน 16 แท่ง. Engine: strategies/mai_ruay.py",
       "direction": "BOTH",
-      "version": "2.04",
+      "version": "2.04-bugfix1",
       "validations": [
         "พ่อ 1-10 แท่งสีเดียว ห้ามแทรก (R1) / 1-8 แท่ง อนุญาตแทรก 1 ≤10%R55 (R2)",
         "พ่อ body รวม > 60% R55 (R1) / > 35% R55 (R2)",
         "พ่อ แต่ละแท่ง body > 4% R55 (อนุโลม 2 แท่ง >2% ถ้าเสียงข้างมาก >10%)",
         "Volatility Ratio > 1 (father avg ÷ pre-20 avg) — R1 เท่านั้น",
         "หยุดพ่อที่ Doji (body ≤ 2% R55)",
-        "แม่สวนทิศพ่อ body 3-25% **ของ R55** (ไม่ใช่ของพ่อ)",
-        "3 จุดเข้าพร้อมกัน: [market/mid_แม่, tech, tech±10%พ่อ] split lot/3",
+        "แม่สวนทิศพ่อ body 2-25% **ของ R55** (ไม่ใช่ของพ่อ) — Bugfix1: validate min 2%",
+        "3 จุดเข้าพร้อมกัน: [market/mid_แม่, tech, tech±10%พ่อ] split lot/3 — Bugfix1: MARKET ครอบคลุม m_pct 2-10% (เดิม 3-10%)",
         "ไม้ 2-3 = LIMIT pending 5 แท่ง / ยกเลิกถ้า TP ใกล้ภายใน 10% R55",
         "TP per-entry adjustment: ถ้า TP_dist < SL_dist → TP = entry ± SL_dist (RR=1.0)",
         "SL = 40% × father_body (ตายตัว — ไม่ใช้ obstacle scanner)",

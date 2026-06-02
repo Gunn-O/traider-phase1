@@ -13,7 +13,7 @@
 | Notebook | Strategy | Python |
 |----------|----------|--------|
 | `strategy/XAUUSD_Backtest_Mountain.md` | **ภูเขา** (Mountain v4.61) | `strategies/mountain.py` |
-| `strategy/Mairuay_Basic_Father_V2.04_M1.md` | **ไม้รวย v2.04** (Basic Father, M1 only) | `strategies/mai_ruay.py` |
+| `strategy/Mairuay_Basic_Father_V2.04 Bugfix1.ipynb` | **ไม้รวย v2.04 Bugfix1** (Basic Father, M1 only) | `strategies/mai_ruay.py` |
 | `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v4.2.md` | **Uptrend/Downtrend Scanner v4.2** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
 
 **Legacy (อ้างอิงเท่านั้น — ไม่ใช่ source of truth):**
@@ -40,7 +40,7 @@
 - **Strategy modules:** `strategies/mountain.py`, `strategies/mai_ruay.py`, `strategies/uptrend_downtrend_scanner.py`
   - คำนวณ Entry/SL/TP/Lot ทั้งหมด — ตรงกับ engine code ใน notebook 3 ไฟล์
   - แก้ได้เมื่อ notebook engine update (อย่าแก้ตามใจ — ต้อง diff กับ notebook ก่อน)
-  - **MaiRuay = v2.04 เท่านั้น** (multi-entry + Round 2, notebook `Mairuay_Basic_Father_V2.04_M1`)
+  - **MaiRuay = v2.04 Bugfix1 เท่านั้น** (multi-entry + Round 2, notebook `Mairuay_Basic_Father_V2.04 Bugfix1`). Bugfix1 ปรับ entry bucket จาก `3 ≤ m_pct < 10` → `2 ≤ m_pct < 10` เพื่อให้แม่ 2-3% เข้า MARKET ตามที่ validate_mother รับเข้ามาตั้งแต่แรก
 - **Signal helpers:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
   - แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing_v414 pair_thresh 0.5%→1%)
   - ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec ของ notebook
@@ -214,7 +214,8 @@ winrate_test_lot = 0.01
 - [ ] LINE_NOTIFY_ENABLED=false ระหว่าง backtest
 
 **MaiRuay v2 Multi-Entry + R2 — signal_engine.py + main.py + position_monitor.py:**
-- [ ] `strategies/mai_ruay.py` = v2.04 engine (notebook `Mairuay_Basic_Father_V2.04_M1`)
+- [ ] `strategies/mai_ruay.py` = v2.04 Bugfix1 engine (notebook `Mairuay_Basic_Father_V2.04 Bugfix1`)
+- [ ] Entry bucket: `2 ≤ m_pct < 10` → MARKET (child.open); `10 ≤ m_pct ≤ 25` → LIMIT mid_แม่ (Bugfix1 lowered MARKET threshold from 3 → 2)
 - [ ] signal_engine ส่ง/รับ `mai_ruay_state` (parallel กับ mountain_state, scanner_state)
 - [ ] signal_engine ส่ง `bar_offset_in_window` ใน round2_info (สำหรับ 6-bar check ใน analyze_bar)
 - [ ] position_monitor.get_pending_limits() → ใช้ block plan ใหม่ของ pattern เดียวกัน
