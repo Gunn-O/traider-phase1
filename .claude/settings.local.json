@@ -128,7 +128,21 @@
       "Bash(npx vite *)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python scripts/backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 2>&1 | Select-Object -Last 60)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python C:\\\\Users\\\\MSI\\\\Desktop\\\\Traider\\\\traider-phase1\\\\scripts\\\\backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 2>&1 | Select-Object -Last 80)",
-      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python C:\\\\Users\\\\MSI\\\\Desktop\\\\Traider\\\\traider-phase1\\\\scripts\\\\backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 --dup-pip 0 2>&1 | Select-Object -Last 50)"
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python C:\\\\Users\\\\MSI\\\\Desktop\\\\Traider\\\\traider-phase1\\\\scripts\\\\backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 --dup-pip 0 2>&1 | Select-Object -Last 50)",
+      "Bash(git commit *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('agents/mt5_live_broker.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python scripts/_check_0726.py)",
+      "Bash(curl -s -X POST http://127.0.0.1:8080/api/bots/M5-XAUUSDc-micro/sync)",
+      "Bash(curl -s http://127.0.0.1:8080/api/bots)",
+      "Bash(curl -s -X POST http://127.0.0.1:8080/api/bots/__TRACKED_VAR__/sync)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('api_server.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(python scripts/_check_downtrend.py)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; python C:\\\\Users\\\\MSI\\\\Desktop\\\\Traider\\\\traider-phase1\\\\scripts\\\\backtest_scanner_day.py --date 2026-05-12 --tfs M1,M5,M15 2>&1 | Select-Object -Last 18)",
+      "Bash(curl -s -m 3 http://127.0.0.1:8080/api/health)",
+      "Bash(curl -s -m 3 http://127.0.0.1:8080/api/bots)",
+      "Bash(stat -c '%y %n' config/strategies.json 2>&1 *)",
+      "Read(//c/Users/MSI/Desktop/Traider/traider-phase1/**)",
+      "Bash(echo \"=== ที่ candle time จริงในแง่ UTC ===\" *)"
     ],
     "additionalDirectories": [
       "/tmp",
