@@ -1153,6 +1153,32 @@ class TraiderMainLoop:
             id_mode = 'backtest'
         else:
             id_mode = 'simulate'
+
+        # MaiRuay v2 live mode uses a synthetic child bar so the engine
+        # detects the pattern at "mother close = child start" instead of
+        # waiting another full bar. signal_engine stamps the synthetic
+        # candle's timestamp on signal.details when it does this. Without
+        # the override below, candle_time would still be the LAST REAL bar's
+        # timestamp (= mother START), making timestamp_open shift back 1
+        # bar in the dashboard ("เข้าไปเปิดแท่งแม่"). Override to the
+        # synthetic time = child start = mother close moment.
+        _sig_for_synth = world_state.get('signal') if world_state else None
+        _synth_ct = None
+        if _sig_for_synth is not None:
+            _det = getattr(_sig_for_synth, 'details', None) or {}
+            _synth_ct = _det.get('synthetic_candle_time')
+        if _synth_ct:
+            try:
+                from dateutil import parser as _dtp_main
+                _orig_ct = candle_time
+                candle_time = _dtp_main.parse(str(_synth_ct))
+                logger.info(
+                    f"  ↳ MaiRuay synthetic candle_time override: "
+                    f"{_orig_ct} → {candle_time}"
+                )
+            except Exception as _e:
+                logger.warning(f"  ↳ synthetic candle_time parse failed ({_e}); keeping original")
+
         plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
 
         # Mountain trailing metadata — attach signal.details to orders for 3-stage trailing

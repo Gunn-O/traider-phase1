@@ -339,6 +339,7 @@ def run_signal_engine(
         # Backtest path is unchanged. Mountain + Scanner use the original
         # `ohlc_bars` below — no behavior change there.
         _bars_for_mr = ohlc_bars
+        _synth_time: Optional[str] = None  # set when synthetic is in use
         if not _is_backtest_mode and ohlc_bars:
             _last = ohlc_bars[-1]
             _tf_sec_map = {'M1': 60, 'M5': 300, 'M15': 900,
@@ -360,6 +361,7 @@ def run_signal_engine(
                 bar_num=(_last.bar_num + 1) if _last.bar_num else len(ohlc_bars) + 1,
             )
             _bars_for_mr = ohlc_bars + [_synth_child]
+            _synth_time = _next_time
             logger.debug(
                 f"MaiRuay live: synthetic child appended @ {_next_time} "
                 f"open={_last.close:.3f} (= mother close)"
@@ -398,6 +400,19 @@ def run_signal_engine(
                 skip_reasons['MAI_RUAY_R2'] = _dbg_r2['skip']
 
         if sig_mr is not None:
+            # When the synthetic child was used, the signal's effective candle
+            # time is the synthetic bar's timestamp (= mother close = child
+            # start), NOT the last real bar's timestamp (which would be the
+            # mother's START). Stamp it on signal.details so main.py uses the
+            # right timestamp for plan_id / trade_id / timestamp_open. Without
+            # this, the dashboard shows the trade at "open of mother bar"
+            # instead of "open of child bar".
+            if _synth_time is not None:
+                try:
+                    sig_mr.details = dict(sig_mr.details or {})
+                    sig_mr.details['synthetic_candle_time'] = _synth_time
+                except Exception:
+                    pass
             candidates.append(sig_mr)
         elif _dbg_mr.get('skip'):
             skip_reasons['MAI_RUAY'] = _dbg_mr['skip']
