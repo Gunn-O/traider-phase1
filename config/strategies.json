@@ -1,6 +1,6 @@
 {
   "version": "66",
-  "last_updated": "2026-06-01",
+  "last_updated": "2026-06-02",
   "patterns": {
     "MOUNTAIN": {
       "active": false,
@@ -27,7 +27,7 @@
       ]
     },
     "MAI_RUAY": {
-      "active": false,
+      "active": true,
       "implemented": true,
       "name": "ไม้รวย (Karpathy multi-TF)",
       "description": "Father/Mother candle v2.15M5_M1Karpathy — พ่อ 1-8 แท่ง อนุญาตแทรก 1 ตัว ≤5%R55, body รวม 60-100% R55, แม่ 4-30% **ของพ่อ**, 2 จุดเข้า (ENTRY_SMALL/MEDIUM lists) split lot, ไม่มี R2, มี obstacle scanner + obstacle→entry redirect, RR floor 0.5. Engine: strategies/mai_ruay_karpathy.py",
@@ -56,10 +56,7 @@
       ],
       "priority": 4,
       "allowed_tfs": [
-        "M1",
-        "M5",
-        "M15",
-        "M30"
+        "M5"
       ]
     },
     "MAI_RUAY_M1": {
