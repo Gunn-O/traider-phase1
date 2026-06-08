@@ -327,48 +327,45 @@ def run_signal_engine(
                 updated_mai_ruay_state.pop('r1_bars_elapsed', None)
                 _r1 = None
 
-        # ── Live mode: append a SYNTHETIC CHILD bar ────────────────────────
-        # Notebook spec: in `analyze_bar`, `child = bars[bar_idx]` and entry =
-        # `child.open` (= the moment mother closed). In a backtest loop this
-        # bar already exists in df. In live, the bot wakes ~2s after mother
-        # close — the new bar (child) has JUST started and its only known
-        # price point is "current market" ≈ mother.close.
+        # ── Live mode: REPLACE the forming bar with a flat synthetic child ──
+        # Notebook spec: `child = bars[bar_idx]`, entry = `child.open` (= the
+        # moment mother closed). In backtest the bar at bar_idx is closed; in
+        # live with data_connector pos=0, ohlc_bars[-1] is the FORMING current
+        # bar — partial OHLC, unstable mid-formation.
         #
-        # If we skip this synthesis, `bars[-1]` is the bar that just closed,
-        # the engine treats THAT as the child, and `child.open` ends up being
-        # GRANDMOTHER's close — entry shifts back by 1 candle (the delay the
-        # user saw on the chart). Appending a synthetic child fixes the lag
-        # without changing any analyzer logic.
+        # Old design (2026-06-01 → 2026-06-08): APPENDED synth at -1, leaving
+        # the forming bar at -2 where the engine then treated it as MOTHER.
+        # When a bar reversed mid-formation (e.g. 2026-06-03 10:10 UTC SELL:
+        # mid body -112 pip BEAR → closed 3 pip BULL doji), the engine fired
+        # on the transient body — a phantom trade.
         #
-        # Backtest path is unchanged. Mountain + Scanner use the original
-        # `ohlc_bars` below — no behavior change there.
+        # New design: REPLACE the forming bar with a flat synth (all OHLC =
+        # forming.open = mother.close at bar boundary). The engine then sees:
+        #   - bars[-1] = synth  (child, flat single point at entry price)
+        #   - bars[-2] = the bar that closed BEFORE the current bar (mother;
+        #                CLOSED & stable — no transient-body phantom)
+        #   - bars[-3..] = father history (closed)
+        # The flat synth also makes the in-engine LIMIT fill check (Karpathy
+        # line 442-470) yield "no fill" for limits priced away from open,
+        # so they correctly become pending orders.
+        #
+        # Backtest path is unchanged (guarded by _is_backtest_mode). Mountain
+        # + Scanner use the original `ohlc_bars` below — no behavior change.
         _bars_for_mr = ohlc_bars
-        _synth_time: Optional[str] = None  # set when synthetic is in use
         if not _is_backtest_mode and ohlc_bars:
-            _last = ohlc_bars[-1]
-            _tf_sec_map = {'M1': 60, 'M5': 300, 'M15': 900,
-                           'M30': 1800, 'H1': 3600, 'H4': 14400}
-            _tf_sec = _tf_sec_map.get(current_tf, 60)
-            try:
-                from datetime import timedelta as _td_synth
-                from dateutil import parser as _dtp_synth
-                _last_dt = _dtp_synth.parse(str(_last.time))
-                _next_time = (_last_dt + _td_synth(seconds=_tf_sec)).isoformat()
-            except Exception:
-                _next_time = str(_last.time)
+            _forming = ohlc_bars[-1]
             _synth_child = OHLC(
-                time=_next_time,
-                open=_last.close,
-                high=_last.close,
-                low=_last.close,
-                close=_last.close,
-                bar_num=(_last.bar_num + 1) if _last.bar_num else len(ohlc_bars) + 1,
+                time=_forming.time,    # current bar's start time = entry-bar time
+                open=_forming.open,    # stable: = mother.close at bar boundary
+                high=_forming.open,
+                low=_forming.open,
+                close=_forming.open,
+                bar_num=_forming.bar_num,
             )
-            _bars_for_mr = ohlc_bars + [_synth_child]
-            _synth_time = _next_time
+            _bars_for_mr = ohlc_bars[:-1] + [_synth_child]
             logger.debug(
-                f"MaiRuay live: synthetic child appended @ {_next_time} "
-                f"open={_last.close:.3f} (= mother close)"
+                f"MaiRuay_M1 live: replaced forming bar @ {_forming.time} with "
+                f"flat synth OHLC={_forming.open:.3f} (mother stays at bars[-2])"
             )
 
         _dbg_mr: dict = {}
@@ -404,19 +401,11 @@ def run_signal_engine(
                 skip_reasons['MAI_RUAY_M1_R2'] = _dbg_r2['skip']
 
         if sig_mr is not None:
-            # When the synthetic child was used, the signal's effective candle
-            # time is the synthetic bar's timestamp (= mother close = child
-            # start), NOT the last real bar's timestamp (which would be the
-            # mother's START). Stamp it on signal.details so main.py uses the
-            # right timestamp for plan_id / trade_id / timestamp_open. Without
-            # this, the dashboard shows the trade at "open of mother bar"
-            # instead of "open of child bar".
-            if _synth_time is not None:
-                try:
-                    sig_mr.details = dict(sig_mr.details or {})
-                    sig_mr.details['synthetic_candle_time'] = _synth_time
-                except Exception:
-                    pass
+            # New synth design: synth.time = forming.time = current bar's start,
+            # which already matches the candle_time main.py picks up from
+            # candles_by_tf[active_tf][-1]['timestamp']. No override needed —
+            # leaving synthetic_candle_time unset so main.py's override block
+            # at main.py:1167 is a no-op (preserved for backwards-compat).
             candidates.append(sig_mr)
         elif _dbg_mr.get('skip'):
             skip_reasons['MAI_RUAY_M1'] = _dbg_mr['skip']
@@ -424,36 +413,24 @@ def run_signal_engine(
     # MAI_RUAY — Karpathy multi-TF (M1/M5/M15/M30)
     #   notebook: strategy/Mairuay_Basic_Father_V2.15M5_M1Karpathy.ipynb
     #   engine:   strategies/mai_ruay_karpathy.py
-    # No R2 / Round 2. Uses the same synthetic child mechanic as MAI_RUAY_M1
-    # in live mode so the entry timestamp = child start = mother close.
+    # No R2 / Round 2. Same flat-synth-replaces-forming-bar mechanic as
+    # MAI_RUAY_M1 above — see that block's comment for the full rationale.
     if is_pattern_active_for_tf('MAI_RUAY', current_tf):
         _bars_for_karp = ohlc_bars
-        _synth_time_k: Optional[str] = None
         if not _is_backtest_mode and ohlc_bars:
-            _last_k = ohlc_bars[-1]
-            _tf_sec_map_k = {'M1': 60, 'M5': 300, 'M15': 900,
-                             'M30': 1800, 'H1': 3600, 'H4': 14400}
-            _tf_sec_k = _tf_sec_map_k.get(current_tf, 60)
-            try:
-                from datetime import timedelta as _td_synth_k
-                from dateutil import parser as _dtp_synth_k
-                _last_dt_k = _dtp_synth_k.parse(str(_last_k.time))
-                _next_time_k = (_last_dt_k + _td_synth_k(seconds=_tf_sec_k)).isoformat()
-            except Exception:
-                _next_time_k = str(_last_k.time)
+            _forming_k = ohlc_bars[-1]
             _synth_child_k = OHLC(
-                time=_next_time_k,
-                open=_last_k.close,
-                high=_last_k.close,
-                low=_last_k.close,
-                close=_last_k.close,
-                bar_num=(_last_k.bar_num + 1) if _last_k.bar_num else len(ohlc_bars) + 1,
+                time=_forming_k.time,
+                open=_forming_k.open,
+                high=_forming_k.open,
+                low=_forming_k.open,
+                close=_forming_k.open,
+                bar_num=_forming_k.bar_num,
             )
-            _bars_for_karp = ohlc_bars + [_synth_child_k]
-            _synth_time_k = _next_time_k
+            _bars_for_karp = ohlc_bars[:-1] + [_synth_child_k]
             logger.debug(
-                f"MaiRuay Karpathy live: synthetic child appended @ {_next_time_k} "
-                f"open={_last_k.close:.3f} (= mother close)"
+                f"MaiRuay Karpathy live: replaced forming bar @ {_forming_k.time} "
+                f"with flat synth OHLC={_forming_k.open:.3f}"
             )
 
         _dbg_karp: dict = {}
@@ -461,12 +438,6 @@ def run_signal_engine(
             bars=_bars_for_karp, portfolio=portfolio, debug=_dbg_karp,
         )
         if sig_karp is not None:
-            if _synth_time_k is not None:
-                try:
-                    sig_karp.details = dict(sig_karp.details or {})
-                    sig_karp.details['synthetic_candle_time'] = _synth_time_k
-                except Exception:
-                    pass
             candidates.append(sig_karp)
         elif _dbg_karp.get('skip'):
             skip_reasons['MAI_RUAY'] = _dbg_karp['skip']

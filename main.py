@@ -483,6 +483,14 @@ class TraiderMainLoop:
         self._candles_cache: Dict = {}
         self._cache_lock = threading.Lock()
         self._cache_ready = threading.Event()
+        # Wall-clock of the last successful prefetch. run_once consults this
+        # at the bar boundary — if the cache is older than CACHE_FRESH_SECS,
+        # it forces a synchronous fetch instead of trusting stale data. The
+        # prefetch worker fires every 10s on its own phase, so without this
+        # guard a run_once that wakes 2s after bar close could read a cache
+        # snapshot from 7-8s before close → the "just-closed" bar is missing,
+        # mother shifts back 1 candle, and the bot misses the setup.
+        self._cache_updated_at: float = 0.0
         if not self.is_backtest:
             self._prefetch_thread = threading.Thread(
                 target=self._prefetch_worker, daemon=True, name="PrefetchWorker"
@@ -848,16 +856,37 @@ class TraiderMainLoop:
         # Step 1: Fetch data
         if candles_by_tf is None:
             # Live/sim path: prefer the warm cache from _prefetch_worker so we
-            # don't pay 2-8s of network latency inside the critical path.
-            # Fall back to direct fetch only if the worker hasn't filled the
-            # cache yet (first cycle after startup).
+            # don't pay 2-8s of network latency inside the critical path —
+            # BUT only when the cache is fresh. The prefetch fires every 10s
+            # on its own phase; at the bar boundary that phase can lag by
+            # 5-8s, which makes the cache's "last bar" the previous bar
+            # forming (not the bar that just closed). Reading stale cache in
+            # the new flat-synth design shifts mother back 1 candle and the
+            # bot misses the setup. Force a fresh fetch if cache is too old.
+            _CACHE_FRESH_SECS = 3.0
             if not self.is_backtest and self._cache_ready.is_set():
                 with self._cache_lock:
-                    candles_by_tf = dict(self._candles_cache)  # snapshot
-                logger.info("\n[STEP 1] Using pre-fetched cache (no network wait)")
+                    _cache_age = time.time() - self._cache_updated_at
+                if _cache_age <= _CACHE_FRESH_SECS:
+                    with self._cache_lock:
+                        candles_by_tf = dict(self._candles_cache)
+                    logger.info(
+                        f"\n[STEP 1] Using pre-fetched cache "
+                        f"(age={_cache_age:.1f}s, fresh)"
+                    )
+                else:
+                    logger.info(
+                        f"\n[STEP 1] Cache stale (age={_cache_age:.1f}s "
+                        f"> {_CACHE_FRESH_SECS}s) — forcing fresh fetch..."
+                    )
+                    candles_by_tf = self._fetch_data_all_tf()
+                    if candles_by_tf:
+                        with self._cache_lock:
+                            self._candles_cache = candles_by_tf
+                            self._cache_updated_at = time.time()
                 for tf in TIMEFRAMES:
                     if tf in candles_by_tf and candles_by_tf[tf]:
-                        logger.info(f"✓ {tf}: {len(candles_by_tf[tf])} candles (cached)")
+                        logger.info(f"✓ {tf}: {len(candles_by_tf[tf])} candles")
             else:
                 logger.info("\n[STEP 1] Fetching market data (cache not ready yet)...")
                 candles_by_tf = self._fetch_data_all_tf()
@@ -1240,16 +1269,18 @@ class TraiderMainLoop:
                 _sig_details_for_order = getattr(signal, 'details', None) or {}
                 # Backtest: current_candle = the closed "child" bar, we have
                 # its full high/low.
-                # Live: signal_engine appended a synthetic child whose
-                # open=high=low=close = mother.close (point-in-time). The
-                # only real price we know is mother.close (= current market
-                # estimate). Use that for both bounds so the fill check
-                # mirrors the synthetic bar.
+                # Live: current_candle is the FORMING bar from data_connector
+                # pos=0. Its .close is intra-bar transient (unstable). The
+                # stable reference is .open = bar's opening price (set once
+                # at bar boundary, = mother.close). This mirrors the flat
+                # synth bar that signal_engine builds for the engine: a
+                # single price point at forming.open. Using .open ensures
+                # this fill check agrees with the engine's decision.
                 if self.is_backtest:
                     _child_low = (current_candle or {}).get('low', 0) or 0
                     _child_high = (current_candle or {}).get('high', 0) or 0
                 else:
-                    _ref = (current_candle or {}).get('close', 0) or 0
+                    _ref = (current_candle or {}).get('open', 0) or 0
                     _child_low = _child_high = _ref
                 _ep = order['entry']
                 _act = order['action']
@@ -1559,6 +1590,7 @@ class TraiderMainLoop:
                 if data:
                     with self._cache_lock:
                         self._candles_cache = data
+                        self._cache_updated_at = time.time()
                     self._cache_ready.set()
                     logger.debug("Pre-fetch: cache updated")
             except Exception as e:
