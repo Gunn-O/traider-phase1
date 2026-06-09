@@ -3,18 +3,29 @@ One-shot reconciliation: pull MT5 actual order/deal history for live
 MaiRuay trades in a date range, compare to what Python's LocalDB +
 Google Sheets recorded, and update any rows that diverge.
 
-Why: Plan 2026-06-01 13:13 (and any prior live plan) recorded fills /
-SL hits in Python that MT5 actually never executed — Python's pending-
-LIMIT simulator used candle.low/high as a fill proxy but MT5 uses real
-ticks, so the two diverged on fast-moving bars. The fix in commit
-56deea0 prevents this going forward; this script repairs the historical
-rows already written to LocalDB + Sheets.
+Two repair modes (auto-detected per row):
+
+  CLOSED-state repair  (kind='close')      — trade is gone from MT5 but
+    LocalDB still shows PENDING, or close_price/pnl/reason mismatches
+    MT5 reality. Fixes: result, close_price, close_time, pnl_usd,
+    close_reason. (The original purpose of this script — repairs the
+    Plan 2026-06-01 13:13 "Python simulated fill that MT5 never did"
+    class of bug, prevented going forward in 56deea0.)
+
+  OPEN-level sync      (kind='open_levels') — trade is still open at
+    MT5 but DB has stale entry / sl / tp from before commit 294e247
+    (post-order_send race, broker normalize, manual desktop tweak,
+    etc.). Fixes: entry_price, sl_price, tp_price, trailing_sl.
 
 Usage:
+    # Dry-run first to see what would change:
+    python reconcile_live_trades.py --from "2026-05-01 00:00" --to "2026-06-02 00:00" --dry-run
+
+    # Apply to LocalDB only:
     python reconcile_live_trades.py --from "2026-05-01 00:00" --to "2026-06-02 00:00"
 
-Add --dry-run to preview without writing. Add --sheets to also push the
-corrections to Google Sheets (otherwise LocalDB only).
+    # Apply to LocalDB AND Google Sheets:
+    python reconcile_live_trades.py --from "..." --to "..." --sheets
 
 Match strategy: MT5 truncates the comment to 16 chars on most brokers,
 and overwrites it with "expired [...]" / "[sl ...]" / "[tp ...]" when
@@ -76,15 +87,26 @@ def _find_mt5_outcome(db_row: tuple, deals: list, hist_orders: list,
     db_entry = db_row[3]       # entry_price the bot intended
     db_lot   = db_row[6]       # lot_size
 
-    # 1. Is it currently open at MT5?
+    # 1. Is it currently open at MT5? Capture broker's current entry/sl/tp so
+    #    callers can diff vs. DB and update if anything drifted (race at order
+    #    placement, post-fill normalize, manual SL tweak in MT5 desktop, etc.)
     for p in active_positions:
         if _comment_matches(p.comment, tid):
-            return {'state': 'STILL_OPEN', 'reason_log': f'matched active position #{p.ticket}'}
+            return {'state': 'STILL_OPEN',
+                    'mt5_fill_price': float(p.price_open),
+                    'mt5_sl':         float(p.sl),
+                    'mt5_tp':         float(p.tp),
+                    'reason_log':     f'matched active position #{p.ticket}'}
 
-    # 2. Is the pending LIMIT still queued?
+    # 2. Is the pending LIMIT still queued? Same — capture order's current
+    #    price_open / sl / tp so they can be synced to MT5 truth.
     for o in active_orders:
         if _comment_matches(o.comment, tid):
-            return {'state': 'STILL_OPEN', 'reason_log': f'matched active order #{o.ticket}'}
+            return {'state': 'STILL_OPEN',
+                    'mt5_fill_price': float(o.price_open),
+                    'mt5_sl':         float(o.sl),
+                    'mt5_tp':         float(o.tp),
+                    'reason_log':     f'matched active order #{o.ticket}'}
 
     # 3. Look for the entry deal in history. MT5 keeps the bot's comment
     #    on the OPEN deal (entry=0) until the position closes; CLOSE
@@ -246,8 +268,34 @@ def main():
 
         # Decide: does this row need updating?
         new_state = outcome.get('state')
-        if new_state in ('UNKNOWN', 'STILL_OPEN'):
-            print(f'  [SKIP] {tid}  db={db_result:9} mt5={new_state}  ({outcome["reason_log"]})')
+        if new_state == 'UNKNOWN':
+            print(f'  [SKIP] {tid}  db={db_result:9} mt5=UNKNOWN  ({outcome["reason_log"]})')
+            continue
+
+        # STILL_OPEN — sync entry/sl/tp to broker truth (script previously
+        # SKIPed these, leaving open trades stuck on engine values). No
+        # close-side fields change; we only touch the open levels.
+        if new_state == 'STILL_OPEN':
+            mt5_entry = outcome.get('mt5_fill_price')
+            mt5_sl    = outcome.get('mt5_sl')
+            mt5_tp    = outcome.get('mt5_tp')
+            entry_drift = mt5_entry is not None and abs((db_entry or 0) - mt5_entry) > 0.005
+            sl_drift    = mt5_sl    is not None and abs((db_sl    or 0) - mt5_sl)    > 0.005
+            tp_drift    = mt5_tp    is not None and abs((db_tp    or 0) - mt5_tp)    > 0.005
+            if not (entry_drift or sl_drift or tp_drift):
+                print(f'  [OK]   {tid}  STILL_OPEN  entry/sl/tp match MT5')
+                continue
+            print(f'  [FIX]  {tid}  STILL_OPEN — open levels drifted')
+            print(f'         db : entry={db_entry:.3f}  sl={db_sl:.3f}  tp={db_tp:.3f}')
+            print(f'         mt5: entry={mt5_entry:.3f}  sl={mt5_sl:.3f}  tp={mt5_tp:.3f}')
+            print(f'         ({outcome["reason_log"]})')
+            changes.append({
+                'kind'      : 'open_levels',
+                'trade_id'  : tid,
+                'new_entry' : mt5_entry if entry_drift else None,
+                'new_sl'    : mt5_sl    if sl_drift    else None,
+                'new_tp'    : mt5_tp    if tp_drift    else None,
+            })
             continue
 
         needs_update = (
@@ -271,11 +319,12 @@ def main():
         print(f'         ({outcome["reason_log"]})')
 
         changes.append({
-            'trade_id'   : tid,
-            'new_result' : new_state,
-            'close_price': new_close_price,
-            'close_time' : new_close_time.isoformat() if new_close_time else (t_close or t_open),
-            'pnl_usd'    : new_pnl,
+            'kind'        : 'close',
+            'trade_id'    : tid,
+            'new_result'  : new_state,
+            'close_price' : new_close_price,
+            'close_time'  : new_close_time.isoformat() if new_close_time else (t_close or t_open),
+            'pnl_usd'     : new_pnl,
             'close_reason': new_reason,
         })
 
@@ -290,20 +339,43 @@ def main():
         print('(dry-run — no writes performed)')
         return
 
-    # Apply LocalDB updates
+    # Apply LocalDB updates — split by change kind so open-level syncs don't
+    # accidentally clobber result/pnl, and vice versa.
     print('\nUpdating LocalDB...')
     for ch in changes:
-        conn.execute("""
-            UPDATE trades SET
-                result = ?, pnl_usd = ?, close_reason = ?,
-                close_price = ?, timestamp_close = ?
-            WHERE trade_id = ?
-        """, (ch['new_result'], ch['pnl_usd'], ch['close_reason'],
-              ch['close_price'], ch['close_time'], ch['trade_id']))
+        if ch.get('kind') == 'open_levels':
+            sets, vals = [], []
+            if ch.get('new_entry') is not None:
+                sets.append('entry_price = ?')
+                vals.append(ch['new_entry'])
+            if ch.get('new_sl') is not None:
+                sets.append('sl_price = ?')
+                sets.append('trailing_sl = ?')
+                vals.extend([ch['new_sl'], ch['new_sl']])
+            if ch.get('new_tp') is not None:
+                sets.append('tp_price = ?')
+                vals.append(ch['new_tp'])
+            if not sets:
+                continue
+            vals.append(ch['trade_id'])
+            conn.execute(
+                f"UPDATE trades SET {', '.join(sets)} WHERE trade_id = ?",
+                tuple(vals),
+            )
+        else:
+            conn.execute("""
+                UPDATE trades SET
+                    result = ?, pnl_usd = ?, close_reason = ?,
+                    close_price = ?, timestamp_close = ?
+                WHERE trade_id = ?
+            """, (ch['new_result'], ch['pnl_usd'], ch['close_reason'],
+                  ch['close_price'], ch['close_time'], ch['trade_id']))
     conn.commit()
     print(f'  ✓ {len(changes)} LocalDB rows updated')
 
-    # Optional: push to Google Sheets
+    # Optional: push to Google Sheets — route by change kind. Close-state
+    # changes go through update_order_close (existing path); open-level
+    # changes go through update_open_values (new, added 2026-06-09).
     if args.sheets:
         print('\nUpdating Google Sheets...')
         from agents.g4_sheets_logger import SheetsLogger
@@ -313,11 +385,20 @@ def main():
         else:
             ok = 0
             for ch in changes:
-                if sl.update_order_close(
-                    ch['trade_id'], ch['new_result'], ch['close_price'],
-                    ch['close_reason'], ch['pnl_usd'], ch['close_time'],
-                ):
-                    ok += 1
+                if ch.get('kind') == 'open_levels':
+                    if sl.update_open_values(
+                        ch['trade_id'],
+                        entry=ch.get('new_entry'),
+                        sl=ch.get('new_sl'),
+                        tp=ch.get('new_tp'),
+                    ):
+                        ok += 1
+                else:
+                    if sl.update_order_close(
+                        ch['trade_id'], ch['new_result'], ch['close_price'],
+                        ch['close_reason'], ch['pnl_usd'], ch['close_time'],
+                    ):
+                        ok += 1
             print(f'  ✓ {ok}/{len(changes)} Sheets rows updated')
 
     mt5.shutdown()
