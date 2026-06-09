@@ -295,6 +295,42 @@ class LocalDB:
         )
         self.conn.commit()
 
+    def update_trade_broker_state(self, trade_id: str,
+                                   entry: Optional[float] = None,
+                                   sl: Optional[float] = None,
+                                   tp: Optional[float] = None) -> bool:
+        """Sync a trade row to the broker's actual entry/SL/TP. Used by main.py
+        after order placement (and again when a pending LIMIT fills) so the DB
+        matches MT5 exactly — independent of whatever values the engine
+        computed at signal time.
+
+        Any field passed as None is left untouched (partial updates allowed).
+        Also updates trailing_sl when sl changes, since trailing starts from
+        the live SL.
+
+        Returns True if anything was actually written."""
+        sets = []
+        vals: list = []
+        if entry is not None:
+            sets.append("entry_price = ?")
+            vals.append(float(entry))
+        if sl is not None:
+            sets.append("sl_price = ?")
+            sets.append("trailing_sl = ?")
+            vals.extend([float(sl), float(sl)])
+        if tp is not None:
+            sets.append("tp_price = ?")
+            vals.append(float(tp))
+        if not sets:
+            return False
+        vals.append(trade_id)
+        self.conn.execute(
+            f"UPDATE trades SET {', '.join(sets)} WHERE trade_id = ?",
+            tuple(vals),
+        )
+        self.conn.commit()
+        return True
+
     def get_pending_trades(self, bot_id: Optional[str] = None) -> List[dict]:
         """Get PENDING trades, optionally filtered by bot_id."""
         if bot_id:

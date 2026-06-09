@@ -1555,6 +1555,68 @@ class TraiderMainLoop:
                     'scanner_segment_id': scanner_seg_id,
                 })
 
+            # Post-insert reconciliation: re-query MT5 once more and UPDATE the
+            # DB row if it has drifted from broker truth. Catches three
+            # scenarios where the initial insert may have written stale values:
+            #   1. RACE — at order_send time, positions_get hadn't indexed the
+            #      ticket yet, so get_broker_sl_tp fell back to the cached
+            #      pre-normalize value while MT5 may have rounded sl/tp to the
+            #      tick size or min-stops level on its side.
+            #   2. PENDING LIMIT FILL — the initial row stored the requested
+            #      limit price; once MT5 turns it into a position the actual
+            #      fill price may differ (gap fill / partial slippage).
+            #   3. POST-SEND MOD — exceedingly rare but possible if the broker
+            #      adjusts the order between our two queries.
+            # No-op when get_fill_price/get_broker_sl_tp return the same values
+            # the initial insert already wrote (paper broker, perfect sync).
+            for order in orders_with_ids:
+                _tk = order.get('broker_ticket')
+                if not _tk:
+                    continue
+                _new_entry = (self.broker.get_fill_price(_tk)
+                              if hasattr(self.broker, 'get_fill_price') else None)
+                _new_sltp = (self.broker.get_broker_sl_tp(_tk)
+                             if hasattr(self.broker, 'get_broker_sl_tp') else None)
+                _u_entry = _new_entry if (_new_entry and
+                                          abs(_new_entry - (order.get('entry') or 0)) > 0.005) else None
+                _u_sl, _u_tp = None, None
+                if _new_sltp:
+                    _b_sl2, _b_tp2 = _new_sltp
+                    if abs(_b_sl2 - (order.get('sl') or 0)) > 0.005:
+                        _u_sl = _b_sl2
+                    if abs(_b_tp2 - (order.get('tp') or 0)) > 0.005:
+                        _u_tp = _b_tp2
+                if _u_entry or _u_sl or _u_tp:
+                    try:
+                        self.local_db.update_trade_broker_state(
+                            order['trade_id'],
+                            entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                        )
+                        # Mirror the update onto the in-memory order so
+                        # downstream consumers (position_monitor, close-event
+                        # emitter at line ~1880) see the same broker truth.
+                        if _u_entry:
+                            order['entry'] = _u_entry
+                            order['entry_price'] = _u_entry
+                        if _u_sl:
+                            order['sl'] = _u_sl
+                            order['sl_price'] = _u_sl
+                        if _u_tp:
+                            order['tp'] = _u_tp
+                            order['tp_price'] = _u_tp
+                        logger.info(
+                            f"  ↳ DB reconciled {order['trade_id']}: "
+                            + ", ".join(
+                                f"{k}={v:.3f}" for k, v in {
+                                    'entry': _u_entry, 'sl': _u_sl, 'tp': _u_tp,
+                                }.items() if v
+                            )
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"DB reconcile failed for {order['trade_id']}: {_e}"
+                        )
+
         # Attach scanner_segment_id to each order dict before handing to the
         # position monitor — the close-path needs it to mark the segment as
         # STOPPED on a LOSS (notebook v4.2 stop_segments behavior).
@@ -1779,6 +1841,63 @@ class TraiderMainLoop:
                     except Exception as e:
                         logger.error(f"reconcile_pending failed (continuing): {e}")
                         cancelled_orphans = []
+
+            # Per-cycle broker→DB sync for OPEN orders (catches the case where
+            # a pending LIMIT FILLED since last cycle, swapping its broker view
+            # from orders_get → positions_get and possibly shifting price/SL/TP
+            # via slippage or broker normalization). For already-filled MARKET
+            # positions the values are stable so this is a no-op DB-write-wise,
+            # only the broker query cost is paid. Skipped in backtest where
+            # PaperBroker doesn't return drifted values anyway.
+            if (not self.is_backtest and self.local_db
+                    and hasattr(self.broker, 'get_fill_price')
+                    and hasattr(self.broker, 'get_broker_sl_tp')):
+                for _o in open_orders:
+                    _tk = _o.get('broker_ticket') or _o.get('ticket')
+                    _tid = _o.get('trade_id')
+                    if not _tk or not _tid:
+                        continue
+                    try:
+                        _fp = self.broker.get_fill_price(_tk)
+                        _sltp = self.broker.get_broker_sl_tp(_tk)
+                    except Exception:
+                        continue
+                    _u_entry = (_fp if (_fp and
+                                abs(_fp - (_o.get('entry_price') or _o.get('entry') or 0)) > 0.005)
+                                else None)
+                    _u_sl, _u_tp = None, None
+                    if _sltp:
+                        _bs, _bt = _sltp
+                        _cur_sl = _o.get('sl_price') or _o.get('sl') or 0
+                        _cur_tp = _o.get('tp_price') or _o.get('tp') or 0
+                        if abs(_bs - _cur_sl) > 0.005:
+                            _u_sl = _bs
+                        if abs(_bt - _cur_tp) > 0.005:
+                            _u_tp = _bt
+                    if _u_entry or _u_sl or _u_tp:
+                        try:
+                            self.local_db.update_trade_broker_state(
+                                _tid, entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                            )
+                            if _u_entry:
+                                _o['entry'] = _u_entry
+                                _o['entry_price'] = _u_entry
+                            if _u_sl:
+                                _o['sl'] = _u_sl
+                                _o['sl_price'] = _u_sl
+                            if _u_tp:
+                                _o['tp'] = _u_tp
+                                _o['tp_price'] = _u_tp
+                            logger.info(
+                                f"  ↳ DB resync {_tid}: "
+                                + ", ".join(
+                                    f"{k}={v:.3f}" for k, v in {
+                                        'entry': _u_entry, 'sl': _u_sl, 'tp': _u_tp,
+                                    }.items() if v
+                                )
+                            )
+                        except Exception as _e:
+                            logger.warning(f"per-cycle DB sync failed for {_tid}: {_e}")
 
             # Update broker positions (check SL/TP with real prices)
             current_price = current_candle.get('close') if current_candle else None
