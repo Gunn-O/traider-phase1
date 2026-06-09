@@ -363,6 +363,66 @@ class SheetsLogger:
             logger.error(f"Failed to update trailing SL: {e}")
             return False
 
+    def update_open_values(self, trade_id: str,
+                           entry: Optional[float] = None,
+                           sl: Optional[float] = None,
+                           tp: Optional[float] = None) -> bool:
+        """Sync an existing row's entry/SL/TP to the broker's truth — used by
+        main.py's post-insert reconciliation + per-cycle resync when the
+        initial values written by log_plan_open turn out to lag what MT5
+        actually stores (post-order_send race, pending-LIMIT fill slippage,
+        broker normalization).
+
+        Columns: I=entry, J=sl_price, K=tp_price, Z=trailing_sl (mirrors sl).
+        Any field passed as None is left untouched. Routed through the same
+        batch queue as update_order_close in batch_mode so we don't blow
+        Sheets API quotas during a busy cycle.
+
+        Returns True on success or successful queue, False on lookup failure
+        or API error."""
+        if not self.enabled:
+            return False
+        if entry is None and sl is None and tp is None:
+            return False
+
+        if self._batch_mode:
+            self._write_queue.append((
+                self._do_update_open_values,
+                [trade_id, entry, sl, tp],
+                {},
+            ))
+            return True
+        return self._do_update_open_values(trade_id, entry, sl, tp)
+
+    def _do_update_open_values(self, trade_id: str,
+                                entry: Optional[float],
+                                sl: Optional[float],
+                                tp: Optional[float]) -> bool:
+        """Internal — find row by trade_id and batch_update the cells."""
+        try:
+            cell = self.trade_log_ws.find(trade_id)
+            if not cell:
+                logger.warning(f"update_open_values: trade_id not found in Sheets: {trade_id}")
+                return False
+            row_num = cell.row
+            updates = []
+            if entry is not None:
+                updates.append({'range': f'I{row_num}', 'values': [[float(entry)]]})
+            if sl is not None:
+                updates.append({'range': f'J{row_num}', 'values': [[float(sl)]]})
+                # Mirror onto trailing_sl (col Z) — same column update_trailing_sl uses;
+                # the bot's trailing logic starts from the live SL.
+                updates.append({'range': f'Z{row_num}', 'values': [[float(sl)]]})
+            if tp is not None:
+                updates.append({'range': f'K{row_num}', 'values': [[float(tp)]]})
+            if not updates:
+                return False
+            self.trade_log_ws.batch_update(updates)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update open values for {trade_id}: {e}")
+            return False
+
     def update_human_action(self, trade_id: str, human_action: str) -> bool:
         """Update human action (columns AA, AB)"""
         if not self.enabled:

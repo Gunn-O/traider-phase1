@@ -1604,8 +1604,37 @@ class TraiderMainLoop:
                         if _u_tp:
                             order['tp'] = _u_tp
                             order['tp_price'] = _u_tp
+                        # Mirror to Sheets too — log_plan_open already wrote
+                        # the (now-stale) initial values, and there's no way
+                        # to retroactively touch a row from outside. Skip in
+                        # backtest (sheets_logger is disabled there).
+                        if self.sheets_logger.enabled:
+                            self._log_async(
+                                self.sheets_logger.update_open_values,
+                                order['trade_id'],
+                                entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                            )
+                        # Re-emit plan_opened so the Dashboard's live view
+                        # rebinds to the corrected values. The Dashboard
+                        # treats this as an idempotent state push keyed by
+                        # trade_id; no duplicate row is created.
+                        post_bot_event(
+                            "plan_opened",
+                            f"{order.get('action', '?')} {order.get('lot_size', order.get('lot', 0))} lot (synced)",
+                            {
+                                "plan_id":   plan_id,
+                                "trade_id":  order.get('trade_id', ''),
+                                "action":    order.get('action', ''),
+                                "entry":     order.get('entry_price', order.get('entry', 0)),
+                                "sl":        order.get('sl_price', order.get('sl', 0)),
+                                "tp":        order.get('tp_price', order.get('tp', 0)),
+                                "lot":       order.get('lot_size', order.get('lot', 0)),
+                                "pattern":   (signal.pattern if signal else ''),
+                                "open_time": order.get('timestamp_open', '') or order.get('open_time', ''),
+                            },
+                        )
                         logger.info(
-                            f"  ↳ DB reconciled {order['trade_id']}: "
+                            f"  ↳ DB+Sheets+Dashboard reconciled {order['trade_id']}: "
                             + ", ".join(
                                 f"{k}={v:.3f}" for k, v in {
                                     'entry': _u_entry, 'sl': _u_sl, 'tp': _u_tp,
@@ -1888,8 +1917,34 @@ class TraiderMainLoop:
                             if _u_tp:
                                 _o['tp'] = _u_tp
                                 _o['tp_price'] = _u_tp
+                            # Mirror to Sheets + Dashboard so all three views
+                            # stay aligned with MT5 — without this, a pending
+                            # LIMIT that fills with slippage shows in DB +
+                            # MT5 at the real fill price but Sheets keeps the
+                            # requested limit price from log_plan_open.
+                            if self.sheets_logger.enabled:
+                                self._log_async(
+                                    self.sheets_logger.update_open_values,
+                                    _tid,
+                                    entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                                )
+                            post_bot_event(
+                                "plan_opened",
+                                f"{_o.get('action', '?')} {_o.get('lot_size', _o.get('lot', 0))} lot (resync)",
+                                {
+                                    "plan_id":   _o.get('plan_id', ''),
+                                    "trade_id":  _tid,
+                                    "action":    _o.get('action', ''),
+                                    "entry":     _o.get('entry_price', _o.get('entry', 0)),
+                                    "sl":        _o.get('sl_price', _o.get('sl', 0)),
+                                    "tp":        _o.get('tp_price', _o.get('tp', 0)),
+                                    "lot":       _o.get('lot_size', _o.get('lot', 0)),
+                                    "pattern":   (_o.get('pattern') or '').upper(),
+                                    "open_time": _o.get('timestamp_open', '') or _o.get('open_time', ''),
+                                },
+                            )
                             logger.info(
-                                f"  ↳ DB resync {_tid}: "
+                                f"  ↳ DB+Sheets+Dashboard resync {_tid}: "
                                 + ", ".join(
                                     f"{k}={v:.3f}" for k, v in {
                                         'entry': _u_entry, 'sl': _u_sl, 'tp': _u_tp,
@@ -1897,7 +1952,7 @@ class TraiderMainLoop:
                                 )
                             )
                         except Exception as _e:
-                            logger.warning(f"per-cycle DB sync failed for {_tid}: {_e}")
+                            logger.warning(f"per-cycle resync failed for {_tid}: {_e}")
 
             # Update broker positions (check SL/TP with real prices)
             current_price = current_candle.get('close') if current_candle else None
