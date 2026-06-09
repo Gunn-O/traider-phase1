@@ -299,3 +299,68 @@
 .strategy-retry-btn:hover {
   filter: brightness(1.1);
 }
+
+/* TF allow-list pills */
+.strategy-tfs {
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--border-color);
+}
+
+.strategy-tfs-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.strategy-tfs-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.strategy-tfs-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tf-pill {
+  min-width: 44px;
+  padding: 5px 10px;
+  background-color: var(--bg-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tf-pill:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--agent-analyst);
+}
+
+.tf-pill.on {
+  color: var(--bg-dark);
+  background-color: var(--agent-analyst);
+  border-color: var(--agent-analyst);
+}
+
+.tf-pill.dim {
+  opacity: 0.5;
+}
+
+.tf-pill:disabled {
+  cursor: not-allowed;
+}

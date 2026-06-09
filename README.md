@@ -180,13 +180,6 @@ ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxxx
 # Get your API key: https://console.anthropic.com/
 
 # ============================================
-# TRADING MODE (Choose one)
-# ============================================
-# DATA_MODE=backtest   # Use for backtesting (no API calls)
-# DATA_MODE=simulate   # Use for paper trading (with API)
-DATA_MODE=live         # Use for live trading (CAREFUL!)
-
-# ============================================
 # ACCOUNT SETTINGS
 # ============================================
 ACCOUNT_BALANCE=1000   # Initial balance (USD)
@@ -366,7 +359,6 @@ Test with live data but no real orders:
 
 ```bash
 # Make sure .env has:
-# DATA_MODE=simulate
 # ANTHROPIC_API_KEY=sk-ant-...
 
 # Run simulation
@@ -385,7 +377,6 @@ python main.py --simulate
 
 ```bash
 # Make sure .env has:
-# DATA_MODE=live
 # MT5_LOGIN=your-real-account
 # MT5_PASSWORD=your-password
 

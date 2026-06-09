@@ -58,13 +58,13 @@ def guardian_check(decision: Dict, lot_info: Dict,
         return {'approved': False, 'block_reason': 'Decision is SKIP', 'blocked_by': 'decision'}
 
     # ============ Rule 1: มี Active Plan ของ pattern เดียวกัน ============
-    # Per-pattern slot — Mountain + MAI_RUAY trade ขนานกันได้
+    # Per-pattern slot — Mountain + MAI_RUAY + Scanner trade ขนานกันได้
+    # Key must match the WRITE path in main.py:1120 which uses raw signal.pattern
+    # (uppercased here for consistency). The old normalization to 'MOUNTAIN' /
+    # 'MAI_RUAY' was a bug: signal.pattern is 'MOUNTAIN_R1' / 'UPTREND_SCANNER' /
+    # etc., so the lookup missed and G3 let through duplicate Mountain trades
+    # that G2 also somehow missed.
     decision_pattern = (decision.get('setup') or '').upper()
-    # Map setup string from main.py decision dict to pattern name
-    if 'mountain' in decision_pattern.lower():
-        decision_pattern = 'MOUNTAIN'
-    elif 'mai_ruay' in decision_pattern.lower() or 'mairuay' in decision_pattern.lower():
-        decision_pattern = 'MAI_RUAY'
     active_plans = portfolio_state.get('active_plans_by_pattern', {}) or {}
     pattern_plan = active_plans.get(decision_pattern, '')
     if pattern_plan and pattern_plan != 'ไม่มีแผนที่เปิดอยู่':
@@ -76,14 +76,21 @@ def guardian_check(decision: Dict, lot_info: Dict,
         }
 
     # ============ Rule 2: Consecutive Loss >= 3 ============
+    # MaiRuay v2 R2 bypass: ไม้แก้หลัง R1 SL ออกแบบให้เข้าทันที — ถ้า R1 SL
+    # ดัน consecutive_loss ถึง 3 พอดี R2 จะถูก block ทั้งที่ notebook spec
+    # บอกให้เข้าได้. R2 นับเป็น "extension" ของ R1 ในเชิง pattern (signal_engine
+    # clear r1_info หลัง R2 fire — ไม่มี R3).
+    is_round2 = bool(decision.get('is_round2', False))
     consecutive_loss = portfolio_state.get('consecutive_loss', 0)
-    if consecutive_loss >= RISK_CONFIG['max_consecutive_loss']:
+    if consecutive_loss >= RISK_CONFIG['max_consecutive_loss'] and not is_round2:
         logger.warning(f"BLOCK: Consecutive loss {consecutive_loss} >= {RISK_CONFIG['max_consecutive_loss']}")
         return {
             'approved': False,
             'block_reason': f'แพ้ติดกัน {consecutive_loss} ครั้ง',
             'blocked_by': 'consecutive_loss'
         }
+    if is_round2:
+        logger.info(f"R2 bypass: consecutive_loss {consecutive_loss} accepted (MaiRuay v2 ไม้แก้)")
 
     # ============ Rule 3: Total Loss > 30% ============
     total_loss_pct = portfolio_state.get('total_loss_pct', 0)

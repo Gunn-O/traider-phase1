@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Tra(i)der Phase I v4.3 — Main Trading Loop
+Tra(i)der Phase II — Main Trading Loop
 
-Pipeline: G1 → G2 → G3a (Analyst) → G3b (Risk Manager) → G3c (Guardian) → G4
-Agents: A (Analyst), B (Risk Manager), C (Weekly), D (Monthly), Reflector (Daily)
+Per-trade pipeline (Python only — no AI per cycle):
+    Signal Engine → G2 Pre-filter → AUTO_APPROVE → Lot from Signal Engine
+                  → G3c Guardian (Python rules) → Execute → MT5
 
-V4.3 Updates:
-- Twin Candle dual-role system (Swing + Entry with beauty scoring)
-- Agent A uses System Prompt V4.3
-- Reflector: Daily Python-only reflection ($0)
-- Beauty score tracking throughout pipeline
+AI scope (separate cadence, not per-trade):
+    - Weekly Strategist  : weekly review of stats + parameter suggestions
+    - Monthly Evolver    : monthly proposal of strategy updates (human approves)
 
 Usage:
     python main.py --winrate-test  # Winrate test mode (0.01 lot)
@@ -17,13 +16,15 @@ Usage:
     python main.py --backtest --start 2026-01-01 --end 2026-03-31
     python main.py --backtest --start 2026-04-04 --end 2026-04-10 --log-sheets  # Backtest with Sheets logging
 
-Reference: XAUUSD_AI_Trading_System_v2.1.md, XAUUSD_System_PromptV43.md
+Reference: CLAUDE.md (Phase II Architecture)
 """
 
 import os
 import sys
 import argparse
 import logging
+import math
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List
@@ -57,6 +58,53 @@ except ImportError:
     }
     def update_bot_state(updates): pass
     def add_log(msg): pass
+
+# ─── Multi-bot event reporting (POST events back to api_server) ────────
+# api_server sets these env vars when spawning the subprocess via /api/start.
+# When running from CLI (no api_server) both are empty → events become no-ops.
+import json as _json_post
+import urllib.request as _urlreq_post
+
+_BOT_ID = os.getenv("TRAIDER_BOT_ID", "")
+_API_URL = os.getenv("TRAIDER_API_URL", "")
+
+
+def post_bot_event(event_type: str, msg: str = "", data: dict = None) -> None:
+    """Send a SIGNAL/SKIP/PLAN_OPENED/PLAN_CLOSED event to api_server so the
+    Dashboard can show what this bot is doing in real time. Best-effort: any
+    error is swallowed so trading isn't impacted by API hiccups."""
+    if not _BOT_ID or not _API_URL:
+        return
+    try:
+        body = _json_post.dumps({"type": event_type, "msg": msg, "data": data or {}}).encode()
+        req = _urlreq_post.Request(
+            f"{_API_URL}/api/bots/{_BOT_ID}/event",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urlreq_post.urlopen(req, timeout=2).read()
+    except Exception:
+        pass
+
+
+def post_bot_heartbeat(data: dict) -> None:
+    """Per-cycle snapshot push so the Dashboard sees 'alive' updates without
+    flooding the events panel. Overwrites previous heartbeat — only the latest
+    tick matters. Best-effort like post_bot_event."""
+    if not _BOT_ID or not _API_URL:
+        return
+    try:
+        body = _json_post.dumps(data).encode()
+        req = _urlreq_post.Request(
+            f"{_API_URL}/api/bots/{_BOT_ID}/heartbeat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urlreq_post.urlopen(req, timeout=2).read()
+    except Exception:
+        pass
 
 # Load environment (override=True to ensure .env takes precedence over shell)
 load_dotenv(override=True)
@@ -274,6 +322,14 @@ class TraiderMainLoop:
         self.mode = 'winrate_test' if args.winrate_test else 'simulate'
         self.is_backtest = args.backtest if hasattr(args, 'backtest') else False
 
+        # Signal the rest of the codebase (signal_engine etc.) about backtest
+        # vs. live so they can switch time-based decisions to candle-time
+        # instead of wall-clock. Set early so any import-time check sees it.
+        if self.is_backtest:
+            os.environ['TRAIDER_BACKTEST_ACTIVE'] = '1'
+        else:
+            os.environ.pop('TRAIDER_BACKTEST_ACTIVE', None)
+
         # CLI args win over bot_state (subprocesses don't share bot_state with api_server)
         self.symbol = (
             getattr(args, 'symbol', None)
@@ -345,31 +401,31 @@ class TraiderMainLoop:
         update_bot_state({"data_source_actual": data_source})
         logger.info("✓ Data connector ready")
 
-        # Initialize agents (Phase II — Signal Engine Architecture)
-        logger.info("🤖 Initializing agents (Phase II: Signal Engine)...")
+        # Initialize agents (Phase II — Signal Engine Architecture, Python-only per-trade)
+        logger.info("🤖 Initializing agents (Phase II: Signal Engine, no AI per trade)...")
 
         # G2: Pre-filter (active)
         self.g2 = G2Prefilter(config={'verbose': True})
 
-        # Phase II: Analyst and Risk Manager REMOVED
-        # - BACKTEST: Signal Engine → AUTO_APPROVE (no Claude)
-        # - SIM/LIVE: Signal Engine → Claude Reviewer (future implementation)
-        self.analyst = None  # Placeholder for Phase II Claude Reviewer
-        self.risk_manager = None  # Removed - use Signal Engine lot directly
+        # Phase II: per-trade decision is fully deterministic (Python only).
+        # Signal Engine produces entry/SL/TP/lot → AUTO_APPROVE → Guardian.
+        # No Claude Reviewer per signal; no Risk Manager (Haiku) per signal.
+        # AI runs only on weekly/monthly cadence (Strategist / Evolver below).
 
-        # Weekly Strategist (analysis only, not used in backtest loop)
-        self.weekly_strategist = G4WeeklyStrategist(
-            api_key=os.getenv('ANTHROPIC_API_KEY'),
-            config={'verbose': True}
-        )
-        logger.info("✓ Weekly Strategist initialized")
-
-        # Monthly Evolver (analysis only, not used in backtest loop)
-        self.monthly_evolver = G4MonthlyEvolver(
-            api_key=os.getenv('ANTHROPIC_API_KEY'),
-            config={'verbose': True}
-        )
-        logger.info("✓ Monthly Evolver initialized")
+        # Weekly Strategist + Monthly Evolver need ANTHROPIC_API_KEY.
+        # .env documents the key as optional, and these agents only run on
+        # weekly/monthly schedules — skip init (with warning) when the key is
+        # absent so the bot can still start for paper/python-decision runs.
+        anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+        if anthropic_key:
+            self.weekly_strategist = G4WeeklyStrategist(api_key=anthropic_key, config={'verbose': True})
+            logger.info("✓ Weekly Strategist initialized")
+            self.monthly_evolver = G4MonthlyEvolver(api_key=anthropic_key, config={'verbose': True})
+            logger.info("✓ Monthly Evolver initialized")
+        else:
+            self.weekly_strategist = None
+            self.monthly_evolver = None
+            logger.warning("⚠️ ANTHROPIC_API_KEY not set — Weekly Strategist & Monthly Evolver disabled")
 
         # Initialize G4
         # Backtest mode: Disable Sheets by default (use LocalDB instead)
@@ -385,20 +441,29 @@ class TraiderMainLoop:
         self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override)
         logger.info(f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id={self.sheets_logger.sheets_id[:20]}..." if self.sheets_logger.sheets_id else f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id=None")
 
-        # Initialize LocalDB for backtest (avoid Sheets API rate limits)
+        # Initialize LocalDB:
+        #   - Backtest: scratch DB that gets cleared per run
+        #   - SIM/LIVE under api_server: persistent DB that survives launcher restarts
+        # Separate paths so a backtest doesn't wipe live bot history.
         if self.is_backtest:
             from utils.local_db import LocalDB
-            self.local_db = LocalDB()
+            self.local_db = LocalDB(db_path='traider_backtest.db')
             self.local_db.clear_trades()
-            # Enable batch mode to queue Sheets writes until end
             if self.sheets_logger.enabled:
                 self.sheets_logger.set_batch_mode(True)
             logger.info("✓ Backtest mode: LocalDB + Sheets batch mode")
+        elif _BOT_ID:
+            from utils.local_db import LocalDB
+            self.local_db = LocalDB(db_path='traider_sim.db')
+            # bot_state restore happens after portfolio_state_cache is initialized.
         else:
             self.local_db = None
 
-        self.position_monitor = PositionMonitor(sheets_logger=self.sheets_logger)
-        logger.info("✓ Position Monitor initialized")
+        self.position_monitor = PositionMonitor(
+            sheets_logger=self.sheets_logger,
+            is_backtest=self.is_backtest,
+        )
+        logger.info(f"✓ Position Monitor initialized (is_backtest={self.is_backtest})")
 
         # Set references for API server
         from api_server import set_sheets_logger, set_position_monitor, set_connector
@@ -412,6 +477,27 @@ class TraiderMainLoop:
         # Initialize Broker (Paper/Micro/Live)
         self.broker = create_broker(self.trading_mode, self.symbol)
 
+        # Pre-fetch cache — background thread keeps candle data warm so run_once()
+        # Step 1 doesn't pay the 2-8s network wait inside the critical path.
+        # Skipped in backtest (uses historical data passed via run_once kwargs).
+        self._candles_cache: Dict = {}
+        self._cache_lock = threading.Lock()
+        self._cache_ready = threading.Event()
+        # Wall-clock of the last successful prefetch. run_once consults this
+        # at the bar boundary — if the cache is older than CACHE_FRESH_SECS,
+        # it forces a synchronous fetch instead of trusting stale data. The
+        # prefetch worker fires every 10s on its own phase, so without this
+        # guard a run_once that wakes 2s after bar close could read a cache
+        # snapshot from 7-8s before close → the "just-closed" bar is missing,
+        # mother shifts back 1 candle, and the bot misses the setup.
+        self._cache_updated_at: float = 0.0
+        if not self.is_backtest:
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_worker, daemon=True, name="PrefetchWorker"
+            )
+            self._prefetch_thread.start()
+            logger.info("✓ Pre-fetch background thread started")
+
         # Weekly/Monthly/Daily state tracking
         self.last_weekly_date = None
         self.last_monthly_date = None
@@ -421,6 +507,14 @@ class TraiderMainLoop:
 
         # Mountain state tracking (for Round 2 detection)
         self.mountain_state = None  # Will be updated by Signal Engine
+        # Notebook v4.2 stateful Scanner — segment tracking + stop_segments.
+        # Loaded from bot_state_snapshots.state_json on startup; persisted on
+        # each plan_closed event so a launcher restart preserves it.
+        self.scanner_state: Optional[dict] = None
+        # MaiRuay v2 state — carries r1_info after a SL so signal_engine can
+        # retry R2 within 16 bars. Persisted on plan_closed; cleared on R2 fire
+        # or after 16 bars expire (handled inside signal_engine).
+        self.mai_ruay_state: Optional[dict] = None
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -435,9 +529,59 @@ class TraiderMainLoop:
         }
 
         # Initialize portfolio state cache (for backtest mode duplicate prevention)
+        # Seed from LocalDB if a previous run for this bot_id was persisted, so
+        # guardian counters (consecutive_loss, total_loss_pct) survive restarts.
+        # Scanner stop_segments are also restored — without this, a LOSS in a
+        # downtrend segment was forgotten across launcher restart (WU reboot,
+        # crash, etc.) and the bot would re-enter the same losing segment.
         self.portfolio_state_cache = {}
+        if self.local_db and _BOT_ID:
+            saved = self.local_db.get_bot_state(_BOT_ID)
+            if saved:
+                self.portfolio_state_cache.update({
+                    'consecutive_loss': saved.get('consecutive_loss', 0),
+                    'total_loss_pct':   saved.get('total_loss_pct', 0),
+                    'realized_pnl_usd': saved.get('realized_pnl_usd', 0),
+                })
+                extras = saved.get('extras') or {}
+                saved_scanner = extras.get('scanner_state')
+                if saved_scanner:
+                    self.scanner_state = saved_scanner
+                    n_up   = len(saved_scanner.get('stopped_up_segments')   or [])
+                    n_down = len(saved_scanner.get('stopped_down_segments') or [])
+                    logger.info(
+                        f"✓ Scanner state restored: "
+                        f"up_seg={saved_scanner.get('up_segment_id')}, "
+                        f"down_seg={saved_scanner.get('down_segment_id')}, "
+                        f"stopped(up={n_up}, down={n_down})"
+                    )
+                logger.info(
+                    f"✓ Bot state restored from LocalDB for {_BOT_ID}: "
+                    f"consec_loss={saved.get('consecutive_loss', 0)}, "
+                    f"realized_pnl=${saved.get('realized_pnl_usd', 0):.2f}"
+                )
 
         logger.info("✓ All agents initialized")
+
+    def _record_scanner_loss_segment(self, closed_trade: dict) -> None:
+        """If a closed Scanner trade is a LOSS, add its segment_id to the
+        scanner-state stop list (UP or DOWN bucket based on action). The next
+        cycle will refuse to fire a new Scanner signal in that same segment."""
+        seg = closed_trade.get('scanner_segment_id')
+        if not seg or closed_trade.get('result') != 'LOSS' or self.scanner_state is None:
+            return
+        action = str(closed_trade.get('action', '')).upper()
+        if action == 'BUY':
+            bucket = self.scanner_state.setdefault('stopped_up_segments', [])
+            direction = 'UP'
+        elif action == 'SELL':
+            bucket = self.scanner_state.setdefault('stopped_down_segments', [])
+            direction = 'DOWN'
+        else:
+            return
+        if seg not in bucket:
+            bucket.append(seg)
+            logger.info(f"Scanner: marked {direction} segment {seg} STOPPED after LOSS")
 
     def run_once(self, candle_time=None, candles_by_tf=None, current_candle=None):
         """
@@ -465,8 +609,58 @@ class TraiderMainLoop:
         logger.info("\n[STEP 0] Monitoring positions...")
         closed = None  # Initialize before if-else block
         if current_candle:
+            # In live/sim: ask MT5 first (authoritative for fill/expire), then
+            # let position_monitor handle in-memory SL/TP tracking. Unfilled
+            # LIMITs in open_orders are NOT fill-simulated in live mode
+            # (see PositionMonitor.is_backtest gate) — so MT5's view is the
+            # only source of truth for whether a LIMIT actually filled.
+            # Backtest skips this — PaperBroker has no real order book and
+            # check_and_update simulates fills from candle range.
+            if not self.is_backtest:
+                try:
+                    self.monitor_positions(current_candle=current_candle)
+                except Exception as e:
+                    logger.error(f"Live broker monitor failed (continuing): {e}")
             # check_and_update() expects candle dict (not separate params)
             closed = self.position_monitor.check_and_update(candle=current_candle)
+            # ── MaiRuay v2 R2 arm — group closed trades by plan_id; if any plan
+            # closed with negative P&L AND has r1_capture, arm r1_info so the
+            # next signal_engine cycle retries as ไม้แก้ within 16 bars.
+            if closed:
+                from collections import defaultdict as _dd
+                _by_plan = _dd(list)
+                for _t in closed:
+                    _by_plan[_t.get('plan_id', '')].append(_t)
+                for _plan_id, _plan_trades in _by_plan.items():
+                    # Only consider fully-closed plans (all trades filled with WIN/LOSS).
+                    # If a multi-entry plan has pending limits left, skip — wait for next cycle.
+                    if not all(_t.get('result') in ('WIN', 'LOSS') for _t in _plan_trades):
+                        continue
+                    _plan_pnl = sum((_t.get('pnl_usd') or _t.get('pnl') or 0) for _t in _plan_trades)
+                    _r1_cap = next((_t.get('r1_capture') for _t in _plan_trades if _t.get('r1_capture')), None)
+                    if _plan_pnl < 0 and _r1_cap:
+                        self.mai_ruay_state = {'r1_info': _r1_cap}
+                        logger.info(
+                            f"[{_plan_id}] MaiRuay v2 R1 SL — armed r1_info "
+                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']}, pnl=${_plan_pnl:.2f})"
+                        )
+                    elif _plan_pnl > 0 and self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
+                        # WIN clears any pending R2 — no ไม้แก้ after a TP win.
+                        self.mai_ruay_state = {}
+            # MaiRuay v2 cancel-near-TP → cancel the MT5 pending order so the
+            # broker matches our in-memory CANCELLED state. Backtest skips
+            # this (PaperBroker has no native pending state to clean up).
+            if closed and self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket'):
+                for _t in closed:
+                    if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED')
+                            and _t.get('broker_ticket')
+                            and (_t.get('pattern') or '').upper() in ('MAI_RUAY', 'MAI_RUAY_M1')):
+                        try:
+                            self.broker.cancel_pending_by_ticket(int(_t['broker_ticket']))
+                        except Exception as e:
+                            logger.warning(
+                                f"[{_t.get('trade_id')}] cancel_pending_by_ticket failed: {e}"
+                            )
             if closed:
                 for t in closed:
                     logger.info(
@@ -475,16 +669,58 @@ class TraiderMainLoop:
                         f"reason={t.get('close_reason')} @ {t.get('close_price')}"
                     )
 
-                    # Update LocalDB (backtest mode)
-                    if self.is_backtest and self.local_db:
+                    post_bot_event("plan_closed", f"{t['result']} {t.get('close_reason', '')}", {
+                        "plan_id": t.get('plan_id', ''),
+                        "trade_id": t.get('trade_id', ''),
+                        "action": t.get('action', ''),
+                        "result": t.get('result', ''),
+                        "close_reason": t.get('close_reason', ''),
+                        "close_price": t.get('close_price', 0),
+                        "pnl": t.get('pnl_usd', t.get('pnl', 0)),
+                        # api_server replaces the open_orders dict with this
+                        # event.data verbatim when moving to closed_orders, so
+                        # the Dashboard Positions panel needs entry/SL/TP/lot
+                        # here too — otherwise those columns go blank.
+                        "entry": t.get('entry_price', t.get('entry', 0)),
+                        "sl":    t.get('sl_price', t.get('sl', 0)),
+                        "tp":    t.get('tp_price', t.get('tp', 0)),
+                        "lot":   t.get('lot_size', t.get('lot', 0)),
+                        "pattern": (t.get('pattern') or t.get('chart_type') or '').upper(),
+                        "close_time": str(t.get('timestamp_close', '') or t.get('close_time', '')),
+                        "open_time": str(t.get('timestamp_open', '') or ''),
+                    })
+
+                    # Update LocalDB whenever it's available (backtest always; SIM/LIVE
+                    # only when running under api_server with a bot_id).
+                    if self.local_db:
                         self.local_db.update_trade_result(
                             trade_id=t['trade_id'],
                             result=t['result'],
                             pnl=t.get('pnl_usd', t.get('pnl', 0)),
                             close_price=t.get('close_price', 0),
                             close_time=t.get('timestamp_close', candle_time),
-                            close_reason=t.get('close_reason', '')
+                            close_reason=t.get('close_reason', ''),
+                            mae_pip=t.get('mae_pip'),
+                            mfe_pip=t.get('mfe_pip'),
                         )
+
+                    # Notebook v4.2 stop_segments: on LOSS of a Scanner trade,
+                    # mark its segment so the detector blocks new entries in
+                    # that same trend segment until the trend resets.
+                    self._record_scanner_loss_segment(t)
+                    # Persist bot counters so a launcher restart doesn't reset
+                    # consecutive_loss / realized_pnl mid-session. Scanner state
+                    # (segment ids + stopped sets) goes into `extras` so the
+                    # stop_segments survives restart — otherwise a LOSS-stopped
+                    # downtrend would re-arm on reboot.
+                    if self.local_db and _BOT_ID:
+                        self.local_db.upsert_bot_state(_BOT_ID, {
+                            'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
+                            'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                            'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                            'last_candle_time': str(candle_time) if candle_time else None,
+                            'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
+                        })
         else:
             # Fallback to old monitor_positions for simulate mode
             self.monitor_positions(current_candle=current_candle)
@@ -553,6 +789,31 @@ class TraiderMainLoop:
             portfolio_state = self.sheets_logger.get_portfolio_state()
             logger.debug(f"Simulate mode: reloaded from Sheets")
 
+            # Per-pattern slot housekeeping for LIVE — Sheets doesn't store
+            # active_plans_by_pattern, so we have to maintain it from cache.
+            # Same logic as the backtest branch above: any slot whose plan_id
+            # has no PENDING orders in position_monitor anymore gets cleared.
+            # Without this, a SL_HIT on yesterday's MAI_RUAY would clear
+            # active_plan_id but leave the per-pattern slot pinned; the
+            # defensive check at execute then ABORTs today's MAI_RUAY signal
+            # with "already has active plan {yesterday's plan_id}" — exactly
+            # the case the user reported at 11:24:47 on 2026-05-15.
+            portfolio_state['active_plans_by_pattern'] = dict(
+                self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+            )
+            _open_pat = {(o.get('pattern') or o.get('chart_type') or '').upper()
+                         for o in self.position_monitor.get_open_orders()}
+            _open_pat.discard('')
+            _cleaned_pat = {
+                pat: pid for pat, pid in portfolio_state['active_plans_by_pattern'].items()
+                if pat in _open_pat
+            }
+            if len(_cleaned_pat) != len(portfolio_state['active_plans_by_pattern']):
+                _cleared = set(portfolio_state['active_plans_by_pattern']) - set(_cleaned_pat)
+                logger.info(f"LIVE per-pattern cache cleanup — cleared: {sorted(_cleared)}")
+            portfolio_state['active_plans_by_pattern'] = _cleaned_pat
+            self.portfolio_state_cache['active_plans_by_pattern'] = dict(_cleaned_pat)
+
         # Debug: Log portfolio state for Guardian checks
         logger.info(f"Portfolio state: active_plan={portfolio_state.get('active_plan_id', '')}, "
                     f"last_tech_price={portfolio_state.get('last_technical_price', 0):.2f}")
@@ -564,7 +825,7 @@ class TraiderMainLoop:
         # Daily reflection skipped in Phase II
 
         # Weekly Strategist — รันทุก 7 วัน (analysis only)
-        if should_run_weekly(self.last_weekly_date, current_date):
+        if self.weekly_strategist and should_run_weekly(self.last_weekly_date, current_date):
             logger.info("\n[Agent C] Running Weekly Strategist...")
             history = self.sheets_logger.get_recent_trades(limit=100) if self.sheets_logger.enabled else []
             stats = aggregate_weekly_stats(history)
@@ -579,7 +840,7 @@ class TraiderMainLoop:
             self.last_weekly_date = current_date
 
         # Monthly Evolver (Agent D) — รันทุก 30 วัน
-        if should_run_monthly(self.last_monthly_date, current_date):
+        if self.monthly_evolver and should_run_monthly(self.last_monthly_date, current_date):
             logger.info("\n[Agent D] Running Monthly Evolver...")
             history = self.sheets_logger.get_recent_trades(limit=200) if self.sheets_logger.enabled else []
             stats = aggregate_monthly_stats(history)
@@ -594,8 +855,41 @@ class TraiderMainLoop:
 
         # Step 1: Fetch data
         if candles_by_tf is None:
-            logger.info("\n[STEP 1] Fetching market data...")
-            candles_by_tf = self._fetch_data_all_tf()
+            # Live/sim path: prefer the warm cache from _prefetch_worker so we
+            # don't pay 2-8s of network latency inside the critical path —
+            # BUT only when the cache is fresh. The prefetch fires every 10s
+            # on its own phase; at the bar boundary that phase can lag by
+            # 5-8s, which makes the cache's "last bar" the previous bar
+            # forming (not the bar that just closed). Reading stale cache in
+            # the new flat-synth design shifts mother back 1 candle and the
+            # bot misses the setup. Force a fresh fetch if cache is too old.
+            _CACHE_FRESH_SECS = 3.0
+            if not self.is_backtest and self._cache_ready.is_set():
+                with self._cache_lock:
+                    _cache_age = time.time() - self._cache_updated_at
+                if _cache_age <= _CACHE_FRESH_SECS:
+                    with self._cache_lock:
+                        candles_by_tf = dict(self._candles_cache)
+                    logger.info(
+                        f"\n[STEP 1] Using pre-fetched cache "
+                        f"(age={_cache_age:.1f}s, fresh)"
+                    )
+                else:
+                    logger.info(
+                        f"\n[STEP 1] Cache stale (age={_cache_age:.1f}s "
+                        f"> {_CACHE_FRESH_SECS}s) — forcing fresh fetch..."
+                    )
+                    candles_by_tf = self._fetch_data_all_tf()
+                    if candles_by_tf:
+                        with self._cache_lock:
+                            self._candles_cache = candles_by_tf
+                            self._cache_updated_at = time.time()
+                for tf in TIMEFRAMES:
+                    if tf in candles_by_tf and candles_by_tf[tf]:
+                        logger.info(f"✓ {tf}: {len(candles_by_tf[tf])} candles")
+            else:
+                logger.info("\n[STEP 1] Fetching market data (cache not ready yet)...")
+                candles_by_tf = self._fetch_data_all_tf()
         else:
             logger.info("\n[STEP 1] Fetching market data...")
             # Log pre-fetched data from backtest
@@ -639,11 +933,17 @@ class TraiderMainLoop:
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
             portfolio=self.balance,
-            mountain_state=self.mountain_state
+            mountain_state=self.mountain_state,
+            scanner_state=self.scanner_state,
+            mai_ruay_state=self.mai_ruay_state,
         )
 
-        # Update mountain_state from Signal Engine output
+        # Update state from Signal Engine output (mutated in place by detectors)
         self.mountain_state = world_state.get('mountain_state')
+        self.scanner_state = world_state.get('scanner_state')
+        # MaiRuay v2 r1_info — signal_engine drops it after R2 fires (no R3) or
+        # after 16 bars expire; we mirror the latest value here for next cycle.
+        self.mai_ruay_state = world_state.get('mai_ruay_state') or {}
 
         # Update latest_candle for dashboard chart
         if current_candle and candle_time:
@@ -660,111 +960,129 @@ class TraiderMainLoop:
             except Exception as e:
                 logger.debug(f"Failed to update latest_candle: {e}")
 
-        if world_state.get('chart_type') == 'unclear':
+        # ── Tier 1 heartbeat: per-cycle snapshot for Dashboard ────────
+        # Posted EVERY cycle (including "Chart unclear" skips) so the UI knows
+        # the bot is alive and processing. Lives in bots[id]['heartbeat'] —
+        # not in the events panel.
+        signal_obj = world_state.get('signal')
+        chart_type_hb = world_state.get('chart_type', 'unclear')
+        post_bot_heartbeat({
+            "tf": active_tf,
+            "candle_time": candle_time.isoformat() if candle_time else None,
+            "candle_close": current_candle.get("close") if current_candle else None,
+            "candle_high": current_candle.get("high") if current_candle else None,
+            "candle_low": current_candle.get("low") if current_candle else None,
+            "R55_usd": world_state.get('range', {}).get('usd'),
+            "R55_pip": world_state.get('range', {}).get('pip'),
+            "session": world_state.get('session'),
+            "chart_type": chart_type_hb,
+            "skip_reason": world_state.get('skip_reason'),
+            # Tier 2: per-strategy SKIP reasons (only present when that
+            # strategy ran and didn't fire a signal). Empty dict = a signal
+            # fired (or no strategy was active for this TF).
+            "skip_reasons": world_state.get('skip_reasons', {}),
+            "signal_pattern": signal_obj.pattern if signal_obj else None,
+            "signal_direction": signal_obj.direction if signal_obj else None,
+            "signal_rr": round(signal_obj.rr, 2) if signal_obj else None,
+            "active_plan": (portfolio_state or {}).get('active_plan_id'),
+            "balance": self.balance,
+        })
+
+        if chart_type_hb == 'unclear':
             skip_reason = world_state.get('skip_reason', 'Chart unclear')
             logger.info(f"❌ SKIP: {skip_reason}")
+            # Heartbeat above carries the skip_reason — no event needed here.
             return
 
-        signal = world_state.get('signal')
+        signal = signal_obj
         if signal:
-            logger.info(f"✓ Signal Engine: {signal.pattern} {signal.direction} → Entry={signal.entry:.2f}, "
+            logger.info(f"✓ Signal Engine (proposed): {signal.pattern} {signal.direction} → Entry={signal.entry:.2f}, "
                         f"SL={signal.sl:.2f}, TP={signal.tp_order:.2f}, R:R={signal.rr:.2f}, Lot={signal.lot}")
+            post_bot_event("signal_detected", f"{signal.pattern} {signal.direction}", {
+                "pattern": signal.pattern, "direction": signal.direction,
+                "entry": signal.entry, "sl": signal.sl, "tp": signal.tp_order,
+                "rr": signal.rr, "lot": signal.lot,
+            })
         else:
-            logger.info(f"✓ Signal Engine: {world_state.get('chart_type')} (quality={world_state.get('quality', 0):.2f}) — No trade signal")
+            chart_type = world_state.get('chart_type')
+            logger.info(f"✓ Signal Engine: {chart_type} (quality={world_state.get('quality', 0):.2f}) — No trade signal")
+            # Same rationale — "no setup" is the steady state, not a notification.
 
         # Step 3: G2 Pre-filter
         logger.info("\n[STEP 3] G2 Pre-filter...")
+        # MaiRuay v2 spec (notebook run_backtest:929): an unfilled LIMIT still
+        # occupies the 1-plan slot for its pattern — block new signals of the
+        # same pattern until those LIMITs fill or cancel. position_monitor is
+        # the single source of truth for pending state.
+        try:
+            _pending = self.position_monitor.get_pending_limits()
+        except Exception:
+            _pending = []
+        if _pending:
+            _pending_by_pat: dict = {}
+            for _p in _pending:
+                _ppat = (_p.get('pattern') or '').upper()
+                if _ppat:
+                    _pending_by_pat[_ppat] = _pending_by_pat.get(_ppat, 0) + 1
+            portfolio_state['pending_limits_by_pattern'] = _pending_by_pat
         # Note: portfolio_state already reloaded after Step 0
         prefilter_result = self.g2.check(world_state, portfolio_state)
 
         if not prefilter_result['pre_approved']:
             logger.info(f"❌ SKIP: {prefilter_result['skip_reason']}")
+            post_bot_event("signal_skipped", prefilter_result['skip_reason'], {"stage": "g2_prefilter", "reason": prefilter_result['skip_reason']})
             update_session_stats(self.session_stats, None, g2_blocked=True)
             return
 
         logger.info("✓ G2: Pre-filter PASSED")
 
-        # Step 3a: Decision — Phase II AUTO_APPROVE (no Claude in backtest)
-        logger.info("\n[STEP 3a] Decision...")
+        # Step 3a: Decision — AUTO_APPROVE (Signal Engine is authoritative)
+        # Phase II: no Claude per trade. Signal Engine output is taken as-is and
+        # only re-checked by G3c Guardian (Python rules) below.
+        logger.info("\n[STEP 3a] Decision: AUTO_APPROVE (no AI call)")
 
-        # Phase II: Use Signal Engine decision directly (already in world_state)
         signal = world_state.get('signal')
         if not signal:
             logger.error("❌ No signal from Signal Engine")
             return
 
-        # Convert signal to decision format (for compatibility with existing code)
+        # Decision dict kept for compatibility with downstream Sheets/LocalDB writers.
         decision = {
-            'action': signal.direction,  # Signal has 'direction' not 'action'
+            'action': signal.direction,
             'entry': signal.entry,
             'sl': signal.sl,
-            'tp': signal.tp_order,  # Signal has 'tp_order' not 'tp'
+            'tp': signal.tp_order,
             'lot': signal.lot,
             'rr_ratio': signal.rr,
             'confidence': 1.0,  # Signal Engine is deterministic
             'setup': signal.pattern.lower() if hasattr(signal, 'pattern') else 'unknown',
-            'skip_reason': None
+            'skip_reason': None,
+            # MaiRuay v2 R2 flag — G3 uses this to bypass consecutive_loss limit
+            # so the ไม้แก้ retry can fire within 16 bars of the R1 SL.
+            'is_round2': bool(getattr(signal, 'is_round2', False)),
         }
 
-        # Phase II: No Claude call in backtest → $0 cost
+        # llm_log kept for Sheets/LocalDB schema compatibility — always $0/no tokens.
         llm_log = {
-            'action': 'BACKTEST_AUTO_APPROVE',
+            'action': 'AUTO_APPROVE',
             'total_tokens': 0,
             'cost_usd': 0.0,
             'cache_hit': False
         }
 
-        logger.info(f"✓ Signal Engine: {decision['action']} @ {decision['entry']:.2f} "
-                    f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f})")
+        logger.info(f"✓ Signal Engine (proposed): {decision['action']} @ {decision['entry']:.2f} "
+                    f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f}) "
+                    f"— actual fill price + spread-adjusted SL/TP logged after broker confirms")
 
-        # Step 3b: Agent B — Risk Manager
-        logger.info("\n[STEP 3b] Agent B — Risk Manager...")
-
-        # Agent B: Backtest bypass (deterministic), Simulate/Live call Haiku
-        if self.is_backtest:
-            # Backtest: ใช้ lot จาก Signal Engine โดยตรง
-            signal = world_state.get('signal')
-            lot = signal.lot if signal and hasattr(signal, 'lot') else 0.01
-            # Winrate test override
-            if os.getenv('WINRATE_TEST', 'false').lower() == 'true':
-                lot = 0.01
-            risk_result = {
-                'approved': True,
-                'lot': lot,
-                'reason': 'backtest_auto_approve',
-                'adjusted': False,
-                'llm_log': {'action': 'BACKTEST_SKIP', 'cost_usd': 0}
-            }
-            logger.info(f"✓ Agent B: BACKTEST mode → lot={lot:.2f} (no API call)")
-        else:
-            # Simulate/Live: Build risk context and call Haiku
-            from agents.g3_claude_decision import build_risk_context
-
-            risk_context = build_risk_context(
-                decision=decision,
-                balance=self.balance,
-                portfolio_state=portfolio_state,
-                weekly_stats=self.weekly_stats
-            )
-
-            logger.info(f"  Risk Context: base_lot={risk_context['base_lot']:.2f}, "
-                        f"consecutive_loss={risk_context['consecutive_loss']}, "
-                        f"weekly_wr={risk_context['weekly_winrate']:.1%}")
-
-            risk_result = self.risk_manager.approve(
-                decision=decision,
-                risk_context=risk_context
-            )
-
-            if not risk_result['approved']:
-                logger.warning(f"❌ Agent B REJECTED: {risk_result['reason']}")
-                return
-
-        lot = risk_result['lot']
-        adjusted = risk_result.get('adjusted', False)
-
-        logger.info(f"✓ Agent B: Approved lot={lot:.2f} "
-                    f"{'(adjusted)' if adjusted else ''}")
+        # Step 3b: Lot sizing — Signal Engine is authoritative (no AI per trade).
+        # Same path for BACKTEST / SIM / LIVE: take signal.lot, override to 0.01
+        # only when WINRATE_TEST=true. Risk Manager (Haiku) was removed —
+        # criteria are fully captured in the Python strategies.
+        signal = world_state.get('signal')
+        lot = signal.lot if signal and hasattr(signal, 'lot') else 0.01
+        if os.getenv('WINRATE_TEST', 'false').lower() == 'true':
+            lot = 0.01
+        logger.info(f"\n[STEP 3b] Lot from Signal Engine: {lot:.2f} (no AI call)")
 
         # Step 3c: Guardian Check (legacy — final safety check)
         logger.info("\n[STEP 3c] Guardian Risk Gate...")
@@ -795,27 +1113,67 @@ class TraiderMainLoop:
             sl_distance_pip = abs(decision['entry'] - decision['sl']) * 100
             max_loss_usd = (sl_distance_pip / 100.0) * lot
 
-        # Create order (1 order per plan)
-        order = {
-            'order_num': 1,
-            'order_type': 'MARKET',
-            'action': decision['action'],
-            'entry': decision['entry'],
-            'sl': decision['sl'],
-            'tp': decision['tp'],
-            'lot': lot,
-            'rr_ratio': decision.get('rr_ratio', 0)
-        }
+        # Order type: read from signal.details when the strategy specifies it
+        # (MAI_RUAY sets 'MARKET' for แม่ 4-10% and 'LIMIT' for 10-30%).
+        # Mountain doesn't set it → falls through to broker auto-detect (legacy
+        # zone-retest LIMIT behavior). Logged on the order dict for audit.
+        sig_details = getattr(signal, 'details', None) or {}
+        sig_order_type = sig_details.get('order_type', 'MARKET')
 
-        plan = {
-            'lot_total': lot,
-            'total_orders': 1,
-            'max_loss_usd': max_loss_usd,
-            'orders': [order]
-        }
-
-        logger.info(f"✓ Order created: {order['action']} @ {order['entry']:.2f}, "
-                    f"lot={lot:.2f}, R:R={order['rr_ratio']:.2f}")
+        # ── Multi-entry vs single-entry ──────────────────────────────────
+        # MaiRuay v2 produces signal.entries = [3 EntryPoint objects], each
+        # with its own price/lot/is_market/tp. Mountain + Scanner + MaiRuay v1
+        # produce signal.entries = None → single order path (1 plan = 1 order).
+        sig_entries = getattr(signal, 'entries', None)
+        if sig_entries:
+            orders_list = []
+            for _ix, ep in enumerate(sig_entries):
+                # Per-entry SL/TP override the plan-level decision.sl/decision.tp
+                _ep_lot = ep.lot if ep.lot and ep.lot > 0 else 0.01  # broker requires >0
+                _ep_rr = (abs(ep.tp - ep.price) / abs(ep.price - ep.sl)) if abs(ep.price - ep.sl) > 0 else 0.0
+                orders_list.append({
+                    'order_num': _ix + 1,
+                    'order_type': 'MARKET' if ep.is_market else 'LIMIT',
+                    'action': decision['action'],
+                    'entry': ep.price,
+                    'sl': ep.sl,
+                    'tp': ep.tp,
+                    'lot': _ep_lot,
+                    'rr_ratio': _ep_rr,
+                    'entry_label': ep.label,
+                })
+            plan = {
+                'lot_total': lot,
+                'total_orders': len(orders_list),
+                'max_loss_usd': max_loss_usd,
+                'orders': orders_list,
+            }
+            logger.info(f"✓ Multi-entry plan: {len(orders_list)} orders @ {decision['action']}, total_lot={lot:.2f}")
+            for o in orders_list:
+                logger.info(
+                    f"   - #{o['order_num']} {o['order_type']:6} E={o['entry']:.2f} "
+                    f"TP={o['tp']:.2f} SL={o['sl']:.2f} lot={o['lot']} RR={o['rr_ratio']:.2f}"
+                )
+        else:
+            # Single-entry (Mountain / Scanner / MaiRuay v1)
+            order = {
+                'order_num': 1,
+                'order_type': sig_order_type,
+                'action': decision['action'],
+                'entry': decision['entry'],
+                'sl': decision['sl'],
+                'tp': decision['tp'],
+                'lot': lot,
+                'rr_ratio': decision.get('rr_ratio', 0),
+            }
+            plan = {
+                'lot_total': lot,
+                'total_orders': 1,
+                'max_loss_usd': max_loss_usd,
+                'orders': [order],
+            }
+            logger.info(f"✓ Order created: {order['action']} @ {order['entry']:.2f}, "
+                        f"lot={lot:.2f}, R:R={order['rr_ratio']:.2f}")
 
         # Determine mode for plan/trade ID prefix
         # PT- backtest | SM- simulate (paper broker, real-time data) | RT- live (real orders)
@@ -825,6 +1183,32 @@ class TraiderMainLoop:
             id_mode = 'backtest'
         else:
             id_mode = 'simulate'
+
+        # MaiRuay v2 live mode uses a synthetic child bar so the engine
+        # detects the pattern at "mother close = child start" instead of
+        # waiting another full bar. signal_engine stamps the synthetic
+        # candle's timestamp on signal.details when it does this. Without
+        # the override below, candle_time would still be the LAST REAL bar's
+        # timestamp (= mother START), making timestamp_open shift back 1
+        # bar in the dashboard ("เข้าไปเปิดแท่งแม่"). Override to the
+        # synthetic time = child start = mother close moment.
+        _sig_for_synth = world_state.get('signal') if world_state else None
+        _synth_ct = None
+        if _sig_for_synth is not None:
+            _det = getattr(_sig_for_synth, 'details', None) or {}
+            _synth_ct = _det.get('synthetic_candle_time')
+        if _synth_ct:
+            try:
+                from dateutil import parser as _dtp_main
+                _orig_ct = candle_time
+                candle_time = _dtp_main.parse(str(_synth_ct))
+                logger.info(
+                    f"  ↳ MaiRuay synthetic candle_time override: "
+                    f"{_orig_ct} → {candle_time}"
+                )
+            except Exception as _e:
+                logger.warning(f"  ↳ synthetic candle_time parse failed ({_e}); keeping original")
+
         plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
 
         # Mountain trailing metadata — attach signal.details to orders for 3-stage trailing
@@ -834,6 +1218,23 @@ class TraiderMainLoop:
 
         # Generate trade IDs for each order and set initial state
         orders_with_ids = []
+        # Pre-compute the open timestamp once. We store the SAME value the
+        # DB row gets (candle_time.isoformat() or now()) so that when the
+        # plan_closed event fires later and reads `order['timestamp_open']`,
+        # it matches what's in the DB row and the Dashboard "Open Time"
+        # column populates. Previously this field was only set on the DB
+        # row at insert_trade(...) below — but the in-memory order dict
+        # (which is what gets shoved into position_monitor.open_orders
+        # AND what plan_closed reads) never got it, so CANCELLED close
+        # events from reconcile_pending shipped with open_time='' and the
+        # Dashboard rendered "—" in the Open Time column. The user reported
+        # this regression multiple times — root cause was the missing
+        # attachment here, NOT in the close path.
+        _open_ts_iso = (
+            candle_time.isoformat()
+            if hasattr(candle_time, 'isoformat')
+            else (str(candle_time) if candle_time else datetime.now().isoformat())
+        )
         for order in plan['orders']:
             order['trade_id'] = generate_trade_id(plan_id, order['order_num'], candle_time=candle_time, mode=id_mode)
             order['plan_id'] = plan_id  # Required for portfolio state updates
@@ -842,6 +1243,62 @@ class TraiderMainLoop:
             order['sl_price'] = order['sl']
             order['tp_price'] = order['tp']
             order['lot_size'] = order['lot']
+            # Stamp the open time on the in-memory order. Both key names are
+            # set so any downstream consumer (plan_closed event, position
+            # monitor, reconcile recovery) finds it without guessing.
+            order['timestamp_open'] = _open_ts_iso
+            order['open_time'] = _open_ts_iso
+            # Attach pattern so the per-pattern-slot cleanup at line 647-661 can
+            # tell which slot this order keeps occupied. Previously this field
+            # was absent → cleanup wiped active_plans_by_pattern every cycle →
+            # next signal trivially passed G2/G3 → double-trade. This is the
+            # root cause of the user's "เบิ้ลไม้" report.
+            order['pattern'] = (getattr(signal, 'pattern', '') or '').upper()
+            # MaiRuay v2 multi-entry: ONLY MaiRuay LIMITs use the position_monitor
+            # fill/cancel/expire pipeline. Mountain LIMITs (zone-retest) fill at
+            # entry via the broker side and skip this gate — `filled` defaults
+            # to True (not set), so SL/TP check runs as usual.
+            #
+            # Notebook same-bar fill (run_backtest:972-979): when the child
+            # bar's low/high already touched the LIMIT entry price the moment
+            # we generate the signal, the order fills on THAT bar (no waiting).
+            # Without this check, every LIMIT goes into pending state for ≥1
+            # extra bar, which lets the cancel-near-TP filter trip before the
+            # fill — diverging from notebook trade-for-trade.
+            if (order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1')
+                    and order.get('order_type', '').upper() == 'LIMIT'):
+                _sig_details_for_order = getattr(signal, 'details', None) or {}
+                # Backtest: current_candle = the closed "child" bar, we have
+                # its full high/low.
+                # Live: current_candle is the FORMING bar from data_connector
+                # pos=0. Its .close is intra-bar transient (unstable). The
+                # stable reference is .open = bar's opening price (set once
+                # at bar boundary, = mother.close). This mirrors the flat
+                # synth bar that signal_engine builds for the engine: a
+                # single price point at forming.open. Using .open ensures
+                # this fill check agrees with the engine's decision.
+                if self.is_backtest:
+                    _child_low = (current_candle or {}).get('low', 0) or 0
+                    _child_high = (current_candle or {}).get('high', 0) or 0
+                else:
+                    _ref = (current_candle or {}).get('open', 0) or 0
+                    _child_low = _child_high = _ref
+                _ep = order['entry']
+                _act = order['action']
+                _filled_on_child = (
+                    (_act == 'BUY'  and _child_low  and _child_low  <= _ep) or
+                    (_act == 'SELL' and _child_high and _child_high >= _ep)
+                )
+                if _filled_on_child:
+                    order['filled'] = True
+                    logger.info(
+                        f"   - #{order['order_num']} same-bar fill on child "
+                        f"(low={_child_low:.3f} high={_child_high:.3f} vs entry={_ep:.3f})"
+                    )
+                else:
+                    order['filled'] = False
+                    order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
+                    order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
             # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
             if is_mountain:
                 d = signal.details or {}
@@ -851,6 +1308,30 @@ class TraiderMainLoop:
                     'tp2_base':   float(d.get('tp2_base') or d.get('tp2') or 0),
                     'tech_point': float(d.get('tech_point') or d.get('base_lo') or 0),
                     'height':     float(d.get('height') or 0),  # pip
+                }
+            # MaiRuay v2 R2 prep: capture the info needed to retry as ไม้แก้
+            # if THIS plan ends in LOSS. signal_engine consumes r1_info on the
+            # next cycle to call find_signal(..., round2_info=r1_info).
+            # signal.is_round2 means we're ALREADY R2 — don't capture again
+            # (no R3 allowed by notebook spec). R2 logic only applies to the
+            # M1 variant (Karpathy has no R2).
+            if (order['pattern'] == 'MAI_RUAY_M1'
+                    and not bool(getattr(signal, 'is_round2', False))):
+                d = signal.details or {}
+                _fs = d.get('father_start')
+                # bars in world_state are 0-indexed; entry_bar = bar_idx (= last bar = mother_idx + 1)
+                # Use len(candles)-1 as bar_idx since signal was just produced at last bar.
+                _last_idx = len(candles_by_tf.get(active_tf, [])) - 1
+                # Pull the father's open price (R1) from the OHLC list — needed
+                # for the "father_combined" TP/SL calc in the R2 analyzer.
+                _f_open_r1 = 0.0
+                if _fs is not None and 0 <= _fs < len(candles_by_tf.get(active_tf, [])):
+                    _f_open_r1 = float(candles_by_tf[active_tf][_fs].get('open', 0.0))
+                order['r1_capture'] = {
+                    'tech':       float(d.get('tech_point', 0.0)),
+                    'f_open_r1':  _f_open_r1,
+                    'entry_bar':  _last_idx,
+                    'direction':  signal.direction,
                 }
             orders_with_ids.append(order)
 
@@ -862,14 +1343,192 @@ class TraiderMainLoop:
             else decision.get('setup', 'none')
         )
 
-        # Log to Sheets
-        self.sheets_logger.log_plan_open(plan_id, orders_with_ids, decision_for_sheets, world_state, llm_log, candle_time=candle_time)
+        # ── Defensive per-pattern slot check (last line of defense) ──
+        # G2 + G3 both check active_plans_by_pattern earlier, but if either path
+        # fails (e.g., bug in normalization, cache cleared mid-cycle, signal
+        # pattern label changed), we'd open a duplicate trade. Re-check the
+        # cache here, immediately before sending to broker, with the raw
+        # signal.pattern key — the same key the WRITE path uses below.
+        sig_pat = (getattr(signal, 'pattern', '') or '').upper() if signal else ''
+        if sig_pat:
+            _pat_map_now = self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+            _existing = _pat_map_now.get(sig_pat) or _pat_map_now.get(getattr(signal, 'pattern', ''))
+            if _existing:
+                logger.warning(
+                    f"⛔ ABORT execute: {sig_pat} already has active plan "
+                    f"{_existing} — would be a double-trade. G2/G3 should have "
+                    f"caught this earlier; check pattern-key normalization."
+                )
+                return
 
-        # Log to LocalDB (backtest mode — no rate limits)
-        if self.is_backtest and self.local_db:
+        # ── Execute via broker FIRST — never log/track an order MT5 rejected ──
+        # Previously we logged Sheets/LocalDB + added to position_monitor BEFORE
+        # the broker call, which left zombie PENDING rows when MT5 returned
+        # "Invalid stops" or similar. Those zombies kept active_plan_id pinned
+        # and blocked future Mountain/MaiRuay signals.
+        if self.broker is not None:
+            logger.info(f"\n[Broker] Executing {len(orders_with_ids)} order(s)...")
+            trail_meta = None
+            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
+                trail_meta = getattr(signal, 'details', None) or {}
+            # MaiRuay v2 LIMIT extras — broker uses these to expire / cancel
+            # pending limits per the notebook spec (5 bars, cancel within 10%R55
+            # of TP). Mountain/Scanner do not set these → broker uses defaults.
+            _sig_details = getattr(signal, 'details', None) or {}
+            _pending_bars = int(_sig_details.get('pending_bars', 5))
+            _tp_cancel_buf = float(_sig_details.get('tp_cancel_buffer_pips', 0.0))
+
+            for order in orders_with_ids:
+                _ot = order.get('order_type') or 'MARKET'
+                _open_kwargs = dict(
+                    action=order['action'],
+                    lot=order['lot'],
+                    sl=order['sl'],
+                    tp=order['tp'],
+                    plan_id=plan_id,
+                    candle_time=candle_time,
+                    trade_id=order['trade_id'],
+                    entry_price=order.get('entry'),
+                    trail_meta=trail_meta,
+                    order_type=_ot,
+                    technique=(order.get('pattern') or '').lower() or 'unknown',
+                )
+                # Only pass pending kwargs to PaperBroker (MT5 broker handles
+                # expiration server-side via order_send expiration field).
+                if _ot == 'LIMIT' and order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1'):
+                    try:
+                        _open_kwargs['pending_bars'] = _pending_bars
+                        _open_kwargs['tp_cancel_buffer_pips'] = _tp_cancel_buf
+                        ticket = self.broker.open_position(**_open_kwargs)
+                    except TypeError:
+                        # Broker doesn't accept pending_bars/tp_cancel_buffer_pips
+                        # (e.g. live MT5 broker) — retry without them.
+                        _open_kwargs.pop('pending_bars', None)
+                        _open_kwargs.pop('tp_cancel_buffer_pips', None)
+                        ticket = self.broker.open_position(**_open_kwargs)
+                else:
+                    ticket = self.broker.open_position(**_open_kwargs)
+                if ticket:
+                    order['broker_ticket'] = ticket
+                    logger.info(
+                        f"✓ Order {order['trade_id']} opened as ticket #{ticket} "
+                        f"(order_type={_ot})"
+                    )
+                    # Record MT5's actual fill price whenever the broker has
+                    # one — this catches BOTH true MARKET orders AND LIMIT
+                    # orders that MT5 fell back to MARKET (when entry_price
+                    # had already crossed bid/ask). Without this, the LocalDB
+                    # log shows the REQUESTED limit price while MT5 actually
+                    # filled at a different price — the "log != MT5" mismatch
+                    # the user observed on the chart.
+                    # True pending LIMITs (still queued in MT5) return None
+                    # here; their fill price gets picked up via the
+                    # reconcile_pending path once MT5 turns them into a
+                    # position.
+                    if hasattr(self.broker, 'get_fill_price'):
+                        fp = self.broker.get_fill_price(ticket)
+                        if fp:
+                            _req = order.get('entry')
+                            order['entry'] = fp
+                            order['entry_price'] = fp
+                            if _req and abs(fp - _req) > 0.005:
+                                logger.info(
+                                    f"  ↳ {_ot} fill_price={fp:.3f} (requested {_req:.3f}, "
+                                    f"diff={(fp - _req) * 100:+.1f}pip) → entry updated"
+                                )
+                            else:
+                                logger.info(f"  ↳ {_ot} fill_price={fp:.3f} → entry updated")
+                    # Sync SL/TP to the broker's actual values. MT5LiveBroker
+                    # adds spread_usd to engine sl/tp on SELL orders, so the
+                    # broker holds different values than signal.sl/signal.tp.
+                    # Without this sync the DB row and Sheets log show the
+                    # engine snapshot while MT5 enforces the spread-adjusted
+                    # levels — the "log != broker" mismatch the user observed.
+                    # Reads from an in-memory dict; no extra network call.
+                    if hasattr(self.broker, 'get_broker_sl_tp'):
+                        bst = self.broker.get_broker_sl_tp(ticket)
+                        if bst:
+                            _b_sl, _b_tp = bst
+                            _eng_sl = order.get('sl')
+                            _eng_tp = order.get('tp')
+                            order['sl'] = _b_sl
+                            order['sl_price'] = _b_sl
+                            order['tp'] = _b_tp
+                            order['tp_price'] = _b_tp
+                            if _eng_sl and (abs(_b_sl - _eng_sl) > 0.005
+                                            or abs(_b_tp - _eng_tp) > 0.005):
+                                logger.info(
+                                    f"  ↳ {_ot} broker sl/tp synced "
+                                    f"({_eng_sl:.3f}/{_eng_tp:.3f} → "
+                                    f"{_b_sl:.3f}/{_b_tp:.3f}, "
+                                    f"diff sl={(_b_sl - _eng_sl) * 100:+.1f}pip "
+                                    f"tp={(_b_tp - _eng_tp) * 100:+.1f}pip)"
+                                )
+                    # Single-source-of-truth log of the order EXACTLY as MT5
+                    # will execute it — entry = real fill price, SL/TP =
+                    # spread-adjusted values the broker holds. Whatever shows
+                    # up in MT5 / Dashboard / DB / Sheets matches this line.
+                    # The "(proposed)" Signal Engine log above is the engine's
+                    # snapshot before broker submission, useful for explaining
+                    # WHY the trade fired but not what's at the broker.
+                    _f_entry = order.get('entry', 0) or 0
+                    _f_sl = order.get('sl', 0) or 0
+                    _f_tp = order.get('tp', 0) or 0
+                    _rr_real = (abs(_f_tp - _f_entry) / abs(_f_entry - _f_sl)
+                                if _f_entry and _f_sl and abs(_f_entry - _f_sl) > 0
+                                else 0.0)
+                    logger.info(
+                        f"  ✅ FINAL  ticket=#{ticket} {_ot} {order['action']} "
+                        f"@ {_f_entry:.3f}  SL={_f_sl:.3f}  TP={_f_tp:.3f}  "
+                        f"R:R={_rr_real:.2f}  lot={order['lot']}"
+                    )
+                else:
+                    logger.error(f"✗ Failed to open order {order['trade_id']} — will not be tracked")
+
+            orders_with_ids = [o for o in orders_with_ids if o.get('broker_ticket')]
+            if not orders_with_ids:
+                logger.warning("All orders failed at broker — aborting plan (no Sheets/DB/monitor entries)")
+                return
+
+        # Log to Sheets (async — orders are already at the broker; don't block
+        # the cycle on the Sheets API round-trip). LocalDB + update_portfolio_state
+        # below stay sync since position_monitor + Guardian read them back.
+        if self.sheets_logger.enabled:
+            self._log_async(
+                self.sheets_logger.log_plan_open,
+                plan_id, orders_with_ids, decision_for_sheets,
+                world_state, llm_log,
+                candle_time=candle_time,
+            )
+        else:
+            self.sheets_logger.log_plan_open(
+                plan_id, orders_with_ids, decision_for_sheets,
+                world_state, llm_log, candle_time=candle_time,
+            )
+
+        # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
+        # when running under api_server with a bot_id assigned).
+        # Snapshot analytics fields at the moment we open (used by both DB
+        # insert and position_monitor attachment). R55 captures volatility;
+        # signal.details carries pattern-specific strength (Mountain height,
+        # MaiRuay father_pct, Scanner segment_id, etc.)
+        import json as _json
+        r55_at_open = (world_state.get('range') or {}).get('pip')
+        sig_details = getattr(signal, 'details', None) if signal else None
+        try:
+            details_json = _json.dumps(sig_details, default=str) if sig_details else None
+        except Exception:
+            details_json = None
+        # Scanner v4.2 segment_id — stored on each trade so the stop-on-loss
+        # filter in scanner_state knows which segment was lost. None for
+        # non-Scanner trades (Mountain / MaiRuay don't use segments).
+        scanner_seg_id = (sig_details or {}).get('segment_id') if sig_details else None
+
+        if self.local_db:
             for order in orders_with_ids:
                 self.local_db.insert_trade({
                     'trade_id': order['trade_id'],
+                    'bot_id': _BOT_ID or None,
                     'plan_id': plan_id,
                     'order_num': order.get('order_num', 1),
                     'timestamp_open': candle_time.isoformat() if candle_time else datetime.now().isoformat(),
@@ -890,36 +1549,130 @@ class TraiderMainLoop:
                     'llm_tokens': llm_log.get('total_tokens', 0),
                     'llm_cost_usd': llm_log.get('cost_usd', 0),
                     'result': 'PENDING',
-                    'trailing_sl': order['sl']
+                    'trailing_sl': order['sl'],
+                    'r55_pip_at_open': r55_at_open,
+                    'pattern_details_json': details_json,
+                    'scanner_segment_id': scanner_seg_id,
                 })
 
-        # Execute trades via broker (if paper mode)
-        if self.broker is not None:
-            logger.info(f"\n[Broker] Executing {len(orders_with_ids)} orders via PaperBroker...")
-            # Mountain trailing metadata (only Mountain BUY uses 3-stage trailing SL)
-            trail_meta = None
-            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
-                trail_meta = getattr(signal, 'details', None) or {}
+            # Post-insert reconciliation: re-query MT5 once more and UPDATE the
+            # DB row if it has drifted from broker truth. Catches three
+            # scenarios where the initial insert may have written stale values:
+            #   1. RACE — at order_send time, positions_get hadn't indexed the
+            #      ticket yet, so get_broker_sl_tp fell back to the cached
+            #      pre-normalize value while MT5 may have rounded sl/tp to the
+            #      tick size or min-stops level on its side.
+            #   2. PENDING LIMIT FILL — the initial row stored the requested
+            #      limit price; once MT5 turns it into a position the actual
+            #      fill price may differ (gap fill / partial slippage).
+            #   3. POST-SEND MOD — exceedingly rare but possible if the broker
+            #      adjusts the order between our two queries.
+            # No-op when get_fill_price/get_broker_sl_tp return the same values
+            # the initial insert already wrote (paper broker, perfect sync).
             for order in orders_with_ids:
-                ticket = self.broker.open_position(
-                    action=order['action'],
-                    lot=order['lot'],
-                    sl=order['sl'],
-                    tp=order['tp'],
-                    plan_id=plan_id,
-                    candle_time=candle_time,
-                    trade_id=order['trade_id'],
-                    entry_price=order.get('entry'),  # For backtest mode
-                    trail_meta=trail_meta,
-                )
-                if ticket:
-                    order['broker_ticket'] = ticket  # Store ticket for tracking
-                    logger.info(f"✓ Order {order['trade_id']} opened as ticket #{ticket}")
-                else:
-                    logger.error(f"✗ Failed to open order {order['trade_id']}")
+                _tk = order.get('broker_ticket')
+                if not _tk:
+                    continue
+                _new_entry = (self.broker.get_fill_price(_tk)
+                              if hasattr(self.broker, 'get_fill_price') else None)
+                _new_sltp = (self.broker.get_broker_sl_tp(_tk)
+                             if hasattr(self.broker, 'get_broker_sl_tp') else None)
+                _u_entry = _new_entry if (_new_entry and
+                                          abs(_new_entry - (order.get('entry') or 0)) > 0.005) else None
+                _u_sl, _u_tp = None, None
+                if _new_sltp:
+                    _b_sl2, _b_tp2 = _new_sltp
+                    if abs(_b_sl2 - (order.get('sl') or 0)) > 0.005:
+                        _u_sl = _b_sl2
+                    if abs(_b_tp2 - (order.get('tp') or 0)) > 0.005:
+                        _u_tp = _b_tp2
+                if _u_entry or _u_sl or _u_tp:
+                    try:
+                        self.local_db.update_trade_broker_state(
+                            order['trade_id'],
+                            entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                        )
+                        # Mirror the update onto the in-memory order so
+                        # downstream consumers (position_monitor, close-event
+                        # emitter at line ~1880) see the same broker truth.
+                        if _u_entry:
+                            order['entry'] = _u_entry
+                            order['entry_price'] = _u_entry
+                        if _u_sl:
+                            order['sl'] = _u_sl
+                            order['sl_price'] = _u_sl
+                        if _u_tp:
+                            order['tp'] = _u_tp
+                            order['tp_price'] = _u_tp
+                        # Mirror to Sheets too — log_plan_open already wrote
+                        # the (now-stale) initial values, and there's no way
+                        # to retroactively touch a row from outside. Skip in
+                        # backtest (sheets_logger is disabled there).
+                        if self.sheets_logger.enabled:
+                            self._log_async(
+                                self.sheets_logger.update_open_values,
+                                order['trade_id'],
+                                entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                            )
+                        # Re-emit plan_opened so the Dashboard's live view
+                        # rebinds to the corrected values. The Dashboard
+                        # treats this as an idempotent state push keyed by
+                        # trade_id; no duplicate row is created.
+                        post_bot_event(
+                            "plan_opened",
+                            f"{order.get('action', '?')} {order.get('lot_size', order.get('lot', 0))} lot (synced)",
+                            {
+                                "plan_id":   plan_id,
+                                "trade_id":  order.get('trade_id', ''),
+                                "action":    order.get('action', ''),
+                                "entry":     order.get('entry_price', order.get('entry', 0)),
+                                "sl":        order.get('sl_price', order.get('sl', 0)),
+                                "tp":        order.get('tp_price', order.get('tp', 0)),
+                                "lot":       order.get('lot_size', order.get('lot', 0)),
+                                "pattern":   (signal.pattern if signal else ''),
+                                "open_time": order.get('timestamp_open', '') or order.get('open_time', ''),
+                            },
+                        )
+                        logger.info(
+                            f"  ↳ DB+Sheets+Dashboard reconciled {order['trade_id']}: "
+                            + ", ".join(
+                                f"{k}={v:.3f}" for k, v in {
+                                    'entry': _u_entry, 'sl': _u_sl, 'tp': _u_tp,
+                                }.items() if v
+                            )
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"DB reconcile failed for {order['trade_id']}: {_e}"
+                        )
 
-        # Add to position monitor
+        # Attach scanner_segment_id to each order dict before handing to the
+        # position monitor — the close-path needs it to mark the segment as
+        # STOPPED on a LOSS (notebook v4.2 stop_segments behavior).
+        for _o in orders_with_ids:
+            _o['scanner_segment_id'] = scanner_seg_id
+
+        # Add to position monitor (only orders that actually went into MT5)
         self.position_monitor.add_orders(orders_with_ids)
+
+        # Notify Dashboard about plan opened (per-order event so each leg shows up)
+        for order in orders_with_ids:
+            post_bot_event("plan_opened", f"{order.get('action', '?')} {order.get('lot_size', order.get('lot', 0))} lot", {
+                "plan_id": plan_id,
+                "trade_id": order.get('trade_id', ''),
+                "action": order.get('action', ''),
+                "entry": order.get('entry_price', order.get('entry', 0)),
+                "sl": order.get('sl_price', order.get('sl', 0)),
+                "tp": order.get('tp_price', order.get('tp', 0)),
+                "lot": order.get('lot_size', order.get('lot', 0)),
+                "pattern": (signal.pattern if signal else ''),
+                # Same ISO string we stamped on the order dict above so the
+                # Dashboard's "Open Time" column matches the DB's
+                # timestamp_open exactly (was `str(candle_time)` which used
+                # space-separator format and could drift if candle_time was
+                # already a string vs a datetime).
+                "open_time": order.get('timestamp_open', '') or order.get('open_time', ''),
+            })
 
         # Update portfolio state (14 fields)
         portfolio_state['active_plan_id'] = plan_id
@@ -963,6 +1716,29 @@ class TraiderMainLoop:
         logger.info("\n" + "="*70)
         logger.info("✅ Trading cycle completed successfully!")
         logger.info("="*70)
+
+    def _prefetch_worker(self):
+        """Background thread — fetch bars every 10s and cache them so run_once()
+        can read instantly without waiting on network. Daemon → dies with main."""
+        while True:
+            try:
+                data = self._fetch_data_all_tf()
+                if data:
+                    with self._cache_lock:
+                        self._candles_cache = data
+                        self._cache_updated_at = time.time()
+                    self._cache_ready.set()
+                    logger.debug("Pre-fetch: cache updated")
+            except Exception as e:
+                logger.warning(f"Pre-fetch error (will retry): {e}")
+            time.sleep(10)
+
+    def _log_async(self, fn, *args, **kwargs):
+        """Fire `fn` in a daemon thread so the caller doesn't block on slow I/O
+        (e.g. Sheets API). Use ONLY for fire-and-forget logs — never for things
+        downstream code reads back (LocalDB, position_monitor, Guardian state)."""
+        t = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
+        t.start()
 
     def _fetch_data_all_tf(self) -> Dict:
         """
@@ -1047,25 +1823,277 @@ class TraiderMainLoop:
             else:
                 candle_time = datetime.now()
 
+            # Update running MAE/MFE on every open order before the broker checks
+            # for closes — this way the close event carries the final excursion
+            # from the bar that triggered it (live mode doesn't iterate per
+            # candle the way check_and_update does in backtest).
+            if current_candle:
+                from agents.g4_position_monitor import update_excursion_only
+                update_excursion_only(open_orders, current_candle)
+
+            # Reconcile our PENDING list against MT5's actual state BEFORE
+            # the SL/TP check. Catches LIMIT orders that the broker expired /
+            # cancelled / rejected — without this, those rows stay PENDING
+            # in the UI forever even after MT5 has dropped them.
+            # Only check trades that are >60s old (avoid false-cancelling a
+            # LIMIT that was just placed and MT5 hasn't fully indexed yet).
+            cancelled_orphans = []
+            if hasattr(self.broker, 'reconcile_pending'):
+                from dateutil import parser as _date_parser
+                ids_to_check = []
+                now = datetime.now()
+                for o in open_orders:
+                    if o.get('result') != 'PENDING':
+                        continue
+                    tid = o.get('trade_id')
+                    if not tid:
+                        continue
+                    open_iso = o.get('timestamp_open')
+                    if open_iso:
+                        try:
+                            opened_dt = _date_parser.parse(open_iso)
+                            if opened_dt.tzinfo:
+                                opened_dt = opened_dt.replace(tzinfo=None)
+                            if (now - opened_dt).total_seconds() < 60:
+                                continue  # too fresh, give MT5 a beat to index
+                        except Exception:
+                            pass
+                    ids_to_check.append(tid)
+                if ids_to_check:
+                    try:
+                        cancelled_orphans = self.broker.reconcile_pending(ids_to_check)
+                        if cancelled_orphans:
+                            logger.warning(
+                                f"⚠️ Reconcile found {len(cancelled_orphans)} orphan "
+                                f"PENDING(s) — MT5 says they're gone, cleaning up DB/UI"
+                            )
+                    except Exception as e:
+                        logger.error(f"reconcile_pending failed (continuing): {e}")
+                        cancelled_orphans = []
+
+            # Per-cycle broker→DB sync for OPEN orders (catches the case where
+            # a pending LIMIT FILLED since last cycle, swapping its broker view
+            # from orders_get → positions_get and possibly shifting price/SL/TP
+            # via slippage or broker normalization). For already-filled MARKET
+            # positions the values are stable so this is a no-op DB-write-wise,
+            # only the broker query cost is paid. Skipped in backtest where
+            # PaperBroker doesn't return drifted values anyway.
+            if (not self.is_backtest and self.local_db
+                    and hasattr(self.broker, 'get_fill_price')
+                    and hasattr(self.broker, 'get_broker_sl_tp')):
+                for _o in open_orders:
+                    _tk = _o.get('broker_ticket') or _o.get('ticket')
+                    _tid = _o.get('trade_id')
+                    if not _tk or not _tid:
+                        continue
+                    try:
+                        _fp = self.broker.get_fill_price(_tk)
+                        _sltp = self.broker.get_broker_sl_tp(_tk)
+                    except Exception:
+                        continue
+                    _u_entry = (_fp if (_fp and
+                                abs(_fp - (_o.get('entry_price') or _o.get('entry') or 0)) > 0.005)
+                                else None)
+                    _u_sl, _u_tp = None, None
+                    if _sltp:
+                        _bs, _bt = _sltp
+                        _cur_sl = _o.get('sl_price') or _o.get('sl') or 0
+                        _cur_tp = _o.get('tp_price') or _o.get('tp') or 0
+                        if abs(_bs - _cur_sl) > 0.005:
+                            _u_sl = _bs
+                        if abs(_bt - _cur_tp) > 0.005:
+                            _u_tp = _bt
+                    if _u_entry or _u_sl or _u_tp:
+                        try:
+                            self.local_db.update_trade_broker_state(
+                                _tid, entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                            )
+                            if _u_entry:
+                                _o['entry'] = _u_entry
+                                _o['entry_price'] = _u_entry
+                            if _u_sl:
+                                _o['sl'] = _u_sl
+                                _o['sl_price'] = _u_sl
+                            if _u_tp:
+                                _o['tp'] = _u_tp
+                                _o['tp_price'] = _u_tp
+                            # Mirror to Sheets + Dashboard so all three views
+                            # stay aligned with MT5 — without this, a pending
+                            # LIMIT that fills with slippage shows in DB +
+                            # MT5 at the real fill price but Sheets keeps the
+                            # requested limit price from log_plan_open.
+                            if self.sheets_logger.enabled:
+                                self._log_async(
+                                    self.sheets_logger.update_open_values,
+                                    _tid,
+                                    entry=_u_entry, sl=_u_sl, tp=_u_tp,
+                                )
+                            post_bot_event(
+                                "plan_opened",
+                                f"{_o.get('action', '?')} {_o.get('lot_size', _o.get('lot', 0))} lot (resync)",
+                                {
+                                    "plan_id":   _o.get('plan_id', ''),
+                                    "trade_id":  _tid,
+                                    "action":    _o.get('action', ''),
+                                    "entry":     _o.get('entry_price', _o.get('entry', 0)),
+                                    "sl":        _o.get('sl_price', _o.get('sl', 0)),
+                                    "tp":        _o.get('tp_price', _o.get('tp', 0)),
+                                    "lot":       _o.get('lot_size', _o.get('lot', 0)),
+                                    "pattern":   (_o.get('pattern') or '').upper(),
+                                    "open_time": _o.get('timestamp_open', '') or _o.get('open_time', ''),
+                                },
+                            )
+                            logger.info(
+                                f"  ↳ DB+Sheets+Dashboard resync {_tid}: "
+                                + ", ".join(
+                                    f"{k}={v:.3f}" for k, v in {
+                                        'entry': _u_entry, 'sl': _u_sl, 'tp': _u_tp,
+                                    }.items() if v
+                                )
+                            )
+                        except Exception as _e:
+                            logger.warning(f"per-cycle resync failed for {_tid}: {_e}")
+
             # Update broker positions (check SL/TP with real prices)
             current_price = current_candle.get('close') if current_candle else None
             newly_closed = self.broker.update_positions(candle_time, current_price=current_price)
-
-            # Sync closed positions to PositionMonitor
+            # Merge orphan cancellations into the same close-event flow so the
+            # downstream sync (DB / Sheets / api_server / position_monitor)
+            # treats them identically — only the result string differs.
+            if cancelled_orphans:
+                newly_closed = (newly_closed or []) + cancelled_orphans
+            # Dedupe by canonical (full) trade_id, accounting for MT5's
+            # 16-char comment truncation. When both update_positions and
+            # reconcile_pending detect the same close:
+            #   - reconcile_pending returns the FULL trade_id ("RT-…-N", 27 chars)
+            #   - update_positions returns hist.entry_comment = TRUNCATED ("RT-…-1641", 16 chars)
+            # Old dedup did exact string match — saw 2 different strings and
+            # kept both, causing 2 plan_closed events → Dashboard duplicate
+            # (verified at 16:43 BKK on 2026-05-13 in traider.log).
+            #
+            # New dedup: for each broker_pos, find the matching order in
+            # position_monitor.open_orders (using the same prefix-startswith
+            # rule the inner loop below uses), then dedup by ORDER's trade_id.
+            # Broker_pos with no match in open_orders falls back to its own
+            # trade_id key (rare path; only happens on orphan tickets).
             if newly_closed:
-                logger.info(f"📄 PaperBroker closed {len(newly_closed)} positions")
-                for broker_pos in newly_closed:
-                    trade_id = broker_pos['trade_id']
+                _seen_keys = set()
+                _deduped = []
+                for _bp in newly_closed:
+                    _btid = _bp.get('trade_id', '') or ''
+                    _canonical = None
+                    for _ord in open_orders:
+                        _otid = _ord.get('trade_id', '') or ''
+                        if _otid and (_otid == _btid or _otid.startswith(_btid) or _btid.startswith(_otid)):
+                            _canonical = _otid
+                            break
+                    _key = _canonical or _btid
+                    if _key and _key in _seen_keys:
+                        logger.info(
+                            f"⊘ Dedup duplicate close for {_key} "
+                            f"(broker_pos.trade_id={_btid!r}; both detection paths fired)"
+                        )
+                        continue
+                    if _key:
+                        _seen_keys.add(_key)
+                    _deduped.append(_bp)
+                newly_closed = _deduped
 
-                    # Find matching order in PositionMonitor
+            # Sync closed positions to PositionMonitor + Sheets + LocalDB + Dashboard
+            if newly_closed:
+                logger.info(f"📄 Broker closed {len(newly_closed)} position(s)")
+                for broker_pos in newly_closed:
+                    broker_tid = broker_pos['trade_id']
+
+                    # Match by prefix — many MT5 brokers truncate the position
+                    # comment to 16 chars even though the docs say 31, so a
+                    # full trade_id like "RT-20260511-124200-000000-1" comes
+                    # back from history as "RT-20260511-1242". Use startswith
+                    # so the original full id still maps to its close.
                     for order in open_orders:
-                        if order['trade_id'] == trade_id:
+                        order_tid = order.get('trade_id', '')
+                        if order_tid == broker_tid or order_tid.startswith(broker_tid):
+                            trade_id = order_tid  # canonical full id for downstream writes
                             # Update order state
                             order['result'] = broker_pos['result']
                             order['close_price'] = broker_pos['close_price']
                             order['close_reason'] = broker_pos['close_reason']
                             order['pnl_usd'] = broker_pos['pnl']
                             order['timestamp_close'] = broker_pos['close_time']
+                            # Propagate plan_id back into the broker dict so the
+                            # portfolio-state cleanup below (`closed_plan_ids =
+                            # {pos['plan_id'] for pos in newly_closed}`) doesn't
+                            # KeyError. Broker's _query_history_deal doesn't
+                            # carry plan_id — only trade_id via comment.
+                            broker_pos['plan_id'] = order.get('plan_id', '')
+
+                            # Mark segment as STOPPED on a Scanner LOSS.
+                            self._record_scanner_loss_segment({
+                                'result': broker_pos['result'],
+                                'scanner_segment_id': order.get('scanner_segment_id'),
+                                'action': order.get('action'),
+                                'trade_id': trade_id,
+                            })
+
+                            # Push close event to api_server so the Dashboard
+                            # moves the order from Open → Closed in real time.
+                            post_bot_event(
+                                "plan_closed",
+                                f"{broker_pos['result']} {broker_pos['close_reason']}",
+                                {
+                                    "plan_id": order.get('plan_id', ''),
+                                    "trade_id": trade_id,
+                                    "action": order.get('action', ''),
+                                    "result": broker_pos['result'],
+                                    "close_reason": broker_pos['close_reason'],
+                                    "close_price": broker_pos['close_price'],
+                                    "pnl": broker_pos['pnl'],
+                                    # See plan_closed at line ~584 for why
+                                    # Dashboard needs entry/SL/TP/lot here.
+                                    "entry": order.get('entry_price', order.get('entry', 0)),
+                                    "sl":    order.get('sl_price', order.get('sl', 0)),
+                                    "tp":    order.get('tp_price', order.get('tp', 0)),
+                                    "lot":   order.get('lot_size', order.get('lot', 0)),
+                                    "pattern": (order.get('pattern') or order.get('chart_type') or '').upper(),
+                                    "close_time": broker_pos.get('close_time', ''),
+                                    "open_time": str(order.get('timestamp_open', '') or order.get('open_time', '')),
+                                },
+                            )
+
+                            # Write the close to LocalDB (mirrors the
+                            # check_and_update path; was missing here, so
+                            # SIM/LIVE bots never cleared PENDING in DB).
+                            if self.local_db:
+                                try:
+                                    # MAE/MFE were accumulated on the in-memory
+                                    # order dict by update_excursion_only() during
+                                    # the cycle loop (live mode), or by the candle
+                                    # check in check_positions_on_candle_close().
+                                    self.local_db.update_trade_result(
+                                        trade_id=trade_id,
+                                        result=broker_pos['result'],
+                                        pnl=broker_pos['pnl'],
+                                        close_price=broker_pos['close_price'],
+                                        close_time=broker_pos['close_time'],
+                                        close_reason=broker_pos['close_reason'],
+                                        mae_pip=order.get('mae_pip'),
+                                        mfe_pip=order.get('mfe_pip'),
+                                    )
+                                except Exception as e:
+                                    logger.error(f"LocalDB update_trade_result failed for {trade_id}: {e}")
+                            if self.local_db and _BOT_ID:
+                                try:
+                                    self.local_db.upsert_bot_state(_BOT_ID, {
+                                        'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
+                                        'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                                        'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                                        'last_candle_time': broker_pos.get('close_time'),
+                                        # Scanner stop_segments survive restart
+                                        # so a LOSS doesn't re-arm after reboot.
+                                        'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
+                                    })
+                                except Exception as e:
+                                    logger.warning(f"upsert_bot_state failed: {e}")
 
                             # Update Sheets
                             if self.sheets_logger:
@@ -1094,36 +2122,71 @@ class TraiderMainLoop:
                             # Check if all orders in plan are closed
                             plan_orders = [o for o in self.position_monitor.open_orders
                                            if o.get('plan_id') == plan_id]
-                            all_closed = all(o.get('result') in ['WIN', 'LOSS'] for o in plan_orders)
+                            TERMINAL = ('WIN', 'LOSS', 'CANCELLED')
+                            all_closed = all(o.get('result') in TERMINAL for o in plan_orders)
+                            if not all_closed:
+                                continue
 
-                            if all_closed:
-                                plan_pnl = sum(o.get('pnl_usd', 0) for o in plan_orders)
+                            # P&L counts only filled trades (WIN/LOSS).
+                            # CANCELLED LIMITs never filled → 0 contribution.
+                            filled = [o for o in plan_orders if o.get('result') in ('WIN', 'LOSS')]
+                            plan_pnl = sum(o.get('pnl_usd', 0) for o in filled)
+
+                            portfolio_state = self.sheets_logger.get_portfolio_state()
+
+                            if portfolio_state.get('active_plan_id') == plan_id:
+                                portfolio_state['active_plan_id'] = ''
+                                portfolio_state['open_plans_count'] = 0
+                                portfolio_state['total_risk_pct'] = 0.0
+                                portfolio_state['open_orders_count'] = 0
+                                portfolio_state['total_open_lot'] = 0.0
+                                logger.info(f"[{plan_id}] Cleared active plan from portfolio state")
+
+                            # Also clear the per-pattern slot. Without this,
+                            # active_plans_by_pattern carries the closed
+                            # plan_id forever in LIVE mode (the in-cycle
+                            # cleanup block only runs in backtest branch).
+                            # Symptom: next signal of the same pattern gets
+                            # ABORTed at the execute defensive check with
+                            # "already has active plan {yesterday's plan_id}".
+                            _pat_map = self.portfolio_state_cache.get('active_plans_by_pattern', {}) or {}
+                            _stale = [p for p, pid in _pat_map.items() if pid == plan_id]
+                            if _stale:
+                                new_map = {p: pid for p, pid in _pat_map.items() if pid != plan_id}
+                                self.portfolio_state_cache['active_plans_by_pattern'] = new_map
+                                portfolio_state['active_plans_by_pattern'] = dict(new_map)
+                                logger.info(f"[{plan_id}] Cleared per-pattern slot(s): {_stale}")
+
+                            if not filled:
+                                # Pure CANCELLED plan (e.g., LIMIT never filled) —
+                                # don't touch consecutive_loss / realized_pnl.
+                                logger.info(f"[{plan_id}] Plan ended with no fills (all CANCELLED)")
+                            else:
                                 plan_result = 'WIN' if plan_pnl > 0 else 'LOSS'
-
                                 logger.info(f"[{plan_id}] Plan fully closed: {plan_result} (P&L: ${plan_pnl:.2f})")
-
-                                # Update portfolio state
-                                portfolio_state = self.sheets_logger.get_portfolio_state()
-
-                                if portfolio_state.get('active_plan_id') == plan_id:
-                                    portfolio_state['active_plan_id'] = ''
-                                    portfolio_state['open_plans_count'] = 0
-                                    portfolio_state['total_risk_pct'] = 0.0
-                                    portfolio_state['open_orders_count'] = 0
-                                    portfolio_state['total_open_lot'] = 0.0
-                                    logger.info(f"[{plan_id}] Cleared active plan from portfolio state")
-
-                                # Update consecutive loss
                                 if plan_result == 'LOSS':
                                     portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
+                                    # MaiRuay v2 R2 capture: if this plan was MaiRuay R1, save r1_info
+                                    # so signal_engine can retry as ไม้แก้ within the next 16 bars.
+                                    _r1_cap = next(
+                                        (o.get('r1_capture') for o in filled if o.get('r1_capture')),
+                                        None,
+                                    )
+                                    if _r1_cap:
+                                        self.mai_ruay_state = {'r1_info': _r1_cap}
+                                        logger.info(
+                                            f"[{plan_id}] MaiRuay v2 R1 SL — armed r1_info "
+                                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']})"
+                                        )
                                 else:
                                     portfolio_state['consecutive_loss'] = 0
-
-                                # Update realized P&L
+                                    # WIN clears any pending R2 — no ไม้แก้ after a TP win.
+                                    if self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
+                                        self.mai_ruay_state = {}
                                 portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + plan_pnl
 
-                                self.sheets_logger.update_portfolio_state(portfolio_state)
-                                logger.info(f"[{plan_id}] Portfolio state updated (consecutive_loss={portfolio_state['consecutive_loss']})")
+                            self.sheets_logger.update_portfolio_state(portfolio_state)
+                            logger.info(f"[{plan_id}] Portfolio state updated (consecutive_loss={portfolio_state['consecutive_loss']})")
 
                     except Exception as e:
                         logger.error(f"Failed to update portfolio state after closes: {e}")
@@ -1205,8 +2268,6 @@ class TraiderMainLoop:
         - วนลูปตาม candles ย้อนหลัง (M5)
         - แต่ละ candle close → รัน pipeline
         - สะสม results → export สรุป
-
-        Note: ต้องใช้ DATA_MODE=backtest ใน .env
         """
         from datetime import datetime, timedelta
         import pandas as pd
@@ -1493,19 +2554,30 @@ def main():
             traider.run_once()
 
         else:
-            # Run continuously — poll interval = active TF duration (capped 1h)
-            # ตั้ง interval ตาม TF: M1=60s, M5=300s, M15=900s, M30=1800s, H1/H4=3600s
+            # Run continuously — sleep aligned to bar boundary (not from cycle end).
+            # time.sleep(poll_secs) drifts because cycle work (fetch + signal +
+            # logs) takes seconds; over time the bot wakes mid-bar. Aligning to
+            # ceil(now / tf_sec) * tf_sec + 2s ensures every wake-up lands just
+            # after a fresh bar close.
             tf_seconds = {
                 'M1': 60, 'M5': 300, 'M15': 900,
                 'M30': 1800, 'H1': 3600, 'H4': 3600,
             }
             active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
-            poll_secs = tf_seconds.get(active_tf, 300)
-            logger.info(f"Running in continuous mode... TF={active_tf}, poll every {poll_secs}s (Ctrl+C to stop)")
+            tf_sec = tf_seconds.get(active_tf, 300)
+            logger.info(f"Running in continuous mode... TF={active_tf}, bar-aligned sleep (Ctrl+C to stop)")
             while True:
                 traider.run_once()
                 traider.monitor_positions()
-                time.sleep(poll_secs)
+
+                now = time.time()
+                next_bar_ts = math.ceil(now / tf_sec) * tf_sec
+                sleep_sec = max(2.0, next_bar_ts - now + 2.0)
+                logger.info(
+                    f"⏰ Sleeping {sleep_sec:.1f}s → next bar at "
+                    f"{datetime.fromtimestamp(next_bar_ts)}"
+                )
+                time.sleep(sleep_sec)
 
     except KeyboardInterrupt:
         logger.info("\n\n👋 Shutting down gracefully...")

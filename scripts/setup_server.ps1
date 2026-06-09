@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Tra(i)der — Automated Windows Server Setup
 .DESCRIPTION
@@ -168,7 +168,6 @@ if (Test-Path $envPath) {
 
     @"
 # Tra(i)der Server .env — auto-generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-DATA_MODE=live
 
 # Anthropic API (optional — leave empty if not using Claude reviewer)
 ANTHROPIC_API_KEY=

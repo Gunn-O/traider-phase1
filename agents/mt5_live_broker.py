@@ -14,6 +14,7 @@ Interface ตรงกับ PaperBroker เพื่อให้ main.py สล
 """
 
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
@@ -78,6 +79,17 @@ class MT5LiveBroker:
         # ticket → {stage, direction, tp1, tp2, tech_point, height_usd}
         # ⚠️ In-memory only — lost on restart (broker still holds last-known SL)
         self._trail_state: Dict[int, dict] = {}
+        # Per-ticket actual fill price returned by MT5 (market orders only —
+        # for pending LIMIT, fill happens later inside MT5 and we'd need to
+        # query history for the real fill price). Used by main.py to overwrite
+        # signal.entry with the real slippage-adjusted fill on MARKET orders.
+        self._fill_prices: Dict[int, float] = {}
+        # Per-ticket broker-side SL/TP as actually sent to MT5. SELL orders
+        # have spread_usd added to engine sl/tp (see place_order ~line 213),
+        # so the values stored at the broker differ from signal.sl/signal.tp.
+        # Used by main.py reconciliation to sync DB/Sheets log to the real
+        # broker state instead of the engine snapshot.
+        self._broker_sl_tp: Dict[int, Tuple[float, float]] = {}
 
         self._verify_environment()
         logger.info(
@@ -129,6 +141,67 @@ class MT5LiveBroker:
 
     # ------------------------------------------------------------------ open
 
+    # Retry budget for the post-order_send race where MT5 hasn't indexed the
+    # ticket yet. Tuned so the worst-case wait stays well under a second:
+    # 4 attempts × 50 ms = 200 ms max per query, and most queries return on
+    # the first try (~5-20 ms). Without this the inline sync at main.py:1447
+    # would fall back to cached pre-normalize values, Sheets + Dashboard
+    # would log those wrong values, and only the post-insert DB reconciliation
+    # would self-heal — leaving Sheets/Dashboard/DB diverged from MT5.
+    _MT5_INDEX_RETRY_ATTEMPTS = 4
+    _MT5_INDEX_RETRY_DELAY_S = 0.05
+
+    def _query_ticket(self, ticket: int):
+        """Look up `ticket` in positions_get → orders_get with a short retry
+        loop to ride out the post-order_send indexing race. Returns the first
+        non-empty result as ('position'|'order', obj) or (None, None) if MT5
+        truly has no record after all attempts."""
+        for attempt in range(self._MT5_INDEX_RETRY_ATTEMPTS):
+            try:
+                positions = mt5.positions_get(ticket=ticket)
+                if positions and len(positions) > 0:
+                    return ('position', positions[0])
+            except Exception as e:
+                logger.debug(f"_query_ticket: positions_get({ticket}) failed: {e}")
+            try:
+                orders = mt5.orders_get(ticket=ticket)
+                if orders and len(orders) > 0:
+                    return ('order', orders[0])
+            except Exception as e:
+                logger.debug(f"_query_ticket: orders_get({ticket}) failed: {e}")
+            if attempt < self._MT5_INDEX_RETRY_ATTEMPTS - 1:
+                time.sleep(self._MT5_INDEX_RETRY_DELAY_S)
+        return (None, None)
+
+    def get_fill_price(self, ticket: int) -> Optional[float]:
+        """Return MT5's actual fill price by querying MT5 directly.
+
+        Order:
+          1. positions_get(ticket) — filled MARKET / LIMIT-that-became-position
+          2. orders_get(ticket)    — still-pending LIMIT (price_open = limit)
+          3. self._fill_prices     — in-memory fallback from order_send result
+
+        Querying MT5 (not the cached value) catches the case where the broker
+        normalizes / adjusts price on its side. Uses `_query_ticket` so the
+        post-order_send indexing race doesn't force a fallback to the cache."""
+        kind, obj = self._query_ticket(ticket)
+        if obj is not None:
+            return float(obj.price_open)
+        cached = self._fill_prices.get(ticket)
+        return float(cached) if cached is not None else None
+
+    def get_broker_sl_tp(self, ticket: int) -> Optional[Tuple[float, float]]:
+        """Return the (sl, tp) tuple MT5 actually stores for this ticket — the
+        single source of truth. SELL orders get spread_usd added to engine
+        sl/tp (~line 213), AND the broker may further normalize against its
+        min stops level / tick size. Querying MT5 catches both adjustments;
+        the in-memory cache from order_send is a last-resort fallback if MT5
+        truly has no record after the indexing-race retry budget."""
+        _, obj = self._query_ticket(ticket)
+        if obj is not None:
+            return (float(obj.sl), float(obj.tp))
+        return self._broker_sl_tp.get(ticket)
+
     def open_position(
         self,
         action: str,
@@ -143,10 +216,15 @@ class MT5LiveBroker:
         beauty_score: Optional[int] = None,
         entry_price: Optional[float] = None,  # required: zone level for pending limit
         trail_meta: Optional[dict] = None,    # Mountain trailing: {tp1, tp2_base, tech_point, height_pip}
+        order_type: Optional[str] = None,     # 'MARKET' | 'LIMIT' | None (legacy auto-detect)
     ) -> Optional[int]:
         """
-        ส่ง pending LIMIT order ที่ entry_price (zone level) — รอราคากลับมาแตะ.
-        Fallback เป็น market order ถ้าราคาเลย entry ไปแล้ว (ไม่สามารถตั้ง limit ได้).
+        ส่ง order ไปที่ MT5. Mode:
+            order_type='MARKET' → TRADE_ACTION_DEAL ทันที (สำหรับ MAI_RUAY แม่ 4-10%)
+            order_type='LIMIT'  → TRADE_ACTION_PENDING ที่ entry_price; fallback เป็น market
+                                  ถ้าราคาเลยไปแล้ว
+            order_type=None     → legacy auto-detect (Mountain ใช้ branch นี้):
+                                  LIMIT ถ้า entry ยังอยู่ฝั่ง "wait", market fallback ถ้าไม่
 
         Expiration = PENDING_EXPIRY_BARS × current_TF (auto-scale ตาม TF)
 
@@ -174,12 +252,20 @@ class MT5LiveBroker:
         #   BUY_LIMIT: entry < ask (need price to drop)
         #   SELL_LIMIT: entry > bid (need price to rise)
         # If price already past entry, use market order as fallback (zone touched + bounced fast).
-        is_pending = False
-        if entry_price is not None and entry_price > 0:
-            if action == 'BUY' and entry_price < ask:
-                is_pending = True
-            elif action == 'SELL' and entry_price > bid:
-                is_pending = True
+        #
+        # New behavior: caller can force MARKET via order_type='MARKET'
+        # (MAI_RUAY แม่ 4-10% needs immediate fill, no retest wait). When
+        # order_type='LIMIT' or None we keep the legacy auto-detect path.
+        ot_upper = (order_type or '').upper()
+        if ot_upper == 'MARKET':
+            is_pending = False
+        else:
+            is_pending = False
+            if entry_price is not None and entry_price > 0:
+                if action == 'BUY' and entry_price < ask:
+                    is_pending = True
+                elif action == 'SELL' and entry_price > bid:
+                    is_pending = True
 
         # Spread adjustment (same logic as before — applied to broker SL/TP for SELL)
         if action == 'BUY':
@@ -205,10 +291,13 @@ class MT5LiveBroker:
             order_type = mt5.ORDER_TYPE_BUY if action == 'BUY' else mt5.ORDER_TYPE_SELL
             price = ask if action == 'BUY' else bid
             trade_action = mt5.TRADE_ACTION_DEAL
-            logger.info(
-                f"  ⚡ Market order fallback (price already past entry: "
-                f"entry={entry_price} bid/ask={bid:.3f}/{ask:.3f})"
-            )
+            if ot_upper == 'MARKET':
+                logger.info(f"  ⚡ MARKET order (caller forced) bid/ask={bid:.3f}/{ask:.3f}")
+            else:
+                logger.info(
+                    f"  ⚡ Market order fallback (price already past entry: "
+                    f"entry={entry_price} bid/ask={bid:.3f}/{ask:.3f})"
+                )
 
         # Expiration: N × TF duration (auto-scale)
         active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
@@ -264,6 +353,22 @@ class MT5LiveBroker:
 
         ticket = int(result.order)
         self._known_open_tickets.add(ticket)
+        # For market orders (and the LIMIT→MARKET fallback above), MT5 fills
+        # immediately and result.price is the real fill — record it so the
+        # caller can stamp the order with slippage-adjusted entry. For pending
+        # LIMITs, result.price echoes the requested limit price; we still
+        # record it so get_fill_price returns the placement price.
+        try:
+            self._fill_prices[ticket] = float(result.price)
+        except Exception:
+            pass
+        # Stamp the broker-side SL/TP we actually sent so main.py reconciliation
+        # can sync DB/Sheets log to broker reality (SELL had spread_usd added
+        # ~line 213, so these differ from signal.sl/signal.tp).
+        try:
+            self._broker_sl_tp[ticket] = (float(broker_sl), float(broker_tp))
+        except Exception:
+            pass
         # Register trailing state if metadata provided (Mountain only)
         if trail_meta:
             self._trail_state[ticket] = {
@@ -337,20 +442,66 @@ class MT5LiveBroker:
         return out
 
     def _query_history_deal(self, ticket: int) -> Optional[dict]:
-        """Look up close info from MT5 history for a given ticket (after position closed)"""
-        # Get deals associated with this position ticket
+        """Look up close info from MT5 history for a given ticket (after position closed).
+
+        Also extracts the original trade_id from the *entry* deal's comment
+        (we write our trade_id there in open_position). This lets the caller
+        sync the close back to the correct row in position_monitor / Sheets /
+        LocalDB, instead of inventing a synthetic 'LIVE-{ticket}' key that
+        nothing else recognizes.
+        """
         deals = mt5.history_deals_get(position=ticket)
         if deals is None or len(deals) == 0:
             return None
-        # Last deal is the close
+        # First deal = entry (carries our trade_id in comment); last = close.
+        entry_deal = deals[0]
         close_deal = deals[-1]
+        entry_comment = str(getattr(entry_deal, "comment", "") or "").strip()
         return {
-            "close_price": float(close_deal.price),
-            "close_time":  datetime.fromtimestamp(close_deal.time).isoformat(),
-            "pnl":         round(float(close_deal.profit), 2),
+            "close_price":   float(close_deal.price),
+            "close_time":    datetime.fromtimestamp(close_deal.time).isoformat(),
+            "pnl":           round(float(close_deal.profit), 2),
+            "entry_comment": entry_comment,
         }
 
     # ------------------------------------------------------------------ trailing SL
+
+    def cancel_pending_by_ticket(self, ticket: int) -> bool:
+        """Cancel an MT5 pending order by ticket. Used by main.py when the
+        MaiRuay v2 position_monitor watcher detects cancel-near-TP and we
+        need to keep MT5 in sync (MT5's native expiration only catches the
+        5-bar timeout, not the early TP-proximity cancel).
+
+        Returns True on success, False on failure (already filled, missing,
+        or other MT5 error). Safe to call on a ticket that's already gone.
+        """
+        try:
+            order = mt5.orders_get(ticket=int(ticket))
+        except Exception as e:
+            logger.warning(f"cancel_pending: orders_get failed for ticket={ticket}: {e}")
+            return False
+        if not order:
+            # Already filled or expired — caller's in-memory CANCELLED state
+            # is harmless because the trade has already moved on (a fill would
+            # have surfaced through update_positions diff).
+            logger.info(f"cancel_pending: ticket={ticket} no longer pending — skip")
+            return False
+        request = {
+            "action":   mt5.TRADE_ACTION_REMOVE,
+            "order":    int(ticket),
+            "symbol":   self.symbol,
+            "magic":    self.magic,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.warning(
+                f"cancel_pending: ticket={ticket} mt5.order_send failed | "
+                f"retcode={result.retcode if result else None} "
+                f"comment={result.comment if result else mt5.last_error()}"
+            )
+            return False
+        logger.info(f"💹 MT5 pending cancelled | ticket={ticket}")
+        return True
 
     def _modify_sl(self, position, new_sl: float, new_tp: Optional[float] = None) -> bool:
         """ส่ง mt5.order_send ปรับ SL (และ TP ถ้าระบุ) ของ position ที่ broker"""
@@ -437,6 +588,143 @@ class MT5LiveBroker:
                         f"old_sl={pos.sl:.3f} new_sl={new_sl:.3f} bid={current_bid:.3f}"
                     )
 
+    def reconcile_pending(self, trade_ids: List[str]) -> List[dict]:
+        """Verify each `trade_id` we *believe* is PENDING against MT5's actual state.
+
+        Returns close-event dicts (same shape as `update_positions`) for trades
+        that MT5 says are gone. Handles three scenarios:
+
+          1. LIMIT expired before fill           → CANCELLED (no deal exists)
+          2. Filled, still open                  → leave PENDING (skip)
+          3. **Filled then closed while the bot was offline / restarting**
+             → resolve to WIN/LOSS from the position's deal pair
+
+        Scenario 3 is the critical one: `update_positions` only detects closes
+        via diff against `_known_open_tickets`, which only fills when the bot
+        observes the position OPEN at least once. If MT5 fills + closes a
+        LIMIT in seconds (e.g., 4705.39 BUY at 19:17:30 → SL at 19:17:43)
+        while the bot's between cycles, the ticket is never known and the
+        trade stays PENDING forever. This reconcile path catches those by
+        looking up the position's deal pair directly.
+
+        Detection strategy:
+          - Snapshot positions_get + orders_get — if our trade_id is alive there, skip
+          - For each PENDING trade_id, search history_deals_get for a matching
+            comment. If found, fetch ALL deals for that position_id:
+              · 1 deal only      → entry exists, position still open (rare race) → skip
+              · 2+ deals         → CLOSED: compute pnl + WIN/LOSS, return
+          - Not in positions / orders / deals → never filled → CANCELLED
+
+        Why not `history_orders_get`? MT5 overwrites the order's comment with
+        text like `"expired [2026.05.12 08:42]"` once expired, so the original
+        trade_id is lost there. Deals preserve the comment.
+
+        Caller is expected to apply a min-age filter (e.g., 60s) before
+        invoking so we don't false-cancel a LIMIT that was just placed.
+        """
+        if not trade_ids:
+            return []
+
+        positions = mt5.positions_get(symbol=self.symbol) or []
+        orders    = mt5.orders_get(symbol=self.symbol)    or []
+        live_comments    = [(p.comment or "").strip() for p in positions if p.magic == self.magic]
+        pending_comments = [(o.comment or "").strip() for o in orders    if o.magic == self.magic]
+
+        from_dt = datetime.now() - timedelta(hours=48)  # 48h covers overnight + WU reboots
+        deals = mt5.history_deals_get(from_dt, datetime.now()) or []
+        our_deals = [d for d in deals if getattr(d, "magic", 0) == self.magic]
+
+        # Broker truncates the comment to 16 chars on many platforms even
+        # though the MT5 spec allows 31, so match by prefix (stored is a
+        # leading substring of our full trade_id).
+        def _matches(stored: str, full_tid: str) -> bool:
+            stored = (stored or "").strip()
+            if not stored:
+                return False
+            return stored == full_tid or full_tid.startswith(stored)
+
+        resolved: List[dict] = []
+        now_iso = datetime.now().isoformat()
+
+        for tid in trade_ids:
+            if any(_matches(c, tid) for c in live_comments):
+                continue   # filled and currently open
+            if any(_matches(c, tid) for c in pending_comments):
+                continue   # LIMIT still queued
+
+            # Find the entry deal that matches our comment. mt5 deals have
+            # entry=0 for entry, entry=1 for exit — but the comment we wrote
+            # only lives on the entry deal, so look there.
+            entry_deal = next(
+                (d for d in our_deals if _matches(d.comment, tid)),
+                None,
+            )
+            if entry_deal is None:
+                # Not in positions / orders / deals → LIMIT never filled.
+                resolved.append({
+                    "trade_id":     tid,
+                    "ticket":       0,
+                    "plan_id":      "",
+                    "action":       "BUY",
+                    "lot":          0.0,
+                    "lot_size":     0.0,
+                    "entry":        0.0,
+                    "entry_price":  0.0,
+                    "result":       "CANCELLED",
+                    "close_price":  0.0,
+                    "close_time":   now_iso,
+                    "close_reason": "BROKER_REJECT_OR_EXPIRE",
+                    "pnl":          0.0,
+                })
+                logger.warning(f"⚠️ Reconcile: {tid} → CANCELLED (not in MT5 positions/orders/deals)")
+                continue
+
+            # Pull all deals for this position. Use the broker API directly
+            # (history_deals_get(position=...)) — it's more reliable than
+            # filtering our cached snapshot, which might miss the exit deal
+            # if it falls just outside the 48h window of the entry.
+            pos_deals = mt5.history_deals_get(position=entry_deal.position_id) or []
+            if len(pos_deals) < 2:
+                # Only the entry deal exists → position should still be open,
+                # but positions_get didn't have it. Most likely a transient
+                # broker sync gap — leave the local row PENDING and try again
+                # next cycle.
+                logger.info(
+                    f"Reconcile: {tid} has entry deal (pos={entry_deal.position_id}) "
+                    f"but no close deal yet — still open, leaving PENDING"
+                )
+                continue
+
+            # 2+ deals → position is closed. Last deal is the exit.
+            close_deal = pos_deals[-1]
+            pnl = sum(float(d.profit) for d in pos_deals)
+            # Determine direction from the entry deal type (0=BUY, 1=SELL)
+            action = "BUY" if entry_deal.type == mt5.DEAL_TYPE_BUY else "SELL"
+            result = "WIN" if pnl > 0 else "LOSS"
+            close_reason = "TP_HIT" if pnl > 0 else "SL_HIT"
+
+            resolved.append({
+                "trade_id":     tid,
+                "ticket":       int(entry_deal.position_id),
+                "plan_id":      "",
+                "action":       action,
+                "lot":          float(getattr(entry_deal, "volume", 0.0)),
+                "lot_size":     float(getattr(entry_deal, "volume", 0.0)),
+                "entry":        float(entry_deal.price),
+                "entry_price":  float(entry_deal.price),
+                "result":       result,
+                "close_price":  float(close_deal.price),
+                "close_time":   datetime.fromtimestamp(close_deal.time).isoformat(),
+                "close_reason": close_reason,
+                "pnl":          round(pnl, 2),
+            })
+            logger.warning(
+                f"⚠️ Reconcile RECOVERED: {tid} → {result} pnl={pnl:+.2f} "
+                f"@ {close_deal.price} (bot missed live position lifecycle)"
+            )
+
+        return resolved
+
     def update_positions(self, candle_time: datetime, current_price: Optional[float] = None) -> List[dict]:
         """
         เช็ค SL/TP / manual close — diff กับ _known_open_tickets เพื่อหา newly closed
@@ -460,11 +748,15 @@ class MT5LiveBroker:
                 logger.warning(f"Cannot find history for closed ticket {ticket}")
                 continue
             pnl = hist["pnl"]
-            # We don't know the exact close_reason from history (could be SL/TP/manual)
-            # Heuristic: compare close_price vs sl/tp (we lost original sl/tp after close)
+            # Prefer the trade_id we wrote into the entry deal's comment; fall
+            # back to a synthetic id only when the comment is empty (e.g. an
+            # order opened outside this bot). Without this, main.py's
+            # `if order['trade_id'] == trade_id` never matches and the close
+            # never syncs to position_monitor / Sheets / LocalDB.
+            trade_id = hist.get("entry_comment") or f"LIVE-{ticket}"
             pos_dict = {
                 "ticket":       ticket,
-                "trade_id":     f"LIVE-{ticket}",
+                "trade_id":     trade_id,
                 "close_price":  hist["close_price"],
                 "close_time":   hist["close_time"],
                 "pnl":          pnl,

@@ -111,6 +111,20 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
             'chart_context': {}
         }
 
+    # Check 2b: MaiRuay v2 — ยัง "1 plan ต่อครั้ง" รวม pending limits
+    # Notebook run_backtest:929 `if open_positions or pending_limits or _just_closed: continue`
+    # — pending limits ที่ค้างใน broker ถือว่า plan ยังไม่จบ. Block new signal
+    # ของ pattern เดียวกันจนกว่า limits จะ fill หมด/cancel.
+    pending_by_pat = portfolio_state.get('pending_limits_by_pattern', {}) or {}
+    if pending_by_pat.get(signal_pattern, 0) > 0:
+        _cnt = pending_by_pat[signal_pattern]
+        logger.info(f"SKIP: {signal_pattern} has {_cnt} pending LIMIT(s) — wait to fill/cancel first")
+        return {
+            'pre_approved': False,
+            'skip_reason': f'{signal_pattern} มี LIMIT ค้าง {_cnt} ไม้ (ยังไม่เปิดได้)',
+            'chart_context': {}
+        }
+
     # Check 3: News flag
     news_flag = portfolio_state.get('news_flag', False)
     if news_flag:
@@ -176,19 +190,27 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
 
     # Check 6: Duplicate Prevention
     # ป้องกันการเปิด plan ซ้ำเมื่อ setup ยังไม่เปลี่ยน (ใช้ signal.entry เป็น reference)
+    #
+    # MaiRuay v2 R2 bypass: ไม้รวยรอบ 2 (is_round2=True) ออกแบบให้เข้าใกล้ R1
+    # ที่เพิ่ง SL — entry อาจห่างจาก R1 น้อยกว่า threshold 50 pip. ถ้าเช็ค
+    # duplicate ตามปกติ R2 จะถูก block ผิด เพราะ R1 ยังค้างอยู่ใน last_technical_price.
+    # Notebook spec อนุญาต R2 เข้าทันที — bypass check ตรงนี้.
     current_entry = signal.entry  # Use signal.entry from Signal Engine
     last_tech_price = float(portfolio_state.get('last_technical_price', 0))
     current_chart = world_state.get('chart_type', '')
     last_chart = portfolio_state.get('last_plan_chart_type', '')
+    is_round2 = bool(getattr(signal, 'is_round2', False))
 
     logger.info(f"Duplicate check: pattern={signal.pattern}, current_entry={current_entry:.2f}, "
-                f"last_tech={last_tech_price:.2f}, current_chart={current_chart}, last_chart={last_chart}")
+                f"last_tech={last_tech_price:.2f}, current_chart={current_chart}, last_chart={last_chart}, "
+                f"is_round2={is_round2}")
 
     # Threshold: config-driven (default 50 pip = 0.50 USD)
     DUPLICATE_THRESHOLD = RISK_CONFIG.get('duplicate_pip_threshold', 50) / 100.0  # pip → USD
 
-    # Block เมื่อ: ราคาใกล้กัน AND chart type เดิม
-    if (current_entry > 0
+    # Block เมื่อ: ราคาใกล้กัน AND chart type เดิม AND ไม่ใช่ R2
+    if (not is_round2
+        and current_entry > 0
         and last_tech_price > 0
         and current_chart == last_chart
         and abs(current_entry - last_tech_price) < DUPLICATE_THRESHOLD):
@@ -200,6 +222,8 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
             'skip_reason': f'Setup เดิม entry={current_entry:.2f} ยังไม่เปลี่ยน (ห่าง {price_diff:.2f} < {DUPLICATE_THRESHOLD})',
             'chart_context': {}
         }
+    if is_round2:
+        logger.info(f"R2 bypass: duplicate check skipped (MaiRuay v2 ไม้แก้หลัง SL)")
 
     # Log why duplicate-prevention passed
     if current_entry == 0:
@@ -213,8 +237,9 @@ def prefilter_check(world_state: Dict, portfolio_state: Dict) -> Dict:
         logger.info(f"Entry moved enough (diff={price_diff:.2f} >= {DUPLICATE_THRESHOLD}) → allow duplicate check")
 
     # Check 6b: Cooldown — ห่างจาก signal ก่อนหน้า ≥ N bars (M5: 3 = 15 min, M1: 15)
+    # R2 bypass: MaiRuay v2 ไม้แก้หลัง SL ออกแบบให้เข้าทันที (ภายใน 16 bars จาก R1)
     cooldown_bars = RISK_CONFIG.get('cooldown_bars', 0)
-    if cooldown_bars > 0:
+    if cooldown_bars > 0 and not is_round2:
         last_signal_bar = portfolio_state.get('last_signal_bar', 0) or 0
         current_bar = portfolio_state.get('current_bar', 0) or 0
         if last_signal_bar > 0 and current_bar > 0:

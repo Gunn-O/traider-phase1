@@ -17,6 +17,7 @@ Run โดยตรง:
     python launcher.py
 """
 from __future__ import annotations
+import json
 import os
 import sys
 import time
@@ -75,6 +76,37 @@ BROWSER_URL = f'http://{FRONTEND_HOST}:{FRONTEND_PORT}'
 
 STARTUP_TIMEOUT_SEC = 60
 HEALTH_CHECK_INTERVAL_SEC = 5
+
+# Auto-resume: api_server writes this file on every /api/start, removes entries on
+# /api/stop. Each entry = one bot config. Launcher re-issues /api/start for each
+# session on boot so multi-bot setups survive WU reboots.
+SESSIONS_FILE = ROOT / 'last_sessions.json'
+
+
+def _try_auto_resume(log) -> None:
+    if not SESSIONS_FILE.is_file():
+        return
+    try:
+        sessions = json.loads(SESSIONS_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        log(f"[!] last_sessions.json unreadable: {e}")
+        return
+    if not isinstance(sessions, list) or not sessions:
+        return
+    log(f"[~] Auto-resuming {len(sessions)} bot(s)...")
+    for cfg in sessions:
+        bot_label = f"{cfg.get('tf')}/{cfg.get('mode')}/{cfg.get('symbol')}"
+        try:
+            req = urllib.request.Request(
+                f'http://{BACKEND_HOST}:{BACKEND_PORT}/api/start',
+                data=json.dumps(cfg).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                log(f"[✓] Resumed {bot_label} (HTTP {r.status})")
+        except Exception as e:
+            log(f"[!] Resume {bot_label} failed: {e}")
 
 
 # ── Detection helpers ──────────────────────────────────────────
@@ -411,6 +443,10 @@ class LauncherGUI:
         ok_be = ensure_backend(self.svc, self.log)
         self.set_status('backend', ok_be, f'Listening :{BACKEND_PORT}' if ok_be else 'Failed')
 
+        # 2b. Auto-resume bot from previous session (after launcher restart, WU reboot, etc.)
+        if ok_be:
+            _try_auto_resume(self.log)
+
         # 3. Frontend
         ok_fe = ensure_frontend(self.svc, self.log)
         self.set_status('frontend', ok_fe, f'Listening :{FRONTEND_PORT}' if ok_fe else 'Failed')
@@ -457,7 +493,11 @@ class LauncherGUI:
 
 def main_gui():
     root = tk.Tk()
-    LauncherGUI(root)
+    gui = LauncherGUI(root)
+    # Auto-trigger Start All so the launcher boots services without a click —
+    # required for the scheduled-task path (Windows Update reboot → user logon →
+    # task fires → launcher must come up working).
+    root.after(500, gui.start_all)
     root.mainloop()
 
 

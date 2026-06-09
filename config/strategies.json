@@ -1,92 +1,145 @@
 {
-  "version": "65",
-  "last_updated": "2026-05-06",
+  "version": "66",
+  "last_updated": "2026-06-02",
   "patterns": {
     "MOUNTAIN": {
-      "active": true,
+      "active": false,
       "implemented": true,
       "name": "Mountain Round 1",
-      "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 10%height",
+      "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 5%height (notebook v4.61)",
       "direction": "BUY",
-      "version": "4.45",
+      "version": "4.61",
       "validations": [
-        "ขนาดภูเขา >= 10 แท่ง",
-        "ห้ามมี Low ทะลุ thresh_10 ในช่วง 20-80%",
+        "ขนาดภูเขา (X+Y) >= 10 แท่ง",
+        "ห้ามมี Low ทะลุ thresh_10 (base_lo + 20%height) ในช่วง 20-80%",
         "ฐาน→entry ไม่เกิน 42 แท่ง",
-        "SH หลัง peak <= 2 อัน (ถ้า > 25 แท่ง)"
+        "SH หลัง peak <= 2 อัน (ถ้า > 25 แท่ง)",
+        "Buffer zone = 5% × height (เก่า 10%)",
+        "TP3 = base_lo + 80% × height (เก่า 100%)",
+        "SL = entry - 60% × height"
       ],
-      "priority": 2
-    },
-    "MOUNTAIN_R2": {
-      "active": false,
-      "implemented": false,
-      "name": "Mountain Round 2",
-      "description": "ภูเขารอบ 2 (เลิกใช้ใน v4.45/v67) — state tracking ปิดใน signal_engine; เก็บไว้ใน config เพื่อ backward compatibility",
-      "direction": "BUY",
-      "version": "4.45",
-      "validations": [],
-      "priority": 1,
-      "deprecated": true
-    },
-    "DOWNTREND": {
-      "active": false,
-      "implemented": true,
-      "name": "Downtrend (Legacy)",
-      "description": "เทรนด์ลง — ใช้ _detect_downtrend() (V4.20 backward compatibility)",
-      "direction": "SELL",
-      "version": "4.20",
-      "validations": [],
-      "priority": 3,
-      "deprecated": true
-    },
-    "DOWNTREND_IMPULSE": {
-      "active": false,
-      "implemented": true,
-      "name": "Downtrend Impulse",
-      "description": "เทรนด์ลงแบบ impulse — Twin Candle SELL",
-      "direction": "SELL",
-      "version": "4.25",
-      "validations": [],
-      "priority": 3,
-      "deprecated": false
-    },
-    "UPTREND": {
-      "active": false,
-      "implemented": true,
-      "name": "Uptrend (Legacy)",
-      "description": "เทรนด์ขึ้น — ใช้ _detect_uptrend() (V4.20 backward compatibility)",
-      "direction": "BUY",
-      "version": "4.20",
-      "validations": [],
-      "priority": 4,
-      "deprecated": true
-    },
-    "UPTREND_IMPULSE": {
-      "active": false,
-      "implemented": true,
-      "name": "Uptrend Impulse",
-      "description": "เทรนด์ขึ้นแบบ impulse — Twin Candle BUY",
-      "direction": "BUY",
-      "version": "4.25",
-      "validations": [],
-      "priority": 4,
-      "deprecated": false
+      "priority": 2,
+      "allowed_tfs": [
+        "M1",
+        "M5",
+        "M15",
+        "M30"
+      ]
     },
     "MAI_RUAY": {
       "active": true,
       "implemented": true,
-      "name": "ไม้รวย (Branch F)",
-      "description": "Father/Mother candle — พ่อ 1-5 แท่ง 60-100% R55, แม่สวนทิศ body 4-30% ของพ่อ",
+      "name": "ไม้รวย (Karpathy multi-TF)",
+      "description": "Father/Mother candle v2.15M5_M1Karpathy — พ่อ 1-8 แท่ง อนุญาตแทรก 1 ตัว ≤5%R55, body รวม 60-100% R55, แม่ 4-30% **ของพ่อ**, 2 จุดเข้า (ENTRY_SMALL/MEDIUM lists) split lot, ไม่มี R2, มี obstacle scanner + obstacle→entry redirect, RR floor 0.5. Engine: strategies/mai_ruay_karpathy.py",
       "direction": "BOTH",
-      "version": "1.0",
+      "version": "2.15M5_M1Karpathy",
       "validations": [
-        "พ่อ 1-5 แท่ง สีเดียวกัน body 60-100% R55",
-        "แม่สวนทิศพ่อ body 4-30% ของพ่อ",
-        "Anti-trend filter (ไม่เทรดสวนเทรนด์ใหญ่)",
-        "Lot = portfolio × 10% / SL (pip)"
+        "พ่อ 1-8 แท่ง อนุญาตแทรกสีตรงข้าม 1 ตัว body ≤ 5% R55 (V1 spec)",
+        "พ่อ body รวม 60-100% R55 (capped)",
+        "all-same length=5 ต้องมี trio open→close > 60% R55",
+        "ไม่มี Vol Ratio gate / ไม่มี per-bar body check",
+        "แม่สวนทิศพ่อ body 4-30% **ของ father_body** (NOT R55)",
+        "Entries config: ENTRY_SMALL (m_pct 4-10%) / ENTRY_MEDIUM (m_pct 10-30%) — default 2 จุด",
+        "ENTRY_SMALL default = [market(child.open), tech(LIMIT)]",
+        "ENTRY_MEDIUM default = [market(child.open), mid_mother(LIMIT)]",
+        "LIMIT entries ตรวจ fill บน child bar เท่านั้น — ไม่ filled → discard",
+        "LIMIT gap-fill: ถ้า child.open ผ่าน limit → fill ที่ child.open",
+        "Obstacle scanner 43-bar lookback (swing high/low + 6%R55 buffer)",
+        "obs < TP1 → entry redirect = tech_point (เหลือ 1 entry)",
+        "SL: obstacle ± 6%R55 OR tech ± 70%×f_body (ไม่มี obstacle)",
+        "TP: obstacle ± 6%R55 OR TP3 (75%×f_body) OR 45%×f_body (พ่อ>80%R55 + obs>60%พ่อ)",
+        "TP30/SL45 special: เปิดเสมอ — 50 แท่งก่อนพ่อ no-touch level",
+        "TP < 200 pip → skip signal",
+        "RR floor: ถ้า rr < 0.5 → ปรับ tp_sel ให้ rr = 0.5",
+        "Lot = portfolio × 10% / SL_pip (no extra adjustment); auto-split = lot / len(entries)",
+        "ไม่มี R2 / Round 2 / pending queue / anti-trend"
+      ],
+      "priority": 4,
+      "allowed_tfs": [
+        "M5"
+      ]
+    },
+    "MAI_RUAY_M1": {
+      "active": true,
+      "implemented": true,
+      "name": "ไม้รวยM1 Basic Father V2.04 Bugfix1",
+      "description": "Father/Mother candle v2.04 Bugfix1 — พ่อสีเดียว 1-10 แท่ง >60% R55, Vol Ratio>1, แม่ 2-25% R55 (validate min 2%), 3 จุดเข้าพร้อมกัน (split lot/3) [2-10% → MARKET, 10-25% → LIMIT mid_แม่], Round 2 หลัง SL ใน 16 แท่ง. Engine: strategies/mai_ruay.py",
+      "direction": "BOTH",
+      "version": "2.04-bugfix1",
+      "validations": [
+        "พ่อ 1-10 แท่งสีเดียว ห้ามแทรก (R1) / 1-8 แท่ง อนุญาตแทรก 1 ≤10%R55 (R2)",
+        "พ่อ body รวม > 60% R55 (R1) / > 35% R55 (R2)",
+        "พ่อ แต่ละแท่ง body > 4% R55 (อนุโลม 2 แท่ง >2% ถ้าเสียงข้างมาก >10%)",
+        "Volatility Ratio > 1 (father avg ÷ pre-20 avg) — R1 เท่านั้น",
+        "หยุดพ่อที่ Doji (body ≤ 2% R55)",
+        "แม่สวนทิศพ่อ body 2-25% **ของ R55** (ไม่ใช่ของพ่อ) — Bugfix1: validate min 2%",
+        "3 จุดเข้าพร้อมกัน: [market/mid_แม่, tech, tech±10%พ่อ] split lot/3 — Bugfix1: MARKET ครอบคลุม m_pct 2-10% (เดิม 3-10%)",
+        "ไม้ 2-3 = LIMIT pending 5 แท่ง / ยกเลิกถ้า TP ใกล้ภายใน 10% R55",
+        "TP per-entry adjustment: ถ้า TP_dist < SL_dist → TP = entry ± SL_dist (RR=1.0)",
+        "SL = 40% × father_body (ตายตัว — ไม่ใช้ obstacle scanner)",
+        "TP = 45% × father_body (ตายตัว)",
+        "TP30/SL45 special: ถ้า 50 แท่งก่อนพ่อ no low<60%/no high>40% R55 → TP=30%, SL=45%",
+        "TP < 200 pip → skip signal",
+        "Round 2 หลัง SL: ภายใน 16 แท่ง ลอง R2 (ทิศเดียวกัน), TP=45%×พ่อรวม, SL=30%×พ่อรวม",
+        "ไม่มี anti-trend filter (v2.04 ลบทิ้ง)",
+        "ไม่มี obstacle scanner (v2.04 ลบทิ้ง)",
+        "ไม่มี spread buffer TP_ORD_BUF (v2.04 ลบทิ้ง — sync ตาม notebook)",
+        "Lot = portfolio × 10% / SL_pip; แม่ 17-25% → /2; พ่อ >90% R55 → ×2"
       ],
       "priority": 5,
-      "deprecated": false
+      "allowed_tfs": [
+        "M1"
+      ]
+    },
+    "UPTREND_SCANNER": {
+      "active": false,
+      "implemented": true,
+      "name": "Uptrend Scanner v4.2",
+      "description": "C1-C6 confirmation on 55-bar window + Swing Low entry zone 65-85% R55. R:R=1.0 symmetric. MIN_TP_PIP=200.",
+      "direction": "BUY",
+      "version": "4.2",
+      "validations": [
+        "C1: Close >= 60% R55",
+        "C2: Recent Low (5 bars) >= 55% R55",
+        "C3: Drop from HH <= 30% R55",
+        "C4: Bullish impulse 2-8 bars >= 25% R55",
+        "C5: No bearish bar > 30% R55 in 25-bar lookback",
+        "C6: max close in (lookback + first 5) <= L55 + 40% R55",
+        "Anti-trend: father bar 40-100% R55 in 1-8 bars blocks signal",
+        "MIN_TP_PIP: skip signal if TP distance < 200 pip (v4.2)"
+      ],
+      "priority": 6,
+      "allowed_tfs": [
+        "M5",
+        "M15",
+        "M30",
+        "M1"
+      ]
+    },
+    "DOWNTREND_SCANNER": {
+      "active": false,
+      "implemented": true,
+      "name": "Downtrend Scanner v4.2",
+      "description": "TRUE mirror of Uptrend Scanner — C1D-C6D + Swing High entry zone 15-35% R55. R:R=1.0 symmetric. (v4.2: C6D min mirror + MIN_TP_PIP=200)",
+      "direction": "SELL",
+      "version": "4.2",
+      "validations": [
+        "C1D: Close <= 40% R55 (top-down)",
+        "C2D: Recent High (5 bars) <= 45% R55 (top-down)",
+        "C3D: Rise from LL <= 30% R55",
+        "C4D: Bearish impulse 2-8 bars >= 25% R55",
+        "C5D: No bullish bar > 30% R55 in 25-bar lookback",
+        "C6D: min close in (lookback + first 5) >= H55 - 40% R55 (v4.2 true mirror)",
+        "Anti-trend: father bar 40-100% R55 (mirror) blocks signal",
+        "MIN_TP_PIP: skip signal if TP distance < 200 pip (v4.2)"
+      ],
+      "priority": 7,
+      "allowed_tfs": [
+        "M5",
+        "M15",
+        "M30",
+        "M1"
+      ]
     }
   },
   "global_settings": {

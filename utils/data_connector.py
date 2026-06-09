@@ -6,7 +6,7 @@ Data Connector - รองรับ 2 modes: simulate, live
 
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 import pandas as pd
 import numpy as np
@@ -231,7 +231,23 @@ class DataConnector:
             raise ValueError(f"Unsupported timeframe: {timeframe} minutes")
 
         try:
-            # Get candles
+            # pos=0 includes the FORMING current bar at the end of `rates`.
+            # signal_engine's synth_child mechanism (utils/signal_engine.py:359)
+            # then appends a placeholder next-bar so the MaiRuay engine treats
+            # ohlc_bars[-1] as MOTHER and synth as CHILD.
+            #
+            # Trade-off (2026-06-03 review):
+            #   + pos=0 fires at "bar close + 2s" even when prefetch cache is
+            #     slightly stale, because the forming bar's near-end snapshot
+            #     ≈ closed bar value. No 1-candle delay.
+            #   - When the forming bar REVERSES mid-formation (e.g. 2026-06-03
+            #     10:10 UTC SELL: mid body -112 pip BEAR → closed 3 pip BULL
+            #     doji), engine fires on the transient state — a phantom trade.
+            #
+            # Architectural fix (deferred): drop the synth_child kludge and let
+            # the engine treat ohlc_bars[-1] = forming bar = child (notebook
+            # semantics), with mother = ohlc_bars[-2] = closed previous. That
+            # eliminates BOTH bugs but is a bigger refactor.
             rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
 
             if rates is None or len(rates) == 0:
@@ -569,10 +585,14 @@ class MT5Connector:
 
         # Fetch data
         if start_date and end_date:
-            # Backtest mode: get historical range
+            # Backtest mode: get historical range (all bars closed — no forming).
             rates = mt5.copy_rates_range(self.symbol, tf, start_date, end_date)
         else:
-            # Simulate mode: get N latest candles
+            # Simulate/live mode: pos=0 includes the FORMING current bar at
+            # the end of `rates`. Kept (not pos=1) so signal_engine's
+            # synth_child mechanism works without prefetch-cache staleness
+            # delaying entries by 1 bar. See _get_candles_mt5 above for the
+            # full trade-off (forming-bar reversal phantom vs. 1-candle late).
             rates = mt5.copy_rates_from_pos(self.symbol, tf, 0, count)
 
         if rates is None or len(rates) == 0:
@@ -586,7 +606,14 @@ class MT5Connector:
         for r in rates:
             candles.append({
                 "time": pd.to_datetime(r["time"], unit='s'),
-                "timestamp": datetime.fromtimestamp(r["time"]),
+                # MT5 returns r["time"] as Unix epoch seconds (timezone-agnostic).
+                # Use tz=timezone.utc so consumers get an unambiguous aware
+                # datetime; calling fromtimestamp(epoch) without a tz returned
+                # NAIVE LOCAL (e.g. 22:21 BKK for epoch that's 15:21 UTC),
+                # which downstream code mislabeled as UTC and shifted the
+                # market-close filter by the system's local offset (the
+                # "block at 20:00 BKK" bug the user reported on Friday).
+                "timestamp": datetime.fromtimestamp(r["time"], tz=timezone.utc),
                 "open": float(r["open"]),
                 "high": float(r["high"]),
                 "low": float(r["low"]),
@@ -1246,11 +1273,7 @@ def create_connector(mode: str = "auto", symbol: str = "XAUUSDc"):
     Raises:
         RuntimeError: If forced mode is not available
     """
-    # Override from environment if not specified
-    if mode == "auto":
-        mode = os.getenv("DATA_MODE", "auto")
-
-    # Normalize backtest/simulate mode to auto
+    # Normalize legacy backtest/simulate aliases to auto-detect
     if mode in ["backtest", "simulate"]:
         mode = "auto"
 

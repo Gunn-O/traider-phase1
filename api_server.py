@@ -15,17 +15,197 @@ Target: Windows local machine (localhost only)
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
 import threading
 import sys
+from collections import deque
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+# ─── Multi-bot session persistence ───────────────────────────────────
+# Array of {tf, symbol, mode, data_source} for every bot currently running.
+# Updated whenever a bot starts/stops; read by launcher on boot to auto-resume.
+SESSIONS_FILE = Path(__file__).resolve().parent / "last_sessions.json"
+
+
+def _save_sessions() -> None:
+    """Persist configs of currently-running bots so launcher can resume after reboot."""
+    sessions = [
+        {"tf": b["tf"], "symbol": b["symbol"], "mode": b["mode"], "data_source": b["data_source"]}
+        for b in bots.values() if b["status"] == "running"
+    ]
+    try:
+        if sessions:
+            SESSIONS_FILE.write_text(json.dumps(sessions))
+        else:
+            SESSIONS_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to write last_sessions.json: {e}")
+
+
+# ─── Multi-bot state ─────────────────────────────────────────────────
+# bot_id format: "{tf}-{symbol}-{mode}" — uniquely identifies a config.
+# Two bots with the same id can't coexist (start would 400).
+bots: Dict[str, dict] = {}
+_bot_procs: Dict[str, subprocess.Popen] = {}
+
+
+def _make_bot_id(tf: str, symbol: str, mode: str) -> str:
+    return f"{tf}-{symbol}-{mode}"
+
+
+def _new_bot_state(req: "StartRequest", pid: int) -> dict:
+    now = datetime.now().isoformat()
+    return {
+        "bot_id": _make_bot_id(req.tf, req.symbol, req.mode),
+        "tf": req.tf,
+        "symbol": req.symbol,
+        "mode": req.mode,
+        "data_source": req.data_source,
+        "status": "running",
+        "bot_pid": pid,
+        "started_at": now,
+        "last_updated": now,
+        "open_orders": [],     # populated via POST /api/bots/{id}/event
+        "closed_orders": [],   # ring buffer of last 50 closed orders
+        "events": deque(maxlen=200),
+        "balance": float(os.getenv("ACCOUNT_BALANCE", "1000")),
+        # Per-cycle snapshot pushed by main.py via POST /api/bots/{id}/heartbeat.
+        # Lives outside `events` so a 60s cycle tick doesn't flood the panel.
+        # Always overwrites the previous snapshot — only the latest tick matters.
+        "heartbeat": {},
+        "cycle_count": 0,
+    }
+
+
+def _serialize_bot(b: dict) -> dict:
+    """Convert deque → list so JSON encoder accepts it."""
+    return {**b, "events": list(b["events"])}
+
+
+def _add_event(bot_id: str, ev_type: str, msg: str = "", data: Optional[dict] = None) -> None:
+    if bot_id not in bots:
+        return
+    bots[bot_id]["events"].append({
+        "ts": datetime.now().isoformat(),
+        "type": ev_type,
+        "msg": msg,
+        "data": data or {},
+    })
+    bots[bot_id]["last_updated"] = datetime.now().isoformat()
+
+
+def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
+    """Replace bots[bot_id]['open_orders'] + ['closed_orders'] with whatever
+    LocalDB shows for this bot_id right now. Called on /api/start and also
+    exposed via POST /api/bots/{id}/sync so the UI can be refreshed after
+    `reconcile_pending.py` without having to restart anything.
+
+    Best-effort: any DB error is swallowed (returns with the in-memory state
+    untouched). Trades older than `MAX_CLOSED_LOOKBACK` are not loaded so the
+    Dashboard's "Recently Closed" panel stays focused on recent activity."""
+    if bot_id not in bots:
+        return
+    if not os.path.exists(db_path):
+        return
+    try:
+        import sqlite3
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        # Open = anything still PENDING for this bot. Include chart_type +
+        # timestamp_open so the Dashboard Open Positions panel can render the
+        # Strategy column and Time column without having to wait for the next
+        # event broadcast.
+        open_rows = con.execute(
+            "SELECT trade_id, plan_id, action, entry_price, sl_price, tp_price, "
+            "lot_size, rr_ratio, chart_type, timestamp_open FROM trades "
+            "WHERE bot_id = ? AND result = 'PENDING' "
+            "ORDER BY timestamp_open",
+            (bot_id,),
+        ).fetchall()
+        bots[bot_id]["open_orders"] = [
+            {
+                "plan_id":   r["plan_id"],
+                "trade_id":  r["trade_id"],
+                "action":    r["action"],
+                "entry":     r["entry_price"],
+                "sl":        r["sl_price"],
+                "tp":        r["tp_price"],
+                "lot":       r["lot_size"],
+                "lot_size":  r["lot_size"],
+                "rr":        r["rr_ratio"],
+                "pattern":   (r["chart_type"] or "").upper(),
+                "open_time": r["timestamp_open"],
+            }
+            for r in open_rows
+        ]
+        # Closed = last 50 WIN/LOSS/CANCELLED for this bot, newest last.
+        # Pull entry / SL / TP / lot too — Dashboard's unified Positions
+        # panel renders the same 12 columns for OPEN and CLOSED rows, so
+        # closed rows need the entry levels to populate Entry/SL/TP/Lot.
+        # Previously those columns were blank for any trade loaded from DB.
+        closed_rows = con.execute(
+            "SELECT trade_id, plan_id, action, entry_price, sl_price, tp_price, "
+            "lot_size, rr_ratio, result, close_reason, close_price, pnl_usd, "
+            "timestamp_close, chart_type, timestamp_open FROM trades "
+            "WHERE bot_id = ? AND result IN ('WIN','LOSS','CANCELLED') "
+            "ORDER BY timestamp_close ASC LIMIT 50",
+            (bot_id,),
+        ).fetchall()
+        bots[bot_id]["closed_orders"] = [
+            {
+                "plan_id":      r["plan_id"],
+                "trade_id":     r["trade_id"],
+                "action":       r["action"],
+                "entry":        r["entry_price"],
+                "sl":           r["sl_price"],
+                "tp":           r["tp_price"],
+                "lot":          r["lot_size"],
+                "lot_size":     r["lot_size"],
+                "rr":           r["rr_ratio"],
+                "result":       r["result"],
+                "close_reason": r["close_reason"],
+                "close_price":  r["close_price"],
+                "pnl":          r["pnl_usd"],
+                "close_time":   r["timestamp_close"],
+                "pattern":      (r["chart_type"] or "").upper(),
+                "open_time":    r["timestamp_open"],
+            }
+            for r in closed_rows
+        ]
+        con.close()
+        logger.info(
+            f"Hydrated {bot_id} from DB: "
+            f"open={len(bots[bot_id]['open_orders'])} "
+            f"closed={len(bots[bot_id]['closed_orders'])}"
+        )
+    except Exception as e:
+        logger.warning(f"_hydrate_bot_from_db({bot_id}): {e}")
+
+
+def _sweep_dead() -> List[str]:
+    """Detect bot subprocesses that exited; flip their status to 'stopped'.
+    Returns the list of bot_ids that just transitioned."""
+    transitioned = []
+    for bot_id, proc in list(_bot_procs.items()):
+        rc = proc.poll()
+        if rc is not None:
+            if bot_id in bots and bots[bot_id]["status"] == "running":
+                bots[bot_id]["status"] = "stopped"
+                bots[bot_id]["bot_pid"] = None
+                _add_event(bot_id, "subprocess_died", f"exit code {rc}", {"rc": rc})
+                transitioned.append(bot_id)
+            _bot_procs.pop(bot_id, None)
+    if transitioned:
+        _save_sessions()
+    return transitioned
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -53,10 +233,6 @@ _backtest_state = {
     "error": None,
     "pid": None,
 }
-
-# ── Live trading subprocess handle (started via /api/start) ──────────────
-# main.py spawned with --simulate + --mode/--symbol/--tf flags
-_bot_proc: Optional[subprocess.Popen] = None
 
 def _run_backtest_thread(start: str, end: str, timeframe: str = "M5"):
     """รัน backtest ใน background thread"""
@@ -248,114 +424,260 @@ async def serve_dashboard():
     return FileResponse(dashboard_path)
 
 
+# ─── Multi-bot endpoints ────────────────────────────────────────────
+
+class BotEvent(BaseModel):
+    type: str
+    msg: str = ""
+    data: dict = {}
+
+
+@app.get("/api/bots")
+async def list_bots():
+    """List all bots (running + recently stopped) with their state and event count."""
+    _sweep_dead()
+    return {
+        "bots": [_serialize_bot(b) for b in bots.values()],
+        "count": len(bots),
+        "running": sum(1 for b in bots.values() if b["status"] == "running"),
+    }
+
+
+@app.get("/api/bots/{bot_id}")
+async def get_bot(bot_id: str):
+    _sweep_dead()
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    return _serialize_bot(bots[bot_id])
+
+
+def _trade_ids_match(a: str, b: str) -> bool:
+    """Prefix-aware trade_id equality. MT5 brokers truncate the position
+    comment to 16 chars, so the same trade arrives here with different
+    trade_id strings depending on detection path:
+      - reconcile_pending → full id ("RT-20260513-164100-000000-1")
+      - update_positions → truncated entry_comment ("RT-20260513-1641")
+    Either string being a prefix of the other means they refer to the
+    same trade. Defense-in-depth dedup in the event handler relies on this."""
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def _already_in_closed(bot_id: str, trade_id: str) -> bool:
+    if not trade_id:
+        return False
+    for c in bots[bot_id].get("closed_orders", []):
+        if _trade_ids_match(trade_id, c.get("trade_id", "") or ""):
+            return True
+    return False
+
+
+def _already_in_open(bot_id: str, trade_id: str, plan_id: str) -> bool:
+    """True if an order with this trade_id OR plan_id is already in open_orders."""
+    for o in bots[bot_id].get("open_orders", []):
+        if trade_id and _trade_ids_match(trade_id, o.get("trade_id", "") or ""):
+            return True
+        if plan_id and o.get("plan_id") == plan_id:
+            return True
+    return False
+
+
+@app.post("/api/bots/{bot_id}/event")
+async def post_bot_event(bot_id: str, event: BotEvent):
+    """Bot subprocess (main.py) POSTs significant events here so the UI sees them.
+    Some types also mutate bot state (open_orders, closed_orders).
+
+    Defense-in-depth: plan_opened and plan_closed both dedup by trade_id
+    (prefix-aware to handle MT5's 16-char comment truncation). main.py also
+    dedupes upstream but if either path slips a duplicate through, the ring
+    buffer here stays clean."""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+
+    _add_event(bot_id, event.type, event.msg, event.data)
+
+    if event.type == "plan_opened":
+        tid = event.data.get("trade_id", "")
+        pid = event.data.get("plan_id", "")
+        if _already_in_open(bot_id, tid, pid):
+            logger.info(f"plan_opened dedup: {tid or pid} already in open_orders, skipping append")
+        else:
+            bots[bot_id]["open_orders"].append(event.data)
+    elif event.type == "plan_closed":
+        plan_id = event.data.get("plan_id")
+        tid     = event.data.get("trade_id", "")
+        # Always remove from open_orders (idempotent — filter by plan_id).
+        # Snapshot the matching open_order FIRST so we can backfill missing
+        # fields on the close event (open_time / entry / sl / tp / lot etc).
+        # Reconcile_pending CANCELLED events historically arrived with
+        # open_time='' because old subprocesses didn't stamp it on the in-
+        # memory order; now we recover it from the open_order on its way
+        # out.
+        _open_snap = next(
+            (o for o in bots[bot_id]["open_orders"] if o.get("plan_id") == plan_id),
+            None,
+        )
+        if _open_snap:
+            for _k in ("open_time", "entry", "sl", "tp", "lot", "lot_size",
+                       "pattern", "action", "rr"):
+                _have = event.data.get(_k)
+                if not _have and _open_snap.get(_k):
+                    event.data[_k] = _open_snap[_k]
+        bots[bot_id]["open_orders"] = [
+            o for o in bots[bot_id]["open_orders"] if o.get("plan_id") != plan_id
+        ]
+        # Last-resort backfill: if open_time STILL empty after pulling from
+        # open_orders (e.g., bot subprocess never opened this trade in the
+        # current api_server session), look up DB.
+        if not event.data.get("open_time") and tid:
+            try:
+                import sqlite3 as _sql
+                _db = _localdb_paths()[0] if _localdb_paths() else None
+                if _db:
+                    _con = _sql.connect(_db)
+                    _row = _con.execute(
+                        "SELECT timestamp_open FROM trades WHERE trade_id = ? LIMIT 1",
+                        (tid,),
+                    ).fetchone()
+                    _con.close()
+                    if _row and _row[0]:
+                        event.data["open_time"] = _row[0]
+                        logger.info(f"plan_closed: backfilled open_time={_row[0]} for {tid} from DB")
+            except Exception as _e:
+                logger.warning(f"plan_closed open_time backfill failed for {tid}: {_e}")
+        closed = bots[bot_id].setdefault("closed_orders", [])
+        if _already_in_closed(bot_id, tid):
+            logger.info(
+                f"plan_closed dedup: {tid} already in closed_orders, skipping append "
+                "(prefix-aware — likely the MT5-truncated vs full-id pair)"
+            )
+        else:
+            closed.append(event.data)
+            bots[bot_id]["closed_orders"] = closed[-50:]
+
+    await manager.broadcast({
+        "event": "bot_event",
+        "bot_id": bot_id,
+        "data": {"ts": datetime.now().isoformat(), **event.dict()},
+    })
+    return {"ok": True}
+
+
+@app.post("/api/bots/{bot_id}/sync")
+async def sync_bot_from_db(bot_id: str):
+    """Reload open_orders + closed_orders for a bot directly from LocalDB.
+    Useful right after `scripts/reconcile_pending.py` runs while the bot is
+    stopped — the Dashboard then reflects the new state without having to
+    restart anything. Also broadcasts so connected UIs refresh immediately."""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    _hydrate_bot_from_db(bot_id)
+    await manager.broadcast({
+        "event": "bot_synced",
+        "bot_id": bot_id,
+        "bot": _serialize_bot(bots[bot_id]),
+    })
+    return {
+        "ok": True,
+        "bot_id": bot_id,
+        "open": len(bots[bot_id]["open_orders"]),
+        "closed": len(bots[bot_id]["closed_orders"]),
+    }
+
+
+@app.post("/api/bots/{bot_id}/heartbeat")
+async def post_bot_heartbeat(bot_id: str, request: Request):
+    """Bot subprocess (main.py) POSTs a per-cycle snapshot here so the UI can
+    show 'system is alive' updates (last candle, current price, R55, session,
+    skip reason). Stored in bots[bot_id]['heartbeat'] — overwrites previous;
+    NOT appended to the events deque (would flood it at 60s cadence)."""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    body = await request.json()
+    now_iso = datetime.now().isoformat()
+    bots[bot_id]["heartbeat"] = {**body, "ts": now_iso}
+    bots[bot_id]["cycle_count"] = bots[bot_id].get("cycle_count", 0) + 1
+    bots[bot_id]["last_updated"] = now_iso
+    await manager.broadcast({
+        "event": "bot_heartbeat",
+        "bot_id": bot_id,
+        "data": bots[bot_id]["heartbeat"],
+        "cycle_count": bots[bot_id]["cycle_count"],
+    })
+    return {"ok": True}
+
+
+@app.get("/api/bots/{bot_id}/events")
+async def get_bot_events(bot_id: str, limit: int = 50, type: Optional[str] = None):
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    events = list(bots[bot_id]["events"])
+    if type:
+        events = [e for e in events if e["type"] == type]
+    return {"events": events[-limit:], "total": len(bots[bot_id]["events"])}
+
+
 @app.get("/api/status")
 async def get_status():
-    """Get current bot status — also verifies subprocess is still alive."""
-    global _bot_proc
-    # If subprocess died unexpectedly, reflect in state
-    if bot_state["status"] == "running" and _bot_proc is not None:
-        rc = _bot_proc.poll()
-        if rc is not None:  # process exited
-            logger.warning(f"Bot subprocess died (exit code {rc}) — resetting state to stopped")
-            bot_state["status"] = "stopped"
-            bot_state["bot_pid"] = None
-            bot_state["logs"].append(
-                f"{datetime.now().strftime('%H:%M:%S')} - Bot subprocess died (exit {rc})"
-            )
-            bot_state["logs"] = bot_state["logs"][-50:]
-            _bot_proc = None
+    """Legacy aggregate status — mirrors the first running bot for backward compat
+    with non-Dashboard pages. New code should use /api/bots instead."""
+    _sweep_dead()
+    running = [b for b in bots.values() if b["status"] == "running"]
+    bot_state["status"] = "running" if running else "stopped"
+    if running:
+        first = running[0]
+        bot_state["mode"] = first["mode"]
+        bot_state["symbol"] = first["symbol"]
+        bot_state["trading_tf"] = first["tf"]
+        bot_state["data_source_mode"] = first["data_source"]
+        bot_state["bot_pid"] = first["bot_pid"]
+        bot_state["open_orders"] = first["open_orders"]
+    else:
+        bot_state["bot_pid"] = None
+        bot_state["open_orders"] = []
     bot_state["last_updated"] = datetime.now().isoformat()
     return bot_state
 
 
 @app.post("/api/start")
 async def start_bot(request: StartRequest):
-    """
-    Start bot with selected timeframe and symbol
-
-    Args:
-        request: {"tf": "M5", "symbol": "XAUUSDc"}
-
-    Returns:
-        {"status": "started", "tf": "M5", "symbol": "XAUUSDc"}
-    """
-    if bot_state["status"] == "running":
-        raise HTTPException(status_code=400, detail="Bot already running")
-
-    # Validate TF
+    """Start a bot for the given (tf, symbol, mode). Multiple bots may run concurrently
+    as long as their (tf, symbol, mode) tuple differs. Returns the bot_id."""
     valid_tfs = ["M1", "M5", "M15", "M30", "H1", "H4"]
+    valid_symbols = ["XAUUSDc", "XAUUSDm", "XAUUSD"]
+    valid_modes = ["paper", "micro", "live"]
+    valid_data_sources = ["auto", "mt5", "yf", "tv"]
     if request.tf not in valid_tfs:
         raise HTTPException(status_code=400, detail=f"Invalid TF. Must be one of {valid_tfs}")
-
-    # Validate Symbol
-    valid_symbols = ["XAUUSDc", "XAUUSDm", "XAUUSD"]
     if request.symbol not in valid_symbols:
         raise HTTPException(status_code=400, detail=f"Invalid symbol. Must be one of {valid_symbols}")
-
-    # Validate Mode
-    valid_modes = ["paper", "micro", "live"]
     if request.mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of {valid_modes}")
-
-    # Validate Data Source
-    valid_data_sources = ["auto", "mt5", "yf", "tv"]
     if request.data_source not in valid_data_sources:
         raise HTTPException(status_code=400, detail=f"Invalid data_source. Must be one of {valid_data_sources}")
 
-    # Use symbol as selected by user (no auto-override)
-    actual_symbol = request.symbol
-
-    # Update state
-    bot_state["status"] = "running"
-    bot_state["mode"] = request.mode
-    bot_state["symbol"] = actual_symbol
-    bot_state["trading_tf"] = request.tf
-    bot_state["data_source_mode"] = request.data_source
-    # Reflect requested data source immediately — subprocess runs in a separate process
-    # and can't write back to api_server's bot_state. Map request value → display label.
-    ds_actual_map = {"mt5": "MT5", "yf": "yfinance", "tv": "TradingView", "auto": "Auto"}
-    bot_state["data_source_actual"] = ds_actual_map.get(request.data_source, request.data_source)
-
-    mode_labels = {
-        "paper": "Paper Trade (Simulate)",
-        "micro": "Cent Account",
-        "live": "Real Account"
-    }
-    mode_label = mode_labels.get(request.mode, request.mode)
-
-    bot_state["logs"].append(
-        f"{datetime.now().strftime('%H:%M:%S')} - Bot started "
-        f"(Mode: {mode_label}, Symbol: {actual_symbol}, TF: {request.tf})"
-    )
-    bot_state["logs"] = bot_state["logs"][-50:]  # Keep last 50
-
-    logger.info(f"Bot started with Mode: {request.mode}, Symbol: {actual_symbol}, TF: {request.tf}")
-
-    # ── Spawn main.py subprocess (actual trading loop) ──────────────
-    global _bot_proc
-    if _bot_proc is not None and _bot_proc.poll() is None:
-        # Old subprocess still alive — kill before spawning new one
-        try:
-            _bot_proc.terminate()
-            _bot_proc.wait(timeout=3)
-        except Exception:
-            try: _bot_proc.kill()
-            except Exception: pass
+    _sweep_dead()
+    bot_id = _make_bot_id(request.tf, request.symbol, request.mode)
+    if bot_id in bots and bots[bot_id]["status"] == "running":
+        raise HTTPException(status_code=400, detail=f"Bot {bot_id} already running")
 
     project_root = Path(__file__).parent
     cmd = [
         sys.executable, str(project_root / "main.py"),
         "--simulate",
         "--mode", request.mode,
-        "--symbol", actual_symbol,
+        "--symbol", request.symbol,
         "--tf", request.tf,
         "--data-source", request.data_source,
-        "--no-confirm",  # caller already confirmed via UI; subprocess has no stdin
+        "--no-confirm",
         "--decision-engine", "python",
     ]
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
-    env["BACKTEST_TIMEFRAME"] = request.tf  # signal_engine reads this
+    env["BACKTEST_TIMEFRAME"] = request.tf
+    env["TRAIDER_BOT_ID"] = bot_id            # subprocess uses this to label events
+    env["TRAIDER_API_URL"] = f"http://127.0.0.1:8080"
 
     creationflags = 0
     startupinfo = None
@@ -363,118 +685,121 @@ async def start_bot(request: StartRequest):
         creationflags = subprocess.CREATE_NO_WINDOW
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0  # SW_HIDE
+        startupinfo.wShowWindow = 0
 
     try:
-        _bot_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd, cwd=str(project_root), env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=creationflags, startupinfo=startupinfo,
         )
-        logger.info(f"Bot subprocess spawned: pid={_bot_proc.pid}")
-        bot_state["bot_pid"] = _bot_proc.pid
     except Exception as e:
-        logger.error(f"Failed to spawn bot subprocess: {e}")
-        bot_state["status"] = "stopped"
+        logger.error(f"Failed to spawn bot subprocess for {bot_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start bot: {e}")
 
-    # Broadcast to WebSocket clients
+    bots[bot_id] = _new_bot_state(request, proc.pid)
+    # Pre-populate open_orders + closed_orders from LocalDB so the Dashboard
+    # immediately shows history that lives in the DB but not in api_server's
+    # in-memory ring buffer (e.g. after an api_server restart, or after
+    # `scripts/reconcile_pending.py` adjusts trades while the bot was stopped).
+    _hydrate_bot_from_db(bot_id)
+    _bot_procs[bot_id] = proc
+    _add_event(bot_id, "started", f"Bot {bot_id} started (pid={proc.pid})")
+    _save_sessions()
+    logger.info(f"Bot {bot_id} subprocess spawned: pid={proc.pid}")
+
     await manager.broadcast({
         "event": "bot_started",
-        "mode": request.mode,
-        "tf": request.tf,
-        "symbol": actual_symbol
+        "bot_id": bot_id,
+        "bot": _serialize_bot(bots[bot_id]),
     })
 
     return {
+        "bot_id": bot_id,
         "status": "started",
         "mode": request.mode,
         "tf": request.tf,
-        "symbol": actual_symbol,
-        "pid": _bot_proc.pid,
+        "symbol": request.symbol,
+        "pid": proc.pid,
     }
 
 
-@app.post("/api/stop")
-async def stop_bot(request: Optional[StopRequest] = None):
-    """
-    Stop bot gracefully (wait for current cycle to finish)
+def _kill_bot_proc(bot_id: str) -> Optional[int]:
+    """Kill the subprocess for one bot (taskkill /F /T on Windows). Returns the killed pid."""
+    proc = _bot_procs.get(bot_id)
+    if proc is None or proc.poll() is not None:
+        return None
+    pid = proc.pid
+    try:
+        if sys.platform == 'win32':
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(pid)],
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            proc.terminate()
+            try: proc.wait(timeout=5)
+            except Exception: proc.kill()
+        logger.info(f"Bot {bot_id} subprocess killed: pid={pid}")
+    except Exception as e:
+        logger.error(f"Failed to kill bot {bot_id} pid={pid}: {e}")
+    return pid
 
-    Returns:
-        {"status": "stopped"}
-    """
-    if bot_state["status"] != "running":
-        raise HTTPException(status_code=400, detail="Bot not running")
 
+async def _stop_one(bot_id: str, reason: str) -> dict:
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+    killed_pid = _kill_bot_proc(bot_id)
+    bots[bot_id]["status"] = "stopped"
+    bots[bot_id]["bot_pid"] = None
+    _bot_procs.pop(bot_id, None)
+    _add_event(bot_id, "stopped", reason)
+    _save_sessions()
+    await manager.broadcast({"event": "bot_stopped", "bot_id": bot_id, "reason": reason})
+    return {"bot_id": bot_id, "status": "stopped", "reason": reason, "killed_pid": killed_pid}
+
+
+@app.post("/api/stop/{bot_id}")
+async def stop_bot_by_id(bot_id: str, request: Optional[StopRequest] = None):
+    """Stop one specific bot by id."""
+    _sweep_dead()
     reason = request.reason if request else "User requested stop"
+    return await _stop_one(bot_id, reason)
 
-    # Kill the bot subprocess if alive — uses taskkill /F /T on Windows to clean up tree
-    global _bot_proc
-    killed_pid = None
-    if _bot_proc is not None and _bot_proc.poll() is None:
-        killed_pid = _bot_proc.pid
-        try:
-            if sys.platform == 'win32':
-                subprocess.run(
-                    ['taskkill', '/F', '/T', '/PID', str(_bot_proc.pid)],
-                    capture_output=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                _bot_proc.terminate()
-                try: _bot_proc.wait(timeout=5)
-                except Exception: _bot_proc.kill()
-            logger.info(f"Bot subprocess killed: pid={killed_pid}")
-        except Exception as e:
-            logger.error(f"Failed to kill bot subprocess pid={killed_pid}: {e}")
-    _bot_proc = None
 
-    # Update state
-    bot_state["status"] = "stopped"
-    bot_state["bot_pid"] = None
-    bot_state["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - Bot stopped: {reason}")
-    bot_state["logs"] = bot_state["logs"][-50:]
-
-    logger.info(f"Bot stopped: {reason}")
-
-    # Broadcast to WebSocket clients
-    await manager.broadcast({"event": "bot_stopped", "reason": reason})
-
-    return {"status": "stopped", "reason": reason, "killed_pid": killed_pid}
+@app.post("/api/stop")
+async def stop_all_bots(request: Optional[StopRequest] = None):
+    """Stop every running bot. Used by global Stop All button + legacy callers."""
+    _sweep_dead()
+    reason = request.reason if request else "User requested stop"
+    stopped = []
+    for bot_id in list(bots.keys()):
+        if bots[bot_id]["status"] == "running":
+            stopped.append((await _stop_one(bot_id, reason))["bot_id"])
+    return {"status": "stopped", "stopped": stopped, "count": len(stopped)}
 
 
 @app.post("/api/emergency-stop")
 async def emergency_stop():
-    """
-    Emergency stop — stop bot immediately + close all orders
-
-    WARNING: This forcefully stops the bot and attempts to close all positions
-
-    Returns:
-        {"status": "emergency_stopped", "orders_closed": int}
-    """
-    # Update state
-    bot_state["status"] = "stopped"
-    bot_state["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - 🚨 EMERGENCY STOP")
-    bot_state["logs"] = bot_state["logs"][-50:]
-
-    # Count orders that were open
-    orders_count = len(bot_state["open_orders"])
-
-    # Clear open orders (in real implementation, this should trigger actual position close)
-    # For now, just clear the state
-    bot_state["open_orders"] = []
-    bot_state["active_plan_id"] = ""
-
-    logger.warning(f"Emergency stop triggered! {orders_count} orders cleared")
-
-    # Broadcast to WebSocket clients
-    await manager.broadcast({
-        "event": "emergency_stop",
-        "orders_closed": orders_count
-    })
-
-    return {"status": "emergency_stopped", "orders_closed": orders_count}
+    """Stop every bot immediately and clear open positions across all of them."""
+    _sweep_dead()
+    orders_count = 0
+    stopped_ids = []
+    for bot_id in list(bots.keys()):
+        if bots[bot_id]["status"] == "running":
+            orders_count += len(bots[bot_id].get("open_orders", []))
+            _kill_bot_proc(bot_id)
+            bots[bot_id]["status"] = "stopped"
+            bots[bot_id]["bot_pid"] = None
+            bots[bot_id]["open_orders"] = []
+            _bot_procs.pop(bot_id, None)
+            _add_event(bot_id, "emergency_stopped", "🚨 EMERGENCY STOP")
+            stopped_ids.append(bot_id)
+    _save_sessions()
+    logger.warning(f"Emergency stop: {len(stopped_ids)} bots, {orders_count} orders cleared")
+    await manager.broadcast({"event": "emergency_stop", "stopped": stopped_ids, "orders_closed": orders_count})
+    return {"status": "emergency_stopped", "stopped": stopped_ids, "orders_closed": orders_count}
 
 
 @app.get("/api/history")
@@ -524,6 +849,289 @@ async def get_history(limit: int = 30):
         "count": 0,
         "message": "No trade history available"
     }
+
+
+# ─── Trade History (analytics) ───────────────────────────────────────
+# Reads from LocalDB (traider_backtest.db / traider_sim.db). Computes:
+#   - List of normalized trade objects (filtered by date / mode / pattern / bot_id)
+#   - Aggregate stats: winrate, P&L, drawdown, equity curve, consecutive streaks
+# Used by TradeHistory.jsx — a single page showing every trade the system has
+# ever taken, regardless of which bot opened it.
+
+def _localdb_paths() -> List[str]:
+    """Both DBs the bot might write to. Earlier/older runs land in different
+    files, so the analytics page queries both and merges."""
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "traider_sim.db",
+        here / "traider_backtest.db",
+        here / os.getenv("LOCAL_DB_PATH", "traider_backtest.db"),
+    ]
+    seen, out = set(), []
+    for p in candidates:
+        s = str(p)
+        if s in seen:
+            continue
+        seen.add(s)
+        if p.exists():
+            out.append(s)
+    return out
+
+
+def _parse_bot_id(bot_id: Optional[str]) -> tuple:
+    """bot_id = '{tf}-{symbol}-{mode}'. Returns (tf, symbol, mode), each may be None."""
+    if not bot_id:
+        return (None, None, None)
+    parts = bot_id.split("-")
+    if len(parts) >= 3:
+        return (parts[0], parts[1], parts[-1])
+    return (None, None, None)
+
+
+def _normalize_trade(row: dict, source_db: str) -> dict:
+    """Map a LocalDB `trades` row to the TradeHistory schema the UI expects.
+    Keeps the LocalDB row intact under `_raw` for debugging if anyone needs it."""
+    tf, symbol, mode = _parse_bot_id(row.get("bot_id"))
+    entry = row.get("entry_price")
+    close = row.get("close_price")
+    sl    = row.get("sl_price")
+    tp    = row.get("tp_price")
+    action = (row.get("action") or "").upper()
+
+    pnl_pip = None
+    if entry is not None and close is not None:
+        # 1 pip = 0.01 USD on XAUUSD
+        pnl_pip = round((close - entry) * 100 * (1 if action == "BUY" else -1), 1)
+
+    rr_actual = None
+    if entry is not None and close is not None and sl is not None:
+        risk = abs(entry - sl)
+        if risk > 0:
+            reward = (close - entry) if action == "BUY" else (entry - close)
+            rr_actual = round(reward / risk, 2)
+
+    return {
+        "trade_id":         row.get("trade_id"),
+        "plan_id":          row.get("plan_id"),
+        "bot_id":           row.get("bot_id"),
+        "open_time":        row.get("timestamp_open"),
+        "close_time":       row.get("timestamp_close"),
+        "symbol":           symbol or "XAUUSDc",
+        "timeframe":        row.get("timeframe") or tf,
+        "direction":        action,
+        "lot":              row.get("lot_size"),
+        "entry_price":      entry,
+        "sl_price":         sl,
+        "tp_price":         tp,
+        "close_price":      close,
+        "result":           row.get("result"),
+        "close_reason":     row.get("close_reason"),
+        "pnl_usd":          row.get("pnl_usd"),
+        "pnl_pip":          pnl_pip,
+        "rr_actual":        rr_actual,
+        "rr_planned":       row.get("rr_ratio"),
+        "pattern":          row.get("chart_type"),
+        "session":          row.get("session"),
+        "claude_confidence": row.get("confidence"),
+        "claude_reason":    row.get("ai_reason"),
+        "mae_pip":          row.get("mae_pip"),
+        "mfe_pip":          row.get("mfe_pip"),
+        "r55_pip_at_open":  row.get("r55_pip_at_open"),
+        "mode":             mode or "paper",
+        "source_db":        Path(source_db).name,
+    }
+
+
+def _load_trades_from_db(
+    from_date: Optional[str],
+    to_date: Optional[str],
+    mode: Optional[str],
+    pattern: Optional[str],
+    bot_id: Optional[str],
+) -> List[dict]:
+    """Pull rows from every LocalDB file we know about, normalize, merge,
+    and apply filters. Date filter applies to timestamp_open."""
+    import sqlite3
+    all_rows: List[dict] = []
+    for db_path in _localdb_paths():
+        try:
+            con = sqlite3.connect(db_path)
+            con.row_factory = sqlite3.Row
+            q = "SELECT * FROM trades"
+            conds, params = [], []
+            if bot_id:
+                conds.append("bot_id = ?")
+                params.append(bot_id)
+            if from_date:
+                conds.append("timestamp_open >= ?")
+                params.append(from_date)
+            if to_date:
+                # to_date is inclusive — extend to end-of-day
+                conds.append("timestamp_open < ?")
+                params.append(to_date + "T23:59:59" if "T" not in to_date else to_date)
+            if conds:
+                q += " WHERE " + " AND ".join(conds)
+            q += " ORDER BY timestamp_open"
+            try:
+                cur = con.execute(q, params)
+            except sqlite3.OperationalError:
+                # Older DB without some columns — skip silently.
+                con.close()
+                continue
+            for r in cur.fetchall():
+                all_rows.append(_normalize_trade(dict(r), db_path))
+            con.close()
+        except Exception as e:
+            logger.warning(f"_load_trades_from_db({db_path}): {e}")
+            continue
+
+    # Mode / pattern filters — applied post-normalize so they handle the bot_id parse.
+    if mode and mode != "all":
+        all_rows = [t for t in all_rows if (t.get("mode") or "").lower() == mode.lower()]
+    if pattern and pattern != "all":
+        all_rows = [t for t in all_rows if (t.get("pattern") or "").upper() == pattern.upper()]
+
+    # Sort by open_time, newest last (UI flips to desc).
+    all_rows.sort(key=lambda t: t.get("open_time") or "")
+    return all_rows
+
+
+def _compute_trade_stats(trades: List[dict], initial_balance: float = 1000.0) -> dict:
+    """Aggregate stats over normalized trades.
+    Equity curve uses cumulative pnl_usd starting from initial_balance.
+    Drawdown is computed against the running peak of that curve."""
+    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    wins   = [t for t in closed if t["result"] == "WIN"]
+    losses = [t for t in closed if t["result"] == "LOSS"]
+
+    total_pnl_usd = round(sum(t.get("pnl_usd") or 0 for t in closed), 2)
+    total_pnl_pip = round(sum(t.get("pnl_pip") or 0 for t in closed), 1)
+    wr_pct        = round(len(wins) / len(closed) * 100, 1) if closed else 0.0
+
+    best  = max(closed, key=lambda t: t.get("pnl_usd") or 0, default=None)
+    worst = min(closed, key=lambda t: t.get("pnl_usd") or 0, default=None)
+
+    rr_actuals  = [t["rr_actual"] for t in wins if t.get("rr_actual") is not None]
+    rr_planneds = [t["rr_planned"] for t in closed if t.get("rr_planned")]
+    avg_rr_actual  = round(sum(rr_actuals) / len(rr_actuals), 2) if rr_actuals else 0.0
+    avg_rr_planned = round(sum(rr_planneds) / len(rr_planneds), 2) if rr_planneds else 0.0
+
+    # Equity curve + drawdown
+    balance = initial_balance
+    peak = initial_balance
+    max_dd_pct = 0.0
+    max_dd_usd = 0.0
+    equity_curve: List[dict] = [{
+        "t": trades[0]["open_time"] if trades else None,
+        "balance": round(balance, 2),
+        "drawdown_pct": 0.0,
+        "drawdown_usd": 0.0,
+        "trade_id": None,
+    }]
+    for t in closed:
+        balance += (t.get("pnl_usd") or 0)
+        if balance > peak:
+            peak = balance
+        dd_usd = peak - balance
+        dd_pct = (dd_usd / peak * 100) if peak > 0 else 0.0
+        if dd_pct > max_dd_pct:
+            max_dd_pct = dd_pct
+        if dd_usd > max_dd_usd:
+            max_dd_usd = dd_usd
+        equity_curve.append({
+            "t": t.get("close_time") or t.get("open_time"),
+            "balance": round(balance, 2),
+            "drawdown_pct": round(-dd_pct, 2),  # negative for chart
+            "drawdown_usd": round(-dd_usd, 2),
+            "trade_id": t.get("trade_id"),
+        })
+
+    # Consecutive streaks
+    max_win_streak  = 0
+    max_loss_streak = 0
+    cur_win  = 0
+    cur_loss = 0
+    for t in closed:
+        if t["result"] == "WIN":
+            cur_win += 1
+            cur_loss = 0
+            max_win_streak = max(max_win_streak, cur_win)
+        else:
+            cur_loss += 1
+            cur_win = 0
+            max_loss_streak = max(max_loss_streak, cur_loss)
+
+    # Pattern breakdown
+    by_pattern: Dict[str, dict] = {}
+    for t in closed:
+        pat = t.get("pattern") or "UNKNOWN"
+        d = by_pattern.setdefault(pat, {"pattern": pat, "total": 0, "wins": 0, "losses": 0, "net_usd": 0.0})
+        d["total"] += 1
+        if t["result"] == "WIN":  d["wins"]   += 1
+        if t["result"] == "LOSS": d["losses"] += 1
+        d["net_usd"] += (t.get("pnl_usd") or 0)
+    pattern_breakdown = []
+    for d in by_pattern.values():
+        d["wr_pct"] = round(d["wins"] / d["total"] * 100, 1) if d["total"] else 0.0
+        d["net_usd"] = round(d["net_usd"], 2)
+        pattern_breakdown.append(d)
+    pattern_breakdown.sort(key=lambda d: d["total"], reverse=True)
+
+    return {
+        "total_trades":     len(trades),
+        "closed_trades":    len(closed),
+        "pending":          sum(1 for t in trades if t.get("result") == "PENDING"),
+        "wins":             len(wins),
+        "losses":           len(losses),
+        "wr_pct":           wr_pct,
+        "total_pnl_usd":    total_pnl_usd,
+        "total_pnl_pip":    total_pnl_pip,
+        "best_trade":       {"pnl_usd": best.get("pnl_usd"),  "trade_id": best.get("trade_id"),  "pattern": best.get("pattern")}  if best  else None,
+        "worst_trade":      {"pnl_usd": worst.get("pnl_usd"), "trade_id": worst.get("trade_id"), "pattern": worst.get("pattern")} if worst else None,
+        "avg_rr_actual":    avg_rr_actual,
+        "avg_rr_planned":   avg_rr_planned,
+        "max_drawdown_pct": round(max_dd_pct, 2),
+        "max_drawdown_usd": round(max_dd_usd, 2),
+        "max_win_streak":   max_win_streak,
+        "max_loss_streak":  max_loss_streak,
+        "current_balance":  round(balance, 2),
+        "starting_balance": initial_balance,
+        "peak_balance":     round(peak, 2),
+        "equity_curve":     equity_curve,
+        "pattern_breakdown": pattern_breakdown,
+    }
+
+
+@app.get("/api/trades")
+async def list_trades(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date:   Optional[str] = Query(None, alias="to"),
+    mode:      Optional[str] = "all",
+    pattern:   Optional[str] = "all",
+    bot_id:    Optional[str] = None,
+    limit:     int = 1000,
+):
+    """List trades for TradeHistory.jsx. Accepts ?from=YYYY-MM-DD&to=YYYY-MM-DD."""
+    trades = _load_trades_from_db(from_date, to_date, mode, pattern, bot_id)
+    # Truncate to `limit` newest (page itself paginates client-side).
+    if len(trades) > limit:
+        trades = trades[-limit:]
+    return {"trades": trades, "count": len(trades)}
+
+
+@app.get("/api/trades/stats")
+async def trade_stats(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date:   Optional[str] = Query(None, alias="to"),
+    mode:      Optional[str] = "all",
+    pattern:   Optional[str] = "all",
+    bot_id:    Optional[str] = None,
+    initial_balance: float = 1000.0,
+):
+    """Aggregate analytics for TradeHistory.jsx. Same filters as /api/trades."""
+    trades = _load_trades_from_db(from_date, to_date, mode, pattern, bot_id)
+    stats = _compute_trade_stats(trades, initial_balance=initial_balance)
+    return stats
 
 
 @app.get("/api/proposals")
@@ -641,30 +1249,25 @@ async def get_agent_costs():
     return summary
 
 
-@app.get("/api/candles")
-async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
-    """
-    Get latest OHLC candles for chart — fetches directly from MT5 Desktop via Python IPC.
+# ─── Shared candle cache ─────────────────────────────────────────────
+# Two scenarios this prevents:
+#   1. Multiple bots fetching the same (tf, symbol) within seconds — they hit
+#      the cache instead of pounding MT5 / yfinance independently.
+#   2. UI polling /api/candles every few seconds — same cache path.
+# TTL is keyed to TF size so M1 expires fast (10s) and H4 expires slowly (300s).
+_candles_cache: Dict[tuple, dict] = {}  # (source, tf, symbol, limit) -> {"ts": float, "data": list}
 
-    Works whether or not main.py is running (api_server has its own MT5 connection).
+_CANDLE_TTL_SEC = {
+    "M1": 10, "M5": 30, "M15": 60, "M30": 90, "H1": 180, "H4": 300,
+}
 
-    Args:
-        tf: Timeframe (M1/M5/M15/M30/H1/H4)
-        limit: Number of candles (default: 100)
-        symbol: Symbol (default: bot_state.symbol)
 
-    Returns:
-        List of candle dicts: [{"time": unix_ts, "open": float, ...}, ...]
-    """
-    sym = symbol or bot_state.get("symbol", "XAUUSDc")
-
+def _fetch_candles_mt5(sym: str, tf: str, limit: int) -> list:
     try:
         import MetaTrader5 as mt5
     except ImportError:
         logger.error("MetaTrader5 module not installed")
         return []
-
-    # Map TF string → mt5 timeframe constant
     tf_map = {
         "M1":  mt5.TIMEFRAME_M1,  "M5":  mt5.TIMEFRAME_M5,
         "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
@@ -673,30 +1276,22 @@ async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
     mt5_tf = tf_map.get(tf.upper())
     if mt5_tf is None:
         return []
-
     try:
         if not mt5.initialize():
             logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
             return []
-
-        # Ensure symbol is in Market Watch
         si = mt5.symbol_info(sym)
         if si is None:
             logger.warning(f"Symbol {sym} not found")
             return []
         if not si.visible:
             mt5.symbol_select(sym, True)
-
-        # copy_rates_from_pos(symbol, tf, start, count) — start=0 = most recent
         rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, limit)
         if rates is None or len(rates) == 0:
-            logger.warning(f"copy_rates_from_pos returned no data for {sym} {tf}")
             return []
-
-        # Transform to lightweight-charts format
         return [
             {
-                "time":  int(r["time"]),     # unix timestamp (seconds)
+                "time":  int(r["time"]),
                 "open":  float(r["open"]),
                 "high":  float(r["high"]),
                 "low":   float(r["low"]),
@@ -705,10 +1300,36 @@ async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None):
             }
             for r in rates
         ]
-
     except Exception as e:
-        logger.error(f"Failed to fetch candles: {e}")
+        logger.error(f"MT5 candle fetch failed: {e}")
         return []
+
+
+@app.get("/api/candles")
+async def get_candles(tf: str = "M5", limit: int = 100, symbol: str = None,
+                      source: str = "mt5", force: bool = False):
+    """Latest OHLC candles. Cached by (source, tf, symbol, limit) with a
+    TF-sized TTL so concurrent bots / UI polls share one fetch."""
+    import time as _time
+    sym = symbol or bot_state.get("symbol", "XAUUSDc")
+    key = (source, tf.upper(), sym, limit)
+    ttl = _CANDLE_TTL_SEC.get(tf.upper(), 60)
+    now = _time.time()
+
+    if not force:
+        cached = _candles_cache.get(key)
+        if cached and (now - cached["ts"]) < ttl:
+            return cached["data"]
+
+    if source == "mt5":
+        data = _fetch_candles_mt5(sym, tf, limit)
+    else:
+        # Future: yfinance/tv branches — keep the cache contract identical.
+        logger.warning(f"/api/candles: source '{source}' not implemented, falling back to MT5")
+        data = _fetch_candles_mt5(sym, tf, limit)
+
+    _candles_cache[key] = {"ts": now, "data": data}
+    return data
 
 
 @app.get("/api/health")
@@ -772,10 +1393,20 @@ async def mt5_status():
             "server": ai.server,
             "balance": float(ai.balance),
             "equity": float(ai.equity),
+            "profit": float(ai.profit),         # floating P/L on open positions
+            "margin": float(ai.margin),         # margin used by open positions
+            "margin_free": float(ai.margin_free),
+            "margin_level": float(ai.margin_level) if ai.margin_level else None,  # %
             "currency": ai.currency,
             "leverage": ai.leverage,
             "trade_mode": ai.trade_mode,  # 0=demo, 2=real
         }
+        # Open positions count — useful "is anything live right now"
+        try:
+            positions = mt5.positions_get(symbol=sym_name)
+            out["account"]["positions_count"] = len(positions) if positions else 0
+        except Exception:
+            out["account"]["positions_count"] = None
 
         si = mt5.symbol_info(sym_name)
         if si is None:
@@ -991,85 +1622,79 @@ async def get_backtest_status():
 
 @app.get("/api/strategies")
 async def get_strategies():
-    """
-    Get all strategy patterns with their active status
-
-    Returns:
-        {
-            "version": str,
-            "patterns": {
-                "MOUNTAIN": {"active": bool, "name": str, ...},
-                ...
-            },
-            "active_count": int
-        }
-    """
-    from utils.strategy_loader import load_config, get_active_patterns
+    """Strategy config + per-pattern allowed_tfs (resolved against ALL_TFS default)."""
+    from utils.strategy_loader import load_config, get_active_patterns, get_allowed_tfs, ALL_TFS
 
     try:
         config = load_config()
+        patterns = config.get("patterns", {})
         active = get_active_patterns()
+
+        # Materialize allowed_tfs so the frontend always gets an explicit list
+        # (even when the JSON omits the key — then it's "all TFs allowed").
+        for name, meta in patterns.items():
+            meta["allowed_tfs"] = get_allowed_tfs(name)
 
         return {
             "version": config.get("version", "?"),
-            "patterns": config.get("patterns", {}),
+            "patterns": patterns,
             "active_count": len(active),
             "active_patterns": active,
-            "last_updated": config.get("last_updated", "")
+            "all_tfs": list(ALL_TFS),
+            "last_updated": config.get("last_updated", ""),
         }
     except Exception as e:
         logger.error(f"Failed to load strategies: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/strategies")
 async def update_strategies(request: Request):
-    """
-    Update active pattern list
+    """Update active patterns and/or per-pattern allowed_tfs.
 
-    Body:
+    Body (both fields optional, applied independently):
         {
-            "active": ["MOUNTAIN", "MOUNTAIN_R2"]
-        }
-
-    Returns:
-        {
-            "success": bool,
-            "active_patterns": List[str]
+          "active": ["MOUNTAIN", "MAI_RUAY"],
+          "allowed_tfs": {"MOUNTAIN": ["M1", "M5"]}
         }
     """
-    from utils.strategy_loader import save_active, get_active_patterns
+    from utils.strategy_loader import (
+        save_active, save_allowed_tfs, get_active_patterns, get_allowed_tfs,
+    )
 
     try:
         body = await request.json()
-        active_list = body.get("active", [])
+        active_list = body.get("active")
+        tfs_map = body.get("allowed_tfs")
 
-        if not isinstance(active_list, list):
-            return JSONResponse(
-                status_code=400,
-                content={"error": "active must be a list of pattern names"}
-            )
+        if active_list is not None:
+            if not isinstance(active_list, list):
+                return JSONResponse(status_code=400,
+                                    content={"error": "active must be a list of pattern names"})
+            save_active(active_list)
 
-        # Save updated active list
-        save_active(active_list)
+        if tfs_map is not None:
+            if not isinstance(tfs_map, dict):
+                return JSONResponse(status_code=400,
+                                    content={"error": "allowed_tfs must be a {pattern: [tf, ...]} object"})
+            save_allowed_tfs(tfs_map)
 
-        # Verify
-        updated = get_active_patterns()
+        if active_list is None and tfs_map is None:
+            return JSONResponse(status_code=400,
+                                content={"error": "Provide 'active' and/or 'allowed_tfs'"})
 
-        logger.info(f"Strategy patterns updated: {updated}")
+        updated_active = get_active_patterns()
+        updated_tfs = {p: get_allowed_tfs(p) for p in (tfs_map or {}).keys()}
+
+        logger.info(f"Strategies updated. active={updated_active} allowed_tfs={updated_tfs}")
         return {
             "success": True,
-            "active_patterns": updated
+            "active_patterns": updated_active,
+            "allowed_tfs": updated_tfs,
         }
     except Exception as e:
         logger.error(f"Failed to update strategies: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ============================================================================
@@ -1081,12 +1706,90 @@ async def startup_event():
     """Initialize on startup"""
     logger.info("🚀 API Server starting...")
     logger.info("📊 Dashboard available at http://127.0.0.1:8080")
+    # Tier 3: start the live tick poller (broadcasts MT5 bid/ask via WebSocket)
+    asyncio.create_task(_tick_poll_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("🛑 API Server shutting down...")
+    global _tick_poll_running
+    _tick_poll_running = False
+
+
+# ─── Tier 3: Live tick stream ──────────────────────────────────────
+# Broadcasts MT5 bid/ask for each unique symbol any running bot uses.
+# One MT5 connection (already used by /api/mt5-status), polled every
+# TICK_POLL_SECONDS. Cached so /api/ticks can serve REST requests too.
+_latest_ticks: Dict[str, dict] = {}
+_tick_poll_running = True
+TICK_POLL_SECONDS = 2.0
+
+
+def _active_symbols() -> List[str]:
+    """Distinct symbols across running bots. Empty list if none — poller idles."""
+    return list({b["symbol"] for b in bots.values() if b["status"] == "running"})
+
+
+async def _tick_poll_loop() -> None:
+    """Background poller — fetches MT5 tick per active symbol every
+    TICK_POLL_SECONDS, caches in _latest_ticks, broadcasts via WebSocket
+    as {event: 'tick', ...}. Survives transient MT5 hiccups silently."""
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        logger.warning("Tick poller: MetaTrader5 module not installed — disabled")
+        return
+
+    logger.info(f"📡 Tick poller started (every {TICK_POLL_SECONDS}s)")
+    while _tick_poll_running:
+        try:
+            symbols = _active_symbols()
+            if not symbols:
+                # Nothing to poll — sleep longer to avoid spinning
+                await asyncio.sleep(5.0)
+                continue
+
+            if not mt5.initialize():
+                await asyncio.sleep(TICK_POLL_SECONDS)
+                continue
+
+            for sym in symbols:
+                try:
+                    si = mt5.symbol_info(sym)
+                    if si is None:
+                        continue
+                    if not si.visible:
+                        mt5.symbol_select(sym, True)
+                    tick = mt5.symbol_info_tick(sym)
+                    if tick is None:
+                        continue
+                    payload = {
+                        "symbol": sym,
+                        "bid": float(tick.bid),
+                        "ask": float(tick.ask),
+                        "spread_pip": round((tick.ask - tick.bid) * 100, 1),
+                        "time": datetime.fromtimestamp(tick.time).isoformat(),
+                        "ts": datetime.now().isoformat(),
+                    }
+                    _latest_ticks[sym] = payload
+                    await manager.broadcast({"event": "tick", **payload})
+                except Exception as e:
+                    logger.debug(f"Tick poll {sym}: {e}")
+
+        except Exception as e:
+            logger.error(f"Tick poll loop error: {e}")
+
+        await asyncio.sleep(TICK_POLL_SECONDS)
+    logger.info("📡 Tick poller stopped")
+
+
+@app.get("/api/ticks")
+async def get_latest_ticks():
+    """REST snapshot of every symbol's most recent tick (poller updates every
+    TICK_POLL_SECONDS). UI can use this on first load before WS catches up."""
+    return {"ticks": _latest_ticks, "poll_seconds": TICK_POLL_SECONDS}
 
 
 # ============================================================================

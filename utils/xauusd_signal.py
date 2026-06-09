@@ -20,7 +20,7 @@ V4.25 Changes:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Tuple
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from swing_v414 import scan_swings
@@ -52,8 +52,27 @@ class OHLC:
 
 
 @dataclass
+class EntryPoint:
+    """หนึ่ง entry ของ multi-entry signal (MaiRuay v2.04)
+
+    price       — ราคา fill ตั้งใจ
+    label       — ป้ายอธิบาย เช่น "จุด1:market(open_child)"
+    lot         — lot ของ entry นี้ (รวมแล้วเท่ากับ Signal.lot)
+    is_market   — True = MARKET (fill ทันที), False = LIMIT (รอ 5 แท่ง)
+    tp          — TP per-entry (ปรับแล้ว: ถ้า TP_dist < SL_dist → entry±SL_dist เพื่อให้ RR=1.0)
+    sl          — SL per-entry (เท่ากับ Signal.sl เสมอ — เก็บไว้สะดวก)
+    """
+    price:      float
+    label:      str
+    lot:        float
+    is_market:  bool
+    tp:         float = 0.0
+    sl:         float = 0.0
+
+
+@dataclass
 class Signal:
-    pattern:    str           # 'DOWNTREND_IMPULSE' | 'UPTREND_IMPULSE' | 'MOUNTAIN' | 'MOUNTAIN_R2'
+    pattern:    str           # 'DOWNTREND_IMPULSE' | 'UPTREND_IMPULSE' | 'MOUNTAIN' | 'MOUNTAIN_R2' | 'MAI_RUAY'
     direction:  str           # 'BUY' | 'SELL'
     quality:    str           # '100%✓' | '~60%⚠️'
     entry:      float
@@ -68,6 +87,12 @@ class Signal:
     lot:        float = 0.0
     R55:        float = 0.0
     details:    dict  = field(default_factory=dict)
+    # ── MaiRuay v2.04 optional fields ──────────────────────────────
+    # default = None/False/'' → Mountain และ Scanner ใช้ตามเดิมโดยไม่ต้องแก้
+    entries:     Optional[List[EntryPoint]] = None  # 3 จุดเข้า — None = single entry (Mountain/Scanner)
+    is_round2:   bool  = False                       # True = ไม้รวยรอบ 2 (R2 หลัง SL)
+    father_pass: str   = ''                          # 'Pass1 ...' | 'R2 ...' — debug label
+    vol_ratio:   float = 0.0                         # Volatility Ratio (father avg ÷ pre-20 avg)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -780,3 +805,588 @@ def format_signal(sig: Signal, cur_time: str = "") -> str:
         f"{'═'*52}",
     ]
     return "\n".join(lines)
+
+
+# ════════════════════════════════════════════════════════════════════
+# XAUUSD Uptrend + Downtrend Scanner v4.2
+# Ported from notebook XAUUSD_Uptrend_Downtrend_Scanner_v3.8.md
+# These are ADDITIVE — no existing function above is modified.
+# Public detectors:
+#     _detect_uptrend_scanner(bars, portfolio)   -> Optional[Signal]
+#     _detect_downtrend_scanner(bars, portfolio) -> Optional[Signal]
+# ════════════════════════════════════════════════════════════════════
+
+# ── Scanner constants (notebook v4.2) ─────────────────────────────
+_SCAN_WINDOW          = 55
+_SCAN_LOOKBACK        = 25
+_SCAN_C1_MIN          = 0.60   # Close in upper 60% of R55
+_SCAN_C2_MIN          = 0.55   # min Low of last 5 bars in upper 55% of R55
+_SCAN_C3_MAX          = 0.30   # Close drop from HH ≤ 30% R55
+_SCAN_C4_MIN          = 0.25   # 2-8 consecutive bullish body sum ≥ 25% R55
+_SCAN_C5_MAX          = 0.30   # no bearish body > 30% R55 in lookback
+_SCAN_C6_MAX_START    = 0.40   # max close in (lookback + first 5) ≤ L55 + 40% R55
+_SCAN_C6_START_BARS   = 5
+_SCAN_MIN_R55_USD     = 3.0    # skip flat windows
+_SCAN_SL_MIN_BODY_PCT = 0.04   # swing pair must each have body > 4% R55
+_SCAN_ZONE_UP_LO      = 0.65   # BUY entry zone bottom (% R55 above L55)
+_SCAN_ZONE_UP_HI      = 0.85
+_SCAN_ZONE_DOWN_LO    = 0.15   # SELL entry zone bottom (% R55 above L55)
+_SCAN_ZONE_DOWN_HI    = 0.35
+_SCAN_FATHER_MAX_BARS = 8
+_SCAN_FATHER_MIN_PCT  = 40.0   # anti-trend kill threshold (% R55, pip basis)
+_SCAN_FATHER_MAX_PCT  = 100.0
+# v4.2: skip a signal if TP / SL distance is too small — protects against
+# low-volatility setups where a tight 1:1 R:R becomes a coin-flip with
+# broker spread. Notebook `simulate_trades` uses `if tp_dist*100 < 200: continue`.
+_SCAN_MIN_TP_PIP      = 200.0
+
+
+# ── Stateful trend-segment tracking (mirror notebook v4.2 backtest behavior) ──
+# In the notebook, `scan_uptrend` + `scan_entries_bar_by_bar` walk every bar
+# sequentially and track:
+#   - is_trend (currently inside a trend window)
+#   - segment_start_we (timestamp of when the current trend segment started)
+#   - stop_segments (segments where a LOSS already happened → skip remaining
+#     entries until trend resets)
+#   - watch_list (active swings being watched; pruned on use/expiry)
+#
+# Live cycle is stateless — each cycle scans from scratch — so we carry just
+# enough state across cycles to reproduce the two filters that materially
+# change which signals fire:
+#   1. segment_id: timestamp of the bar where current trend segment started
+#                  (resets when criteria fail or anti-trend triggers)
+#   2. stop_segments: segment_ids where we already lost a trade — block new
+#                     Scanner signals in that segment
+# The notebook's watch_list / father-stateful-reset are equivalent in LIVE
+# because each cycle re-scans the full 55-bar window from scratch and G2's
+# duplicate-pip filter prevents re-entering on the same swing.
+@dataclass
+class ScannerSegmentState:
+    """Per-bot, persisted across LIVE cycles in portfolio_state_cache.
+
+    Segment lifecycle (matches notebook v4.2 `scan_entries_bar_by_bar`):
+      - First passing cycle → segment_id = current bar's ISO timestamp
+      - Subsequent passing cycles where window overlaps previous (cur_ws <
+        last_confirmed_we) → segment_id stays the same (continuation)
+      - Passing cycle where window doesn't overlap (cur_ws >= last_confirmed_we)
+        → segment_id resets to current bar (new segment)
+      - Failing cycle → segment_id stays unchanged (NOT reset). This is the
+        notebook's "merged trend" rule: brief criteria gaps within an
+        overlapping trend window keep us in the same segment so a LOSS on bar
+        N can't be re-entered on bar N+2 just because bar N+1 momentarily
+        failed.
+    """
+    up_segment_id:         Optional[str] = None      # ISO timestamp; None = no trend ever
+    down_segment_id:       Optional[str] = None
+    # ISO of last bar where criteria passed — used to detect "new segment"
+    # (cur_ws >= up_last_confirmed_we means no overlap → fresh trend).
+    up_last_confirmed_we:  Optional[str] = None
+    down_last_confirmed_we: Optional[str] = None
+    stopped_up_segments:   set = field(default_factory=set)
+    stopped_down_segments: set = field(default_factory=set)
+
+    def to_dict(self) -> dict:
+        return {
+            "up_segment_id":          self.up_segment_id,
+            "down_segment_id":        self.down_segment_id,
+            "up_last_confirmed_we":   self.up_last_confirmed_we,
+            "down_last_confirmed_we": self.down_last_confirmed_we,
+            "stopped_up_segments":    sorted(self.stopped_up_segments),
+            "stopped_down_segments":  sorted(self.stopped_down_segments),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> "ScannerSegmentState":
+        if not d:
+            return cls()
+        return cls(
+            up_segment_id=d.get("up_segment_id"),
+            down_segment_id=d.get("down_segment_id"),
+            up_last_confirmed_we=d.get("up_last_confirmed_we"),
+            down_last_confirmed_we=d.get("down_last_confirmed_we"),
+            stopped_up_segments=set(d.get("stopped_up_segments") or []),
+            stopped_down_segments=set(d.get("stopped_down_segments") or []),
+        )
+
+
+def _scan_lookback_tuples(bars: list, lookback_bars: int = _SCAN_LOOKBACK) -> list:
+    """Last `lookback_bars` bars BEFORE the 55-bar window. Empty list if not enough history."""
+    if len(bars) <= _SCAN_WINDOW:
+        return []
+    end = len(bars) - _SCAN_WINDOW
+    start = max(0, end - lookback_bars)
+    return _bars_to_tuples(bars[start:end])
+
+
+# ── Uptrend criteria (return bool) ────────────────────────────────
+
+def _scan_c1_up(window_t, L55, R55):
+    return (_C(window_t[-1]) - L55) / R55 >= _SCAN_C1_MIN
+
+def _scan_c2_up(window_t, L55, R55, n: int = 5):
+    return (min(_L(b) for b in window_t[-n:]) - L55) / R55 >= _SCAN_C2_MIN
+
+def _scan_c3_up(window_t, R55):
+    H = max(_H(b) for b in window_t)
+    return (H - _C(window_t[-1])) / R55 <= _SCAN_C3_MAX
+
+def _scan_c4_up(window_t, R55):
+    """Find any 2-8 consecutive bullish bars whose body sum ≥ C4_MIN × R55."""
+    n = len(window_t)
+    for start in range(n):
+        bsum = 0.0
+        cnt = 0
+        for end in range(start, min(start + 8, n)):
+            body = _C(window_t[end]) - _O(window_t[end])
+            if body <= 0:
+                break
+            bsum += body
+            cnt += 1
+            if cnt >= 2 and (bsum / R55) >= _SCAN_C4_MIN:
+                return True
+    return False
+
+def _scan_c5_up(lookback_t, R55):
+    if not lookback_t or R55 <= 1e-6:
+        return True
+    for b in lookback_t:
+        body = _O(b) - _C(b)            # bearish > 0
+        if body > 0 and (body / R55) >= _SCAN_C5_MAX:
+            return False
+    return True
+
+def _scan_c6_up(window_t, lookback_t, L55, R55):
+    """Combined check: max close in (lookback + first 5 of window) must stay below
+    L55 + C6_MAX_START × R55. This enforces 'starts low' for an uptrend."""
+    level = L55 + _SCAN_C6_MAX_START * R55
+    closes = [_C(b) for b in window_t[: _SCAN_C6_START_BARS]]
+    if lookback_t:
+        closes += [_C(b) for b in lookback_t]
+    return (max(closes) <= level) if closes else True
+
+
+# ── Downtrend criteria (mirror of uptrend) ────────────────────────
+
+def _scan_c1_down(window_t, H55, R55):
+    return (H55 - _C(window_t[-1])) / R55 >= _SCAN_C1_MIN
+
+def _scan_c2_down(window_t, H55, R55, n: int = 5):
+    return (H55 - max(_H(b) for b in window_t[-n:])) / R55 >= _SCAN_C2_MIN
+
+def _scan_c3_down(window_t, R55):
+    L = min(_L(b) for b in window_t)
+    return (_C(window_t[-1]) - L) / R55 <= _SCAN_C3_MAX
+
+def _scan_c4_down(window_t, R55):
+    n = len(window_t)
+    for start in range(n):
+        bsum = 0.0
+        cnt = 0
+        for end in range(start, min(start + 8, n)):
+            body = _O(window_t[end]) - _C(window_t[end])
+            if body <= 0:
+                break
+            bsum += body
+            cnt += 1
+            if cnt >= 2 and (bsum / R55) >= _SCAN_C4_MIN:
+                return True
+    return False
+
+def _scan_c5_down(lookback_t, R55):
+    # Short-circuit when the lookback window is sparse (matches notebook v4.2
+    # `check_c5d` — bot's LIVE mode often has <25 lookback bars after a fresh
+    # symbol_select; v3.7 used to fall through and accidentally pass anyway,
+    # v3.8 makes the early-return explicit).
+    if not lookback_t or len(lookback_t) < 5 or R55 <= 1e-6:
+        return True
+    for b in lookback_t:
+        body = _C(b) - _O(b)            # bullish > 0
+        if body > 0 and (body / R55) >= _SCAN_C5_MAX:
+            return False
+    return True
+
+def _scan_c6_down(window_t, lookback_t, H55, R55):
+    """C6D v4.2 — match notebook `check_c6d`: ALL closes in
+    (lookback + first 5 of window) must be AT OR ABOVE level
+    H55 - 40%R55. Implemented as `min(closes) >= level`.
+
+    This is a TRUE mirror of C6 UP (`max(closes) <= level_low`) — for both
+    directions every early close must sit on the correct side of the 40%
+    boundary, not just one. v3.8 used `max(closes) >= level` (any close
+    above) which was too permissive; v4.2 tightens this back to "all closes
+    in top 40%" so the downtrend setup is confirmed by a consistently high
+    initial period, not a single spike."""
+    level = H55 - _SCAN_C6_MAX_START * R55
+    closes = [_C(b) for b in window_t[: _SCAN_C6_START_BARS]]
+    if lookback_t:
+        closes += [_C(b) for b in lookback_t]
+    return (min(closes) >= level) if closes else True
+
+
+# ── Anti-trend "father" filter ────────────────────────────────────
+
+def _scan_detect_father(window_t, R55_pip: float, direction: str) -> bool:
+    """direction='down' kills uptrends (looks for bearish father bars).
+    direction='up'   kills downtrends (looks for bullish father bars).
+    Triggers when 1-8 most-recent bars accumulate 40-100% R55 against the trend."""
+    if R55_pip <= 0 or not window_t:
+        return False
+    cur_close = _C(window_t[-1])
+    for n in range(1, _SCAN_FATHER_MAX_BARS + 1):
+        if n > len(window_t):
+            break
+        first_open = _O(window_t[-n])
+        if direction == 'down':
+            move_pip = (first_open - cur_close) * 100
+        else:
+            move_pip = (cur_close - first_open) * 100
+        pct = (move_pip / R55_pip) * 100
+        if _SCAN_FATHER_MIN_PCT <= pct <= _SCAN_FATHER_MAX_PCT:
+            return True
+    return False
+
+
+def _scan_lot(risk_pip: float, portfolio: float) -> float:
+    """Lot = portfolio × 10% / SL(pip) — matches notebook + Mountain helper."""
+    if risk_pip <= 0:
+        return 0.0
+    return round((portfolio * 0.10) / risk_pip, 2)
+
+
+def _scan_swing_pair_min_body_ok(window_t, swing, thresh_body_pip: float) -> bool:
+    """Both bars of a swing pair must have body > 4% R55 (notebook SL_MIN_BODY_PCT)."""
+    bar_nums = swing.get('bar_nums') or []
+    if len(bar_nums) < 2:
+        return False
+    base = window_t[0][0]
+    bodies = []
+    for bn in bar_nums:
+        idx = bn - base
+        if 0 <= idx < len(window_t):
+            t = window_t[idx]
+            bodies.append(abs(_C(t) - _O(t)) * 100)
+    return bool(bodies) and min(bodies) > thresh_body_pip
+
+
+# ── Public detectors ──────────────────────────────────────────────
+
+def _scan_uptrend_criteria(window_t, lookback_t, L55, R55, R55_pip):
+    """Pure C1-C6 + anti-trend evaluation. Returns (passes, fail_reason).
+    Split out so the LIVE detector can update segment state regardless of
+    which criterion failed."""
+    if not _scan_c1_up(window_t, L55, R55):
+        return False, "C1 fail (close < 60% R55)"
+    if not _scan_c2_up(window_t, L55, R55):
+        return False, "C2 fail (recent Low 5bars < 55% R55)"
+    if not _scan_c3_up(window_t, R55):
+        return False, "C3 fail (drop from HH > 30% R55)"
+    if not _scan_c4_up(window_t, R55):
+        return False, "C4 fail (no bullish impulse 25% R55)"
+    if not _scan_c5_up(lookback_t, R55):
+        return False, "C5 fail (bearish bar > 30% R55 in lookback)"
+    if not _scan_c6_up(window_t, lookback_t, L55, R55):
+        return False, "C6 fail (early closes > 40% R55)"
+    if _scan_detect_father(window_t, R55_pip, direction='down'):
+        return False, "anti-trend: bearish father bar"
+    return True, None
+
+
+def _detect_uptrend_scanner(
+    bars: "list[OHLC]",
+    portfolio: float = 1000.0,
+    debug: dict = None,
+    state: "Optional[ScannerSegmentState]" = None,
+):
+    """Scanner v4.2 BUY detector. Returns Signal or None.
+
+    debug: optional dict — when supplied, writes 'skip' = '<reason>' on each
+           early-exit so signal_engine can surface a per-pattern SKIP reason
+           in the heartbeat (Tier 2). Strategy logic is unchanged.
+    state: optional ScannerSegmentState — when supplied, the detector tracks
+           the current uptrend segment and refuses to fire on segments that
+           already had a LOSS (notebook v4.2 stop_segments behavior).
+
+    Pipeline:
+      1. C1-C6 on the trailing 55-bar window (with 25-bar lookback for C5/C6)
+      2. Anti-trend "father" filter on the latest 1-8 bars
+      3. Pick a swing low whose body_lo sits in the 65-85% R55 entry zone
+      4. Trigger only when the current bar's Low has reached the swing low
+      5. TP = entry + 50% × (highest swing high body_hi - entry)  (R:R=1.0 symmetric SL)"""
+    from utils.swing_v414 import scan_swings
+
+    def _skip(reason: str):
+        if debug is not None:
+            debug['skip'] = reason
+        return None
+
+    if len(bars) < _SCAN_WINDOW:
+        return _skip(f"bars {len(bars)} < {_SCAN_WINDOW}")
+
+    window = bars[-_SCAN_WINDOW:]
+    window_t = _bars_to_tuples(window)
+    lookback_t = _scan_lookback_tuples(bars)
+
+    H55 = max(_H(b) for b in window_t)
+    L55 = min(_L(b) for b in window_t)
+    R55 = H55 - L55
+    R55_pip = R55 * 100
+
+    if R55 < _SCAN_MIN_R55_USD:
+        # Flat market doesn't end the segment on its own — that requires a
+        # successful PASS on a non-overlapping window. Leave state alone.
+        return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
+
+    passes, fail_reason = _scan_uptrend_criteria(window_t, lookback_t, L55, R55, R55_pip)
+
+    # Maintain segment_id across cycles per notebook v4.2 merged-trend rule:
+    # segment continues as long as passing windows overlap. A FAIL does NOT
+    # reset segment_id — it only stays the same. A new segment is detected
+    # when the next PASS has cur_ws >= up_last_confirmed_we (no overlap).
+    # Why this matters: after a LOSS at segment X, the user expects "wait for
+    # a NEW chart to form" — not just one failing bar followed by re-entry.
+    cur_we = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
+    cur_ws = window[0].time.isoformat() if hasattr(window[0].time, "isoformat") else str(window[0].time)
+    if state is not None and passes:
+        is_new_segment = (
+            state.up_last_confirmed_we is None
+            or cur_ws >= state.up_last_confirmed_we
+        )
+        if is_new_segment or state.up_segment_id is None:
+            state.up_segment_id = cur_we
+        # else: continuation — keep existing segment_id
+        state.up_last_confirmed_we = cur_we
+
+    if not passes:
+        return _skip(fail_reason)
+
+    # If we've already lost a trade in this same segment, don't re-enter it.
+    if state is not None and state.up_segment_id in state.stopped_up_segments:
+        return _skip(f"segment {state.up_segment_id} stopped after prior LOSS")
+
+    cur = window_t[-1]
+    cur_low = _L(cur)
+
+    zone_lo = L55 + R55 * _SCAN_ZONE_UP_LO
+    zone_hi = L55 + R55 * _SCAN_ZONE_UP_HI
+
+    highs, lows = scan_swings(window_t, R55_pip)
+    if not lows or not highs:
+        return _skip("ไม่เจอ swing high/low")
+
+    thresh_body_pip = _SCAN_SL_MIN_BODY_PCT * R55_pip
+    triggered = []
+    for sl in lows:
+        body_lo = sl['body_lo']
+        if not (zone_lo <= body_lo <= zone_hi):
+            continue
+        if not _scan_swing_pair_min_body_ok(window_t, sl, thresh_body_pip):
+            continue
+        if cur_low <= body_lo:
+            triggered.append(sl)
+    if not triggered:
+        return _skip(f"ไม่มี swing low ใน zone [{zone_lo:.2f}, {zone_hi:.2f}] ที่ price แตะ")
+    # v4.2 notebook iterates `watch_list.keys()` in insertion order = chrono
+    # order swings were found by scan_swings. We pick `triggered[0]` to match
+    # (was `max(triggered, key=body_lo)`). Same reason as the SELL path —
+    # when multiple swing lows are in the 65-85% zone, "first chronologically"
+    # is the notebook's choice, not "highest body_lo."
+    sl_pick = triggered[0]
+
+    sh_body_hi = max(h['body_hi'] for h in highs)
+    if sh_body_hi <= sl_pick['body_lo']:
+        return _skip("SH body_hi <= entry")
+
+    entry   = sl_pick['body_lo']
+    reward  = sh_body_hi - entry
+    tp_dist = 0.50 * reward
+    tp      = entry + tp_dist
+    sl      = entry - tp_dist
+    risk_pip = tp_dist * 100
+    if risk_pip <= 0:
+        return _skip("risk_pip <= 0")
+    # v4.2: skip low-volatility setups where SL/TP is too tight (≤200 pip).
+    # Matches notebook `simulate_trades`. 1:1 R:R on <200 pip becomes a
+    # coin-flip after broker spread + 1 candle of noise.
+    if risk_pip < _SCAN_MIN_TP_PIP:
+        return _skip(f"TP/SL too tight: {risk_pip:.0f}pip < {_SCAN_MIN_TP_PIP:.0f}pip")
+
+    return Signal(
+        pattern='UPTREND_SCANNER',
+        direction='BUY',
+        quality='✓',
+        entry=round(entry, 3),
+        sl=round(sl, 3),
+        sl_name='SL=50%(SH-Entry)',
+        tp_order=round(tp, 3),
+        tp_ref=round(tp, 3),
+        tp_name='TP=50%(SH-Entry)',
+        rr=1.0,
+        risk_pip=round(risk_pip, 1),
+        reward_pip=round(tp_dist * 100, 1),
+        lot=_scan_lot(risk_pip, portfolio),
+        R55=round(R55_pip, 1),
+        details={
+            'L55': round(L55, 3), 'H55': round(H55, 3),
+            'sl_body_lo': round(sl_pick['body_lo'], 3),
+            'sl_bar_nums': sl_pick.get('bar_nums', []),
+            'sh_body_hi': round(sh_body_hi, 3),
+            'zone_lo': round(zone_lo, 3),
+            'zone_hi': round(zone_hi, 3),
+            'segment_id': state.up_segment_id if state is not None else None,
+        },
+    )
+
+
+def _scan_downtrend_criteria(window_t, lookback_t, H55, R55, R55_pip):
+    """Pure C1D-C6D + anti-trend evaluation (mirror of _scan_uptrend_criteria)."""
+    if not _scan_c1_down(window_t, H55, R55):
+        return False, "C1D fail (close > 40% R55 top-down)"
+    if not _scan_c2_down(window_t, H55, R55):
+        return False, "C2D fail (recent High 5bars > 45% R55 top-down)"
+    if not _scan_c3_down(window_t, R55):
+        return False, "C3D fail (rise from LL > 30% R55)"
+    if not _scan_c4_down(window_t, R55):
+        return False, "C4D fail (no bearish impulse 25% R55)"
+    if not _scan_c5_down(lookback_t, R55):
+        return False, "C5D fail (bullish bar > 30% R55 in lookback)"
+    if not _scan_c6_down(window_t, lookback_t, H55, R55):
+        return False, "C6D fail (early closes < 60% R55)"
+    if _scan_detect_father(window_t, R55_pip, direction='up'):
+        return False, "anti-trend: bullish father bar"
+    return True, None
+
+
+def _detect_downtrend_scanner(
+    bars: "list[OHLC]",
+    portfolio: float = 1000.0,
+    debug: dict = None,
+    state: "Optional[ScannerSegmentState]" = None,
+):
+    """Scanner v4.2 SELL detector. Mirror of the BUY path.
+
+    debug: optional dict — same usage as _detect_uptrend_scanner.
+    state: optional ScannerSegmentState — tracks the current downtrend segment
+           and blocks new entries on segments where a prior LOSS occurred."""
+    from utils.swing_v414 import scan_swings
+
+    def _skip(reason: str):
+        if debug is not None:
+            debug['skip'] = reason
+        return None
+
+    if len(bars) < _SCAN_WINDOW:
+        return _skip(f"bars {len(bars)} < {_SCAN_WINDOW}")
+
+    window = bars[-_SCAN_WINDOW:]
+    window_t = _bars_to_tuples(window)
+    lookback_t = _scan_lookback_tuples(bars)
+
+    H55 = max(_H(b) for b in window_t)
+    L55 = min(_L(b) for b in window_t)
+    R55 = H55 - L55
+    R55_pip = R55 * 100
+
+    if R55 < _SCAN_MIN_R55_USD:
+        # Flat market doesn't end the segment — see _detect_uptrend_scanner.
+        return _skip(f"R55 {R55:.1f} USD < {_SCAN_MIN_R55_USD} (flat)")
+
+    passes, fail_reason = _scan_downtrend_criteria(window_t, lookback_t, H55, R55, R55_pip)
+
+    # Merged-trend segment tracking — mirror of UP path. See ScannerSegmentState
+    # docstring and _detect_uptrend_scanner for the why.
+    cur_we = bars[-1].time.isoformat() if hasattr(bars[-1].time, "isoformat") else str(bars[-1].time)
+    cur_ws = window[0].time.isoformat() if hasattr(window[0].time, "isoformat") else str(window[0].time)
+    if state is not None and passes:
+        is_new_segment = (
+            state.down_last_confirmed_we is None
+            or cur_ws >= state.down_last_confirmed_we
+        )
+        if is_new_segment or state.down_segment_id is None:
+            state.down_segment_id = cur_we
+        state.down_last_confirmed_we = cur_we
+
+    if not passes:
+        return _skip(fail_reason)
+
+    if state is not None and state.down_segment_id in state.stopped_down_segments:
+        return _skip(f"segment {state.down_segment_id} stopped after prior LOSS")
+
+    cur = window_t[-1]
+    cur_high = _H(cur)
+
+    zone_lo = L55 + R55 * _SCAN_ZONE_DOWN_LO
+    zone_hi = L55 + R55 * _SCAN_ZONE_DOWN_HI
+
+    highs, lows = scan_swings(window_t, R55_pip)
+    if not highs or not lows:
+        return _skip("ไม่เจอ swing high/low")
+
+    # Notebook v3.8 SELL path (`scan_entries_bar_by_bar_down`) preserves the
+    # same units quirk as v3.7: multiplies `min_body` by 100 before comparing
+    # to `thresh_body` (which is already in pip), so the 4% R55 body filter
+    # is *effectively disabled* on the SELL side. The BUY path doesn't have
+    # the extra *100 and the filter is active there. Per CLAUDE.md (notebook
+    # is source of truth), we replicate the same asymmetry — otherwise live
+    # SELL signals get blocked when Colab fires them (verified at M1
+    # 2026-05-11 12:09/12:17 UTC).
+    triggered = []
+    for sh in highs:
+        body_hi = sh['body_hi']
+        if not (zone_lo <= body_hi <= zone_hi):
+            continue
+        # SELL: skip the body filter to match notebook behavior.
+        if cur_high >= body_hi:
+            triggered.append(sh)
+    if not triggered:
+        return _skip(f"ไม่มี swing high ใน zone [{zone_lo:.2f}, {zone_hi:.2f}] ที่ price แตะ")
+    # v4.2 notebook (`scan_entries_bar_by_bar_down`) iterates `watch_list.keys()`
+    # in INSERTION ORDER (= chronological order swings were found) and picks
+    # the FIRST level where `entry_high >= level`, then breaks. We previously
+    # used `min(triggered, key=body_hi)` which picked the LOWEST body_hi —
+    # not the same as "first chronologically." For setups with multiple swing
+    # highs in the 15-35% zone the picks diverged and our entry sat at a
+    # different price than what the notebook (and the user reading v4.2 off
+    # the chart) expects.
+    sh_pick = triggered[0]
+
+    sl_body_lo = min(s['body_lo'] for s in lows)
+    if sl_body_lo >= sh_pick['body_hi']:
+        return _skip("SL body_lo >= entry")
+
+    entry   = sh_pick['body_hi']
+    reward  = entry - sl_body_lo
+    tp_dist = 0.50 * reward
+    tp      = entry - tp_dist
+    sl      = entry + tp_dist
+    risk_pip = tp_dist * 100
+    if risk_pip <= 0:
+        return _skip("risk_pip <= 0")
+    # v4.2: skip low-volatility setups (see _detect_uptrend_scanner)
+    if risk_pip < _SCAN_MIN_TP_PIP:
+        return _skip(f"TP/SL too tight: {risk_pip:.0f}pip < {_SCAN_MIN_TP_PIP:.0f}pip")
+
+    return Signal(
+        pattern='DOWNTREND_SCANNER',
+        direction='SELL',
+        quality='✓',
+        entry=round(entry, 3),
+        sl=round(sl, 3),
+        sl_name='SL=50%(Entry-SL)',
+        tp_order=round(tp, 3),
+        tp_ref=round(tp, 3),
+        tp_name='TP=50%(Entry-SL)',
+        rr=1.0,
+        risk_pip=round(risk_pip, 1),
+        reward_pip=round(tp_dist * 100, 1),
+        lot=_scan_lot(risk_pip, portfolio),
+        R55=round(R55_pip, 1),
+        details={
+            'L55': round(L55, 3), 'H55': round(H55, 3),
+            'sh_body_hi': round(sh_pick['body_hi'], 3),
+            'sh_bar_nums': sh_pick.get('bar_nums', []),
+            'sl_body_lo': round(sl_body_lo, 3),
+            'zone_lo': round(zone_lo, 3),
+            'zone_hi': round(zone_hi, 3),
+            'segment_id': state.down_segment_id if state is not None else None,
+        },
+    )

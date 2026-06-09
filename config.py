@@ -18,10 +18,14 @@ RISK_CONFIG = {
     'max_concurrent_plans': 2,   # เปิดพร้อมกันได้สูงสุด 2 plans
     'max_total_risk_pct': 0.20,  # risk รวมทุก plan ไม่เกิน 20%
 
-    # Loss Limits
-    'max_consecutive_loss': 3,   # หยุดเมื่อแพ้ติดกัน 3 ไม้
-    'max_loss_30pct': 0.30,      # หยุดเมื่อขาดทุนสะสม > 30%
-    'max_loss_50pct': 0.50,      # หยุดเมื่อขาดทุนรวม > 50%
+    # Loss Limits — TEMPORARILY DISABLED (2026-05-11)
+    # User is collecting data on many trades before designing Risk/Money mgmt.
+    # Original values: 3 / 0.30 / 0.50. Restore once the dataset is enough.
+    # Guardian Rules 2/3/4 use these — keeping huge sentinel values short-
+    # circuits them without touching agents/g3_risk_gate.py.
+    'max_consecutive_loss': 9999,  # was 3
+    'max_loss_30pct': 9.99,        # was 0.30 (30%) — 999% effectively off
+    'max_loss_50pct': 9.99,        # was 0.50 (50%) — 999% effectively off
 
     # Trailing SL
     'trailing_sl_min_tp': 3000,  # pip — เริ่ม trailing เมื่อ TP > 3000 pip

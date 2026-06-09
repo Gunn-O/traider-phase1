@@ -8,30 +8,61 @@
 
 ## ⚠️ ไฟล์ที่ใช้งาน (Phase II)
 
+### 🎯 Strategy Reference Notebooks (Source of Truth — 3 ไฟล์)
+
+| Notebook | Strategy | Python |
+|----------|----------|--------|
+| `strategy/XAUUSD_Backtest_Mountain.md` | **ภูเขา** (Mountain v4.61) | `strategies/mountain.py` |
+| `strategy/Mairuay_Basic_Father_V2.15M5_M1Karpathy.ipynb` | **ไม้รวย** Karpathy (Basic Father multi-TF, M1/M5/M15/M30) | `strategies/mai_ruay_karpathy.py` (pattern=`MAI_RUAY`) |
+| `strategy/Mairuay_Basic_Father_V2.04_M1.ipynb` | **ไม้รวยM1** v2.04 Bugfix1 (Basic Father, M1 only) | `strategies/mai_ruay.py` (pattern=`MAI_RUAY_M1`) |
+| `strategy/XAUUSD_Uptrend_Downtrend_Scanner_v4.2.md` | **Uptrend/Downtrend Scanner v4.2** | `strategies/uptrend_downtrend_scanner.py` (+ detectors ใน `utils/xauusd_signal.py`) |
+
+**Legacy (อ้างอิงเท่านั้น — ไม่ใช่ source of truth):**
+- `strategy/legacy/XAUUSD_Backtest_MaiRuay_v1.md` — engine v1 ถูกแทนที่ด้วย v2.04 แล้ว (no Python implementation)
+
+**กฎเหล็ก:** Python ต้องตรงกับ **engine code ใน notebook** เสมอ (markdown header ใน notebook อาจล้าสมัย — engine code คือ source of truth)
+**Strategies ทั้ง 3 ทำงานแยกกัน** — ไม่มีการ share state ข้าม strategy
+
+### Supporting Files
+
 | ไฟล์ | สถานะ |
 |------|-------|
-| `strategy/XAUUSD_System_Prompt_Reviewer.md` | ✅ **ใช้งาน** — Claude Reviewer (SIM/LIVE only) |
+| `strategy/XAUUSD_System_Prompt_Reviewer.md` | ⚠️ Legacy — Reviewer per-trade is **disabled** (see Architecture below) |
 | `docs/TRAIDER_MASTER_PLAN_v2.1.md` | ✅ Architecture reference |
-| `utils/xauusd_signal.py` | ✅ **Signal Engine** — คำนวณ Entry/SL/TP/Lot (ห้ามแก้) |
-| `utils/swing_v414.py` | ✅ **Swing Logic** — ตรวจจับ swing points (ห้ามแก้) |
+| `utils/xauusd_signal.py` | ✅ Signal helpers + Scanner v4.2 detectors |
+| `utils/swing_v414.py` | ✅ Swing detection (pair_thresh = max(R55×1%, 100pip)) |
+| `config/strategies.json` | ✅ Pattern toggle + per-TF allowlist (4 active patterns = 3 strategies) |
 
 ---
 
-## ⚠️ V4.20 Architecture Change (2026-04-23)
+## ⚠️ V4.20 Architecture Change (2026-04-23, refreshed 2026-05-11)
 
 **Signal Engine Integration:**
-- **Signal Engine:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
-  - คำนวณ Entry/SL/TP/Lot ทั้งหมด
-  - **ห้ามแก้ไข** xauusd_signal.py และ swing_v414.py
-  - Single TF: M5 only
-  - Phase II: ใช้ใน BACKTEST, SIM, LIVE ทั้งหมด
+- **Strategy modules:** `strategies/mountain.py`, `strategies/mai_ruay.py`, `strategies/uptrend_downtrend_scanner.py`
+  - คำนวณ Entry/SL/TP/Lot ทั้งหมด — ตรงกับ engine code ใน notebook 3 ไฟล์
+  - แก้ได้เมื่อ notebook engine update (อย่าแก้ตามใจ — ต้อง diff กับ notebook ก่อน)
+  - **MaiRuay มี 2 variants ที่เปิดควบคู่ได้:**
+    - `MAI_RUAY` (Karpathy, multi-TF M1/M5/M15/M30) — notebook `V2.15M5_M1Karpathy`, engine `strategies/mai_ruay_karpathy.py`. 2 entries (ENTRY_SMALL/MEDIUM), obstacle scanner, RR floor 0.5, ไม่มี R2.
+    - `MAI_RUAY_M1` (V2.04 Bugfix1, M1 only) — notebook `V2.04_M1`, engine `strategies/mai_ruay.py`. 3 entries, multi-entry split lot/3, Round 2, ไม่มี obstacle.
+- **Signal helpers:** `utils/xauusd_signal.py` + `utils/swing_v414.py`
+  - แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing_v414 pair_thresh 0.5%→1%)
+  - ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec ของ notebook
+- **TF policy (config/strategies.json):**
+  - MOUNTAIN: M1/M5/M15/M30
+  - MAI_RUAY (Karpathy): M1/M5/M15/M30
+  - MAI_RUAY_M1 (V2.04 Bugfix1): **M1 only**
+  - Scanner: M1/M5/M15/M30
+- Phase II: ใช้ใน BACKTEST, SIM, LIVE ทั้งหมด
 
-**Claude Role (Phase II):**
-- **BACKTEST mode:** ไม่ใช้ Claude เลย → AUTO_APPROVE
-- **SIM/LIVE mode:** Claude = Reviewer (approve/reject signal เท่านั้น)
-  - System Prompt: `strategy/XAUUSD_System_Prompt_Reviewer.md`
-  - max_tokens: 300
-  - เน้น cache hit rate > 80%
+**Claude Role (Phase II — refreshed 2026-05-11):**
+- **Per-trade pipeline = Python only (no AI in any mode)**
+  - BACKTEST / SIM / LIVE — ทั้งหมด AUTO_APPROVE จาก Signal Engine
+  - Guardian (G3c) เป็น Python rules ล้วน
+  - เหตุผล: criteria ทั้งหมดอยู่ใน Python strategies แล้ว, Reviewer ซ้ำซ้อน
+- **AI ใช้เฉพาะ off-cycle agents (ไม่ใช่ทุก trade):**
+  - **Weekly Strategist** — สัปดาห์ละครั้ง: วิเคราะห์ผล → แนะนำ parameter
+  - **Monthly Evolver** — เดือนละครั้ง: propose strategy update (human approve)
+- Reviewer per-trade prompt (`XAUUSD_System_Prompt_Reviewer.md`) เก็บไว้เป็น legacy — ไม่โหลดในรันปัจจุบัน
 
 ---
 
@@ -40,47 +71,58 @@
 รับผิดชอบ: เขียนโค้ด, แก้ bug, implement feature ตาม Master Plan v2.1
 
 ### กฎ Dev:
-1. **Strategy MD อ่านอย่างเดียว** — ห้าม hardcode rule ใน Python แทน MD
-2. **Claude API ทุก trade** — ห้ามใช้ mock/rule-based ใน production pipeline
-3. **RSI เป็น metadata เท่านั้น** — ไม่ใช้ตัดสิน BUY/SELL
-4. **Lot = max_loss_usd / sl_pip** — ไม่ใช่ balance × 1.5%
-5. **Risk 10% per plan** — ไม่ใช่ 1.5%
-6. **1 แผนต่อครั้ง** — ห้ามเปิดแผนใหม่ถ้ายังมีแผนเปิดอยู่
-7. **Timestamp = candle time** — ห้ามใช้ datetime.now() ใน backtest
-8. **Technique log** มาจาก decision['technique'] ไม่ใช่ world_state
+1. **Strategy notebook = source of truth** — Python ต้องตรงกับ engine code ใน 3 notebooks
+2. **Per-trade pipeline = Python only** — ห้ามเรียก Claude ตอน decide/lot/guardian (เลิกใช้แล้ว)
+3. **Lot = portfolio × 10% / sl_pip** — Signal Engine คำนวณให้, อย่า override
+4. **1 plan ต่อ pattern** — Mountain + MaiRuay เปิดขนานกันได้ (ตาม Guardian Rule 1)
+5. **Timestamp = candle time** — ห้ามใช้ datetime.now() ใน backtest
+6. **Technique log** มาจาก signal.pattern (โดย decision['setup'])
 
-### Architecture Pipeline (V4.20):
+### Architecture Pipeline (Phase II — Python-only per trade)
 
-**Phase II Mode Switching:**
-- **BACKTEST mode (`--backtest --no-ai`):** Signal Engine → G2 → AUTO_APPROVE → Execute → Log (ไม่เรียก Claude)
-- **SIM/LIVE mode:** Signal Engine → G2 → Claude Reviewer → Execute → Log → Notify
+ทุก mode (BACKTEST / SIM / LIVE) ใช้ **pipeline เดียวกัน** — ต่างกันแค่ที่ Execute step (broker target):
 
 ```
-Market Data (M5 Single TF)
+Market Data
     ↓
-Signal Engine: xauusd_signal.py
-    Entry/SL/TP/Lot คำนวณเสร็จ → Signal object
+Signal Engine: utils/signal_engine.py — รัน 3 strategy แบบ parallel
+    MOUNTAIN          → strategies/mountain.py              (ภูเขา v4.61, M1/M5)
+    MAI_RUAY          → strategies/mai_ruay.py              (พ่อ-แม่, M1/M5/M15/M30)
+    UPTREND_SCANNER   ┐
+                      ├→ strategies/uptrend_downtrend_scanner.py (v4.2, M5 only)
+    DOWNTREND_SCANNER ┘
+    เลือก best by R:R → Signal object (Entry/SL/TP/Lot คำนวณเสร็จ)
     ↓ world_state + signal
-G2: Pre-filter
-    ตรวจ signal validity, R:R ≥ 1.0, duplicate
+G2 Pre-filter (Python)
+    block ก่อนถึง execute: active_plan, consecutive_loss≥3, R:R<1.0,
+    duplicate signal ±50pip
     ↓ pre_approved
-G3a: [BACKTEST: AUTO_APPROVE] / [SIM/LIVE: Claude Reviewer]
-    BACKTEST: bypass Claude ทั้งหมด
-    SIM/LIVE: system=[reviewer_prompt cached], max_tokens=300
-    → APPROVE/REJECT (ไม่คำนวณ Entry/SL/TP)
-    ↓ APPROVE → ใช้ค่าจาก Signal Engine
-G3b: Lot adjustment (optional - ตอนนี้ใช้จาก Signal Engine)
-G3c: Guardian (R:R ≥ 1.0, consecutive_loss, plan active)
+Step 3a Decision (AUTO_APPROVE)
+    ใช้ signal จาก Signal Engine ตรงๆ — ไม่เรียก Claude (deprecated)
+Step 3b Lot
+    ใช้ signal.lot ตรงๆ (WINRATE_TEST=true → 0.01 override)
+Step 3c Guardian (Python rules)
+    Rule 1: active plan ของ pattern เดียวกัน → block
+    Rule 2: consecutive_loss ≥ 3 → block
+    Rule 3: total_loss > 30% → block
+    Rule 4: total_loss > 50% → block ถาวร
+    Rule 5: R:R < min_rr_ratio (config 0.0 = ปิด)
+    ↓ approved
+Step 4 Execute → Broker
+    BACKTEST  → PaperBroker (in-memory simulation)
+    SIM/paper → PaperBroker (real-time data, fake orders)
+    micro     → MT5LiveBroker (real Cent account orders)
+    live      → MT5LiveBroker (real money orders)
     ↓
-G4a: LINE Notify (SIM/LIVE only)
-G4b: Sheets Log (candle timestamp ไม่ใช่ datetime.now())
-G4c: Position Monitor (ตรวจทุก candle close)
+G4b Sheets Log (candle timestamp)
+G4c Position Monitor (ทุก candle close — check SL/TP hit)
 ```
 
-**OLD Pipeline (DEPRECATED):**
-```
-G1 Pattern Detector → G2 → G3a Decision Maker → G3b Lot → G3c Guardian → G4
-```
+**สิ่งที่ "เลิกใช้" จาก architecture เดิม:**
+- ❌ G3a Claude Reviewer per-trade (ไม่ wired แล้ว)
+- ❌ G3b Risk Manager (Haiku) (ไม่ wired แล้ว — `self.risk_manager = None` ลบทิ้ง)
+- ❌ Confidence threshold (Signal Engine confidence=1.0 เสมอ)
+- ❌ G1 Pattern Detector (แทนด้วย Signal Engine)
 
 ### Risk Config (v2.1):
 ```python
@@ -108,40 +150,53 @@ winrate_test_lot = 0.01
 
 ### Checklist (Phase II):
 
-**Signal Engine — utils/xauusd_signal.py + utils/swing_v414.py:**
-- [ ] **ห้ามแก้ไข** ทั้ง 2 ไฟล์ (พัฒนาใน TradingView ก่อน)
-- [ ] Single TF: M5 only
-- [ ] Output: signal object พร้อม entry/sl/tp/lot
-- [ ] Swing detection ใช้ swing_v414.py
-- [ ] ถ้าต้องการแก้: ทำใน TradingView → backtest ให้ match > 90% → แปลงเป็น Python
+**Strategy Modules — strategies/{mountain,mai_ruay,uptrend_downtrend_scanner}.py:**
+- [ ] **ตรวจ diff กับ notebook engine** ก่อนทุกครั้งที่แก้ — ถือว่า notebook = source of truth
+- [ ] Mountain: pair_thresh = max(R55×1%, 100pip), buffer 5%×height, TP3=80%×height, SL=60%×height (notebook v4.61)
+- [ ] **MaiRuay v2 (notebook V2.04):**
+  - พ่อ 1-10 แท่งสีเดียวห้ามแทรก (R1) / 1-8 อนุญาตแทรก 1 ≤10%R55 (R2)
+  - พ่อ body รวม >60%R55 (R1) / >35%R55 (R2)
+  - พ่อแต่ละแท่ง >4%R55 (อนุโลม 2 แท่ง >2% ถ้าเสียงข้างมาก >10%)
+  - Volatility Ratio >1 (R1 เท่านั้น)
+  - แม่ 3-25% **ของ R55** (ไม่ใช่ของพ่อ)
+  - 3 จุดเข้าพร้อมกัน split lot/3, ไม้ 2-3 = LIMIT pending 5 แท่ง
+  - SL = 40%×father (ตายตัว), TP = 45%×father (ตายตัว)
+  - TP30/SL45 special trigger จาก 50 แท่งก่อนพ่อ no-touch
+  - TP < 200 pip → skip
+  - Round 2 ภายใน 16 แท่งหลัง SL — ทิศเดิม, TP/SL ใช้พ่อรวม
+  - ไม่มี anti-trend, ไม่มี obstacle scanner, ไม่มี spread buffer
+- [ ] Scanner: C1≥60%, C2≥55% (5bars), C3≤30%, C4≥25%, C5≤30%, C6≤40% (start 5 bars)
+- [ ] ทั้ง 3 strategy ทำงานแยกกัน — ไม่มี state แชร์
+- [ ] Output: Signal object พร้อม entry/sl/tp/lot/rr (MaiRuay v2: เพิ่ม `entries`, `is_round2`, `father_pass`, `vol_ratio`)
+
+**Signal Helpers — utils/xauusd_signal.py + utils/swing_v414.py:**
+- [ ] แก้ได้เฉพาะเพื่อ sync กับ notebook 3 ไฟล์ (เช่น swing pair_thresh)
+- [ ] ห้ามแก้เพื่อ "ปรับแต่งเอง" นอก spec notebook
+- [ ] Workflow: TradingView/Colab → backtest match > 90% → port to Python → run audit
 
 **G2 Pre-filter — agents/g2_prefilter.py:**
-- [ ] Block ก่อน G3: มี active_plan_id อยู่แล้ว (1 plan ต่อครั้ง)
-- [ ] Block ก่อน G3: consecutive_loss ≥ 3
-- [ ] Block ก่อน G3: R:R < 1.0
-- [ ] **Block ก่อน G3: duplicate signal** (entry ใหม่ ± 50pip ของ active plan)
-- [ ] Block rate > 70% (เพื่อลด Claude calls ใน SIM/LIVE)
+- [ ] Block ก่อน execute: มี active_plan_id อยู่แล้ว (1 plan ต่อครั้ง per-pattern)
+- [ ] Block ก่อน execute: consecutive_loss ≥ 3
+- [ ] Block ก่อน execute: R:R < 1.0
+- [ ] **Block ก่อน execute: duplicate signal** (entry ใหม่ ± 50pip ของ active plan)
+- [ ] **MaiRuay v2 R2 bypass:** ถ้า `signal.is_round2=True` → bypass duplicate ±50pip + cooldown
+- [ ] **MaiRuay v2 multi-entry:** G2 รันต่อ candle ครั้งเดียว — 3 orders ใน plan เดียวไม่ต้องตรวจซ้ำกันเอง
 
-**G3 Claude Reviewer — agents/g3_claude_reviewer.py (ถ้ามี):**
-- [ ] **BACKTEST mode:** bypass Claude ทั้งหมด → AUTO_APPROVE
-- [ ] **SIM/LIVE mode:** เรียก Claude API เป็น Reviewer
-- [ ] System prompt: `XAUUSD_System_Prompt_Reviewer.md`
-- [ ] system prompt ใช้ list format พร้อม cache_control
-- [ ] reviewer_prompt อยู่ใน block แรก พร้อม `"cache_control": {"type": "ephemeral"}`
-- [ ] max_tokens: 300 (ไม่ใช่ 2048)
-- [ ] llm_log บันทึก cache_read_tokens และ cache_hit
-- [ ] reason ≤ 80 ตัวอักษร
-- [ ] ไม่มีการเรียก Claude เมื่อ G2 block แล้ว
-- [ ] **ไม่คำนวณ Entry/SL/TP** (ใช้จาก Signal Engine)
+**Step 3a/3b — main.py (no AI):**
+- [ ] Step 3a: AUTO_APPROVE — ห้ามเพิ่ม Claude call กลับมา
+- [ ] Step 3b: ใช้ `signal.lot` ตรงๆ (override เป็น 0.01 เฉพาะ WINRATE_TEST=true)
+- [ ] llm_log = `{action: 'AUTO_APPROVE', cost_usd: 0.0}` (สำหรับ Sheets/LocalDB schema)
+- [ ] **ไม่มี `self.risk_manager`, `self.analyst`** ใน TraiderMainLoop
 
-**G3 Guardian — agents/g3_risk_gate.py:**
-- [ ] R:R ≥ 1.0 (ไม่ใช่ 1.2 หรือ 1.5)
-- [ ] Block ถ้า active_plan_id ไม่ว่าง (double-check หลัง G2)
+**Step 3c Guardian — agents/g3_risk_gate.py:**
+- [ ] Block ถ้ามี active plan ของ pattern เดียวกัน (per-pattern slot)
 - [ ] Block ถ้า consecutive_loss ≥ 3
 - [ ] Block ถ้า total_loss_pct > 0.30
-- [ ] Block ถ้า total_loss_pct > 0.50 (circuit breaker)
-- [ ] ไม่มี confidence threshold (เลิกใช้แล้ว)
-- [ ] **Lot ใช้จาก Signal Engine** ไม่ปรับแล้ว (เว้นแต่ winrate_test = 0.01)
+- [ ] Block ถ้า total_loss_pct > 0.50 (circuit breaker, ถาวร)
+- [ ] R:R block: ใช้ `RISK_CONFIG['min_rr_ratio']` (default 0.0 = ปิด)
+- [ ] ไม่มี confidence threshold (Signal Engine = 1.0 เสมอ)
+- [ ] ไม่มี Claude/AI call ใน Guardian — Python rules ล้วน
+- [ ] **MaiRuay v2 R2 bypass:** ถ้า `decision['is_round2']=True` → bypass consecutive_loss ≥ 3 (notebook spec อนุญาต R2 เข้าทันทีหลัง R1 SL)
 
 **G4 Position Monitor — agents/g4_position_monitor.py:**
 - [ ] check_and_update() ถูกเรียกทุก candle close ใน backtest/sim/live loop
@@ -161,6 +216,22 @@ winrate_test_lot = 0.01
 **G4 Notify — agents/g4_notify.py:**
 - [ ] ทำงานเฉพาะ SIM/LIVE mode (ปิดใน BACKTEST)
 - [ ] LINE_NOTIFY_ENABLED=false ระหว่าง backtest
+
+**MaiRuay v2 Multi-Entry + R2 — signal_engine.py + main.py + position_monitor.py:**
+- [ ] `strategies/mai_ruay.py` = v2.04 Bugfix1 engine (notebook `Mairuay_Basic_Father_V2.04 Bugfix1`)
+- [ ] Entry bucket: `2 ≤ m_pct < 10` → MARKET (child.open); `10 ≤ m_pct ≤ 25` → LIMIT mid_แม่ (Bugfix1 lowered MARKET threshold from 3 → 2)
+- [ ] signal_engine ส่ง/รับ `mai_ruay_state` (parallel กับ mountain_state, scanner_state)
+- [ ] signal_engine ส่ง `bar_offset_in_window` ใน round2_info (สำหรับ 6-bar check ใน analyze_bar)
+- [ ] position_monitor.get_pending_limits() → ใช้ block plan ใหม่ของ pattern เดียวกัน
+- [ ] position_monitor._process_pending_limit: cancel-near-TP (10%R55), fill, expire (5 bars)
+- [ ] main.py mark LIMIT orders ของ MaiRuay เท่านั้นเป็น filled=False (Mountain LIMIT ผ่าน path เดิม)
+- [ ] signal_engine R2 retry: ถ้า R1 ส่ง None + มี r1_info + ภายใน 16 แท่ง → ลอง R2
+- [ ] R2 fires → clear r1_info (no R3); 16 bars passed → clear stale r1_info
+- [ ] main.py: `signal.entries` non-None → สร้าง orders จาก list (1 plan, N orders, plan_id เดียว, order_num=1..N)
+- [ ] main.py: Mountain path (`entries=None`) ต้องไม่กระทบ (ตรวจ Mountain regression)
+- [ ] main.py: order มี `r1_capture` field สำหรับ MaiRuay v2 R1 (เก็บ tech, f_open_r1, entry_bar, direction)
+- [ ] main.py: เมื่อ plan SL + มี r1_capture → set `self.mai_ruay_state['r1_info']`
+- [ ] main.py: เมื่อ plan WIN → clear `self.mai_ruay_state`
 
 **main.py — Backtest/Simulation/Live:**
 - [ ] **Mode switching:**
@@ -258,32 +329,29 @@ schema: trade_id, plan_id, timestamp, timeframe, pattern,
         close_price, close_time, open_sl
 @Auditor ตรวจ Sheets Logger และ backtest output format"
 
-# Backtest ไม่ผ่าน AI (Phase II)
-"@Dev ตรวจสอบว่า backtest mode ใช้ --no-ai flag แล้ว
-bypass G3 Reviewer ทั้งหมด ใช้ AUTO_APPROVE แทน
-@Auditor ตรวจ main.py ว่า mode switching ถูกต้อง"
-
 # SKIP rate ผิดปกติ
-"@Auditor วิเคราะห์ผล backtest นี้:
+"@Auditor วิเคราะห์ผล run นี้:
 SKIP rate = [X]% ปกติควรไม่เกิน 30%
-ระบุว่า filter ไหนใน G2 เข้มเกินไป"
+ระบุว่า filter ไหนใน Signal Engine / G2 เข้มเกินไป"
 
-# Cost ผิดปกติ (SIM mode)
-"@Auditor cost per call = $[X] สูงกว่า target $0.010
-ตรวจ cache hit rate และ system prompt length"
+# Per-strategy SKIP reason (Tier 2 heartbeat)
+"@Auditor ดู skip_reasons ใน /api/bots heartbeat:
+ส่วนใหญ่ block ที่ criterion ไหนใน Mountain/MaiRuay/Scanner?"
 ```
 
 ---
 
 ## 🎯 Phase II Specifics
 
-### AI ใช้ทำอะไรได้บ้าง
+### AI ใช้ทำอะไรได้บ้าง (refreshed 2026-05-11)
 
-✅ **Reviewer ใน SIM/LIVE** (sanity check เท่านั้น)
-✅ **Weekly Strategist:** วิเคราะห์ผล แนะนำ parameter
-✅ **Monthly Evolver:** propose strategy update (human approve)
-❌ **ไม่ใช้ใน Backtest loop**
-❌ **ไม่คำนวณ Entry/SL/TP**
+✅ **Weekly Strategist:** วิเคราะห์ผลรายสัปดาห์ → แนะนำ parameter (ไม่บังคับใช้)
+✅ **Monthly Evolver:** propose strategy update รายเดือน (human approve เสมอ)
+❌ **ไม่ใช้ใน per-trade pipeline เลย** (BACKTEST, SIM, LIVE = AUTO_APPROVE ทั้งหมด)
+❌ **ไม่ใช้เป็น Reviewer per signal** (ลบ wiring แล้ว)
+❌ **ไม่ใช้เป็น Risk Manager (Haiku)** (ลบ wiring แล้ว)
+❌ **ไม่คำนวณ Entry/SL/TP/Lot** (Signal Engine คำนวณทั้งหมด)
+❌ **ไม่ใช้ใน Guardian** (Python rules ล้วน)
 
 ### Backtest Bug Fix Priority
 
@@ -298,16 +366,17 @@ SKIP rate = [X]% ปกติควรไม่เกิน 30%
 3. รัน backtest Python เทียบ TradingView ผล
 4. ถ้า match > 90% → promote to SIM
 
-### กฎเหล็ก Phase II
+### กฎเหล็ก Phase II (refreshed 2026-05-11)
 
-1. ห้ามแก้ `utils/xauusd_signal.py` และ `utils/swing_v414.py`
-2. BACKTEST mode ไม่เรียก Claude API เลย
-3. Claude Reviewer ใช้เฉพาะ SIM/LIVE mode
-4. System Prompt = `strategy/XAUUSD_System_Prompt_Reviewer.md`
-5. Timestamp = candle time เสมอ (ไม่ใช่ datetime.now())
-6. G2 ต้อง block duplicate plan (same entry ± 50pip)
-7. Position monitor ต้อง close position ทุก candle close
-8. host = 127.0.0.1 เสมอ
+1. **3 Strategy เท่านั้น:** Mountain, MaiRuay, Uptrend/Downtrend Scanner (อิง 3 notebook ใน `strategy/`)
+2. ทุก strategy ทำงานแยกกัน — ห้าม share state ข้าม strategy
+3. แก้ Python strategy/helpers ได้เฉพาะเพื่อ sync กับ notebook engine code (ห้ามปรับเอง)
+4. **Per-trade pipeline = Python only** — ห้ามใส่ Claude/Haiku/AI กลับเข้า G3a/G3b/Guardian
+5. **AI ใช้ได้เฉพาะ Weekly Strategist + Monthly Evolver** (off-cycle, ไม่ใช่ทุก trade)
+6. Timestamp = candle time เสมอ (ไม่ใช่ datetime.now())
+7. G2 ต้อง block duplicate plan (same entry ± 50pip)
+8. Position monitor ต้อง close position ทุก candle close
+9. host = 127.0.0.1 เสมอ
 
 ---
 
@@ -322,46 +391,50 @@ cp .env.example .env
 
 **.env สำคัญ:**
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-...   # ใช้เฉพาะ Weekly/Monthly agents
 LINE_NOTIFY_ENABLED=false      # ปิดระหว่าง backtest
-SHEETS_ENABLED=false           # ปิดระหว่าง backtest
-DATA_MODE=backtest
-ACCOUNT_BALANCE=500
-WINRATE_TEST=true              # 0.01 lot ทุกไม้
+SHEETS_ENABLED=true            # เปิดสำหรับ live tracking (ต้องมี credentials.json)
+GOOGLE_SHEETS_ID=...           # Google Sheet ID ที่ share กับ service account
+GOOGLE_CREDENTIALS_JSON=./credentials.json  # service account key (gitignored)
+ACCOUNT_BALANCE=1000
+WINRATE_TEST=false             # true = lock ทุกไม้ที่ 0.01 lot
 ```
 
 **Run commands (Phase II):**
 ```bash
-# Backtest (ไม่ใช้ AI)
-python main.py --backtest --start 2026-03-01 --end 2026-03-07 --no-ai
+# Backtest (Python only — no AI per trade)
+python main.py --backtest --start 2026-03-01 --end 2026-03-07
 
-# Winrate test (0.01 lot, ไม่ใช้ AI)
-python main.py --winrate-test --no-ai
+# Winrate test (0.01 lot ทุกไม้)
+python main.py --winrate-test
 
-# Simulation (ใช้ Claude Reviewer)
+# Simulation (Python only — paper broker, no AI per trade)
 python main.py --simulate
 
-# Live trading (ต้อง confirm 2 ครั้ง)
+# Live trading (ต้อง confirm 2 ครั้ง — ส่ง order จริงเข้า MT5)
 python main.py --live
 ```
+
+หมายเหตุ: `--no-ai` flag ไม่จำเป็นแล้ว — per-trade pipeline ไม่เรียก AI ทุก mode
 
 ---
 
 ## สิ่งที่ห้ามทำ
 
-**Phase I (ยังใช้):**
-- ❌ อ้างอิง `XAUUSD_Strategy_v5.md` (เลิกใช้แล้ว)
-- ❌ ใช้ confidence threshold ≥ 0.70 (เลิกใช้แล้ว)
-- ❌ ใช้ R:R ≥ 1.2 หรือ 1.5 (ปัจจุบันใช้ 1.0)
-- ❌ ใช้ lot = balance × 1.5% (ปัจจุบันใช้ 10% / sl_pip)
-- ❌ เรียก Claude ทุก candle โดยไม่มี G2 block ก่อน
-- ❌ ใช้ datetime.now() ใน backtest path
-- ❌ ใช้ mock agent ใน production
+**Per-trade pipeline (เด็ดขาด):**
+- ❌ ใส่ Claude/Haiku/AI กลับเข้าไปใน Step 3a (Decision), Step 3b (Lot), Step 3c (Guardian)
+- ❌ ตั้ง `self.analyst` หรือ `self.risk_manager` กลับใน TraiderMainLoop
+- ❌ ใช้ confidence threshold (Signal Engine = 1.0 เสมอ)
+- ❌ ปรับ lot นอก Signal Engine (เว้นแต่ WINRATE_TEST=true)
+- ❌ Override Entry/SL/TP จาก Signal Engine
 
-**Phase II (ใหม่):**
-- ❌ Run backtest โดยไม่ใช้ `--no-ai` flag
-- ❌ แก้ไข `utils/xauusd_signal.py` หรือ `utils/swing_v414.py`
-- ❌ ใช้ Claude API ใน backtest loop
-- ❌ Run production ก่อน Auditor ผ่าน
+**Strategy:**
+- ❌ เพิ่ม strategy ใหม่นอกเหนือ 3 อันใน `strategy/` (Mountain / MaiRuay / Scanner)
+- ❌ Activate pattern legacy (DOWNTREND, UPTREND, MOUNTAIN_R2 ฯลฯ) — ลบจาก config แล้ว
+- ❌ แก้ Python strategy/helpers โดยไม่ตรวจ diff กับ notebook 3 ไฟล์ก่อน
+
+**Misc:**
+- ❌ ใช้ datetime.now() ใน backtest path (ใช้ candle_time)
 - ❌ Block duplicate signal โดยไม่เช็ค entry ± 50pip
-- ❌ CSV header ไม่ตรงกับ schema ที่กำหนด
+- ❌ Run production ก่อน Auditor ผ่าน
+- ❌ Commit `credentials.json` (gitignored, มี private key)
