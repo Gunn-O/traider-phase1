@@ -141,18 +141,52 @@ class MT5LiveBroker:
     # ------------------------------------------------------------------ open
 
     def get_fill_price(self, ticket: int) -> Optional[float]:
-        """Return MT5's actual fill price for a MARKET ticket we opened in this
-        session. Pending LIMIT tickets are absent until they fill — callers
-        should treat None as "not filled yet, use the requested entry price"."""
-        price = self._fill_prices.get(ticket)
-        return float(price) if price is not None else None
+        """Return MT5's actual fill price by querying MT5 directly. Order:
+          1. positions_get(ticket) — filled MARKET / LIMIT-that-became-position
+          2. orders_get(ticket)    — still-pending LIMIT (price_open = limit)
+          3. self._fill_prices     — in-memory fallback from order_send result
+
+        Querying MT5 (not the cached value) catches the case where the broker
+        normalizes / adjusts price on its side. Pending LIMIT tickets that
+        haven't yet been assigned a server price return None so the caller
+        can keep the requested entry price."""
+        try:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions and len(positions) > 0:
+                return float(positions[0].price_open)
+        except Exception as e:
+            logger.debug(f"get_fill_price: positions_get({ticket}) failed: {e}")
+        try:
+            orders = mt5.orders_get(ticket=ticket)
+            if orders and len(orders) > 0:
+                return float(orders[0].price_open)
+        except Exception as e:
+            logger.debug(f"get_fill_price: orders_get({ticket}) failed: {e}")
+        cached = self._fill_prices.get(ticket)
+        return float(cached) if cached is not None else None
 
     def get_broker_sl_tp(self, ticket: int) -> Optional[Tuple[float, float]]:
-        """Return the (sl, tp) tuple actually sent to MT5 for this ticket — for
-        SELL orders this is engine sl/tp + spread_usd, not signal.sl/signal.tp.
-        Returns None for tickets we did not place in this session. Reads from
-        an in-memory dict populated at order_send time — no MT5 round-trip,
-        no latency added to the critical path."""
+        """Return the (sl, tp) tuple MT5 actually stores for this ticket — the
+        single source of truth. SELL orders get spread_usd added to engine
+        sl/tp (~line 213), AND the broker may further normalize against its
+        min stops level / tick size. Querying MT5 catches both adjustments;
+        the in-memory cache from order_send is a last-resort fallback if MT5
+        round-trips fail. Returns None only if the ticket is unknown to MT5
+        AND we have no cached value."""
+        try:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions and len(positions) > 0:
+                p = positions[0]
+                return (float(p.sl), float(p.tp))
+        except Exception as e:
+            logger.debug(f"get_broker_sl_tp: positions_get({ticket}) failed: {e}")
+        try:
+            orders = mt5.orders_get(ticket=ticket)
+            if orders and len(orders) > 0:
+                o = orders[0]
+                return (float(o.sl), float(o.tp))
+        except Exception as e:
+            logger.debug(f"get_broker_sl_tp: orders_get({ticket}) failed: {e}")
         return self._broker_sl_tp.get(ticket)
 
     def open_position(
