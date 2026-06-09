@@ -996,7 +996,7 @@ class TraiderMainLoop:
 
         signal = signal_obj
         if signal:
-            logger.info(f"✓ Signal Engine: {signal.pattern} {signal.direction} → Entry={signal.entry:.2f}, "
+            logger.info(f"✓ Signal Engine (proposed): {signal.pattern} {signal.direction} → Entry={signal.entry:.2f}, "
                         f"SL={signal.sl:.2f}, TP={signal.tp_order:.2f}, R:R={signal.rr:.2f}, Lot={signal.lot}")
             post_bot_event("signal_detected", f"{signal.pattern} {signal.direction}", {
                 "pattern": signal.pattern, "direction": signal.direction,
@@ -1070,8 +1070,9 @@ class TraiderMainLoop:
             'cache_hit': False
         }
 
-        logger.info(f"✓ Signal Engine: {decision['action']} @ {decision['entry']:.2f} "
-                    f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f})")
+        logger.info(f"✓ Signal Engine (proposed): {decision['action']} @ {decision['entry']:.2f} "
+                    f"(SL={decision['sl']:.2f}, TP={decision['tp']:.2f}, R:R={decision.get('rr_ratio', 0):.2f}) "
+                    f"— actual fill price + spread-adjusted SL/TP logged after broker confirms")
 
         # Step 3b: Lot sizing — Signal Engine is authoritative (no AI per trade).
         # Same path for BACKTEST / SIM / LIVE: take signal.lot, override to 0.01
@@ -1463,6 +1464,24 @@ class TraiderMainLoop:
                                     f"diff sl={(_b_sl - _eng_sl) * 100:+.1f}pip "
                                     f"tp={(_b_tp - _eng_tp) * 100:+.1f}pip)"
                                 )
+                    # Single-source-of-truth log of the order EXACTLY as MT5
+                    # will execute it — entry = real fill price, SL/TP =
+                    # spread-adjusted values the broker holds. Whatever shows
+                    # up in MT5 / Dashboard / DB / Sheets matches this line.
+                    # The "(proposed)" Signal Engine log above is the engine's
+                    # snapshot before broker submission, useful for explaining
+                    # WHY the trade fired but not what's at the broker.
+                    _f_entry = order.get('entry', 0) or 0
+                    _f_sl = order.get('sl', 0) or 0
+                    _f_tp = order.get('tp', 0) or 0
+                    _rr_real = (abs(_f_tp - _f_entry) / abs(_f_entry - _f_sl)
+                                if _f_entry and _f_sl and abs(_f_entry - _f_sl) > 0
+                                else 0.0)
+                    logger.info(
+                        f"  ✅ FINAL  ticket=#{ticket} {_ot} {order['action']} "
+                        f"@ {_f_entry:.3f}  SL={_f_sl:.3f}  TP={_f_tp:.3f}  "
+                        f"R:R={_rr_real:.2f}  lot={order['lot']}"
+                    )
                 else:
                     logger.error(f"✗ Failed to open order {order['trade_id']} — will not be tracked")
 
