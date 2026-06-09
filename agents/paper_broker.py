@@ -77,6 +77,20 @@ class PaperBroker:
             return None
         return float(pos.get("entry") or pos.get("entry_price") or 0.0) or None
 
+    def get_broker_sl_tp(self, ticket: int):
+        """Return (sl, tp) tuple stored with the position. Paper broker has no
+        spread adjustment, so these equal what the caller passed — but the
+        method exists for interface parity with MT5LiveBroker (main.py calls
+        it the same way for both)."""
+        pos = self.positions.get(ticket)
+        if not pos:
+            return None
+        sl = pos.get("sl") or pos.get("sl_price")
+        tp = pos.get("tp") or pos.get("tp_price")
+        if sl is None or tp is None:
+            return None
+        return (float(sl), float(tp))
+
     def open_position(
         self,
         action: str,       # BUY / SELL

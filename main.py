@@ -1437,6 +1437,32 @@ class TraiderMainLoop:
                                 )
                             else:
                                 logger.info(f"  ↳ {_ot} fill_price={fp:.3f} → entry updated")
+                    # Sync SL/TP to the broker's actual values. MT5LiveBroker
+                    # adds spread_usd to engine sl/tp on SELL orders, so the
+                    # broker holds different values than signal.sl/signal.tp.
+                    # Without this sync the DB row and Sheets log show the
+                    # engine snapshot while MT5 enforces the spread-adjusted
+                    # levels — the "log != broker" mismatch the user observed.
+                    # Reads from an in-memory dict; no extra network call.
+                    if hasattr(self.broker, 'get_broker_sl_tp'):
+                        bst = self.broker.get_broker_sl_tp(ticket)
+                        if bst:
+                            _b_sl, _b_tp = bst
+                            _eng_sl = order.get('sl')
+                            _eng_tp = order.get('tp')
+                            order['sl'] = _b_sl
+                            order['sl_price'] = _b_sl
+                            order['tp'] = _b_tp
+                            order['tp_price'] = _b_tp
+                            if _eng_sl and (abs(_b_sl - _eng_sl) > 0.005
+                                            or abs(_b_tp - _eng_tp) > 0.005):
+                                logger.info(
+                                    f"  ↳ {_ot} broker sl/tp synced "
+                                    f"({_eng_sl:.3f}/{_eng_tp:.3f} → "
+                                    f"{_b_sl:.3f}/{_b_tp:.3f}, "
+                                    f"diff sl={(_b_sl - _eng_sl) * 100:+.1f}pip "
+                                    f"tp={(_b_tp - _eng_tp) * 100:+.1f}pip)"
+                                )
                 else:
                     logger.error(f"✗ Failed to open order {order['trade_id']} — will not be tracked")
 

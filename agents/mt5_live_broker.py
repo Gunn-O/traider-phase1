@@ -83,6 +83,12 @@ class MT5LiveBroker:
         # query history for the real fill price). Used by main.py to overwrite
         # signal.entry with the real slippage-adjusted fill on MARKET orders.
         self._fill_prices: Dict[int, float] = {}
+        # Per-ticket broker-side SL/TP as actually sent to MT5. SELL orders
+        # have spread_usd added to engine sl/tp (see place_order ~line 213),
+        # so the values stored at the broker differ from signal.sl/signal.tp.
+        # Used by main.py reconciliation to sync DB/Sheets log to the real
+        # broker state instead of the engine snapshot.
+        self._broker_sl_tp: Dict[int, Tuple[float, float]] = {}
 
         self._verify_environment()
         logger.info(
@@ -140,6 +146,14 @@ class MT5LiveBroker:
         should treat None as "not filled yet, use the requested entry price"."""
         price = self._fill_prices.get(ticket)
         return float(price) if price is not None else None
+
+    def get_broker_sl_tp(self, ticket: int) -> Optional[Tuple[float, float]]:
+        """Return the (sl, tp) tuple actually sent to MT5 for this ticket — for
+        SELL orders this is engine sl/tp + spread_usd, not signal.sl/signal.tp.
+        Returns None for tickets we did not place in this session. Reads from
+        an in-memory dict populated at order_send time — no MT5 round-trip,
+        no latency added to the critical path."""
+        return self._broker_sl_tp.get(ticket)
 
     def open_position(
         self,
@@ -299,6 +313,13 @@ class MT5LiveBroker:
         # record it so get_fill_price returns the placement price.
         try:
             self._fill_prices[ticket] = float(result.price)
+        except Exception:
+            pass
+        # Stamp the broker-side SL/TP we actually sent so main.py reconciliation
+        # can sync DB/Sheets log to broker reality (SELL had spread_usd added
+        # ~line 213, so these differ from signal.sl/signal.tp).
+        try:
+            self._broker_sl_tp[ticket] = (float(broker_sl), float(broker_tp))
         except Exception:
             pass
         # Register trailing state if metadata provided (Mountain only)
