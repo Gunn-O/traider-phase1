@@ -14,6 +14,7 @@ Interface ตรงกับ PaperBroker เพื่อให้ main.py สล
 """
 
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
@@ -140,28 +141,52 @@ class MT5LiveBroker:
 
     # ------------------------------------------------------------------ open
 
+    # Retry budget for the post-order_send race where MT5 hasn't indexed the
+    # ticket yet. Tuned so the worst-case wait stays well under a second:
+    # 4 attempts × 50 ms = 200 ms max per query, and most queries return on
+    # the first try (~5-20 ms). Without this the inline sync at main.py:1447
+    # would fall back to cached pre-normalize values, Sheets + Dashboard
+    # would log those wrong values, and only the post-insert DB reconciliation
+    # would self-heal — leaving Sheets/Dashboard/DB diverged from MT5.
+    _MT5_INDEX_RETRY_ATTEMPTS = 4
+    _MT5_INDEX_RETRY_DELAY_S = 0.05
+
+    def _query_ticket(self, ticket: int):
+        """Look up `ticket` in positions_get → orders_get with a short retry
+        loop to ride out the post-order_send indexing race. Returns the first
+        non-empty result as ('position'|'order', obj) or (None, None) if MT5
+        truly has no record after all attempts."""
+        for attempt in range(self._MT5_INDEX_RETRY_ATTEMPTS):
+            try:
+                positions = mt5.positions_get(ticket=ticket)
+                if positions and len(positions) > 0:
+                    return ('position', positions[0])
+            except Exception as e:
+                logger.debug(f"_query_ticket: positions_get({ticket}) failed: {e}")
+            try:
+                orders = mt5.orders_get(ticket=ticket)
+                if orders and len(orders) > 0:
+                    return ('order', orders[0])
+            except Exception as e:
+                logger.debug(f"_query_ticket: orders_get({ticket}) failed: {e}")
+            if attempt < self._MT5_INDEX_RETRY_ATTEMPTS - 1:
+                time.sleep(self._MT5_INDEX_RETRY_DELAY_S)
+        return (None, None)
+
     def get_fill_price(self, ticket: int) -> Optional[float]:
-        """Return MT5's actual fill price by querying MT5 directly. Order:
+        """Return MT5's actual fill price by querying MT5 directly.
+
+        Order:
           1. positions_get(ticket) — filled MARKET / LIMIT-that-became-position
           2. orders_get(ticket)    — still-pending LIMIT (price_open = limit)
           3. self._fill_prices     — in-memory fallback from order_send result
 
         Querying MT5 (not the cached value) catches the case where the broker
-        normalizes / adjusts price on its side. Pending LIMIT tickets that
-        haven't yet been assigned a server price return None so the caller
-        can keep the requested entry price."""
-        try:
-            positions = mt5.positions_get(ticket=ticket)
-            if positions and len(positions) > 0:
-                return float(positions[0].price_open)
-        except Exception as e:
-            logger.debug(f"get_fill_price: positions_get({ticket}) failed: {e}")
-        try:
-            orders = mt5.orders_get(ticket=ticket)
-            if orders and len(orders) > 0:
-                return float(orders[0].price_open)
-        except Exception as e:
-            logger.debug(f"get_fill_price: orders_get({ticket}) failed: {e}")
+        normalizes / adjusts price on its side. Uses `_query_ticket` so the
+        post-order_send indexing race doesn't force a fallback to the cache."""
+        kind, obj = self._query_ticket(ticket)
+        if obj is not None:
+            return float(obj.price_open)
         cached = self._fill_prices.get(ticket)
         return float(cached) if cached is not None else None
 
@@ -171,22 +196,10 @@ class MT5LiveBroker:
         sl/tp (~line 213), AND the broker may further normalize against its
         min stops level / tick size. Querying MT5 catches both adjustments;
         the in-memory cache from order_send is a last-resort fallback if MT5
-        round-trips fail. Returns None only if the ticket is unknown to MT5
-        AND we have no cached value."""
-        try:
-            positions = mt5.positions_get(ticket=ticket)
-            if positions and len(positions) > 0:
-                p = positions[0]
-                return (float(p.sl), float(p.tp))
-        except Exception as e:
-            logger.debug(f"get_broker_sl_tp: positions_get({ticket}) failed: {e}")
-        try:
-            orders = mt5.orders_get(ticket=ticket)
-            if orders and len(orders) > 0:
-                o = orders[0]
-                return (float(o.sl), float(o.tp))
-        except Exception as e:
-            logger.debug(f"get_broker_sl_tp: orders_get({ticket}) failed: {e}")
+        truly has no record after the indexing-race retry budget."""
+        _, obj = self._query_ticket(ticket)
+        if obj is not None:
+            return (float(obj.sl), float(obj.tp))
         return self._broker_sl_tp.get(ticket)
 
     def open_position(
