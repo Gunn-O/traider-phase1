@@ -237,14 +237,18 @@ def main():
     print(f'  history deals   : {len(deals)}')
     print()
 
-    # Pull live MaiRuay rows in the user-supplied window
+    # Pull live trades in the user-supplied window. Originally filtered by
+    # `technique = 'mai_ruay'`, but the 2026-06-09 Karpathy split renamed
+    # the M1 variant's technique to 'mai_ruay_m1' so the old filter dropped
+    # 33 MAI_RUAY_M1 + 25 Mountain + 12 Scanner trades silently. The match
+    # logic below (comment-prefix + price tolerance + magic) is technique-
+    # agnostic, so opening the filter to all RT- trades repairs them too.
     conn = sqlite3.connect(args.db)
     rows = conn.execute("""
         SELECT trade_id, plan_id, timestamp_open, entry_price, sl_price, tp_price,
                lot_size, result, close_price, timestamp_close, pnl_usd, close_reason
         FROM trades
-        WHERE technique = 'mai_ruay'
-          AND trade_id LIKE 'RT-%'
+        WHERE trade_id LIKE 'RT-%'
           AND timestamp_open >= ? AND timestamp_open <= ?
         ORDER BY timestamp_open
     """, (f.isoformat(), t.isoformat())).fetchall()
