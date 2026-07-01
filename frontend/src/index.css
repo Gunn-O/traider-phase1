@@ -1,28 +1,29 @@
 /* CSS Design System - Tra(i)der Phase I v2.1 */
 
 :root {
-  /* Colors — cool navy/slate tone (Cognitive Cockpit reference).
-     Bg slightly more blue than pure black, borders less saturated,
-     overall easier on the eyes for long sessions. */
-  --bg-dark: #0a0d14;
-  --bg-card: #10141c;
-  --bg-hover: #161b25;
-  --text-primary: #e2e6ec;
-  --text-secondary: #8a93a3;
-  --border-color: #1e2532;
+  /* LEGACY ALIASES — remapped onto the "Command Deck" cyberpunk palette so the
+     not-yet-migrated pages (TradeHistory, Proposals, Settings, etc.) reskin
+     automatically. The canonical design tokens (--c-cyan, --panel, …) live in
+     styles/command-deck.css. Keep these names; just point them at the new hues. */
+  --bg-dark: #05080f;
+  --bg-card: #0c1322;
+  --bg-hover: #12203a;
+  --text-primary: #d6e3f7;
+  --text-secondary: #6f819f;
+  --border-color: rgba(120, 160, 220, 0.16);
 
-  /* Agent Colors */
-  --agent-analyst: #00ff88;
-  --agent-risk-manager: #ffaa00;
-  --agent-weekly: #00aaff;
-  --agent-monthly: #ff88ff;
-  --agent-reflector: #888888;
-  --agent-orchestrator: #ffd700;
+  /* Agent Colors → cyberpunk accents */
+  --agent-analyst: #22d8ee;       /* cyan */
+  --agent-risk-manager: #f5c451;  /* gold */
+  --agent-weekly: #22d8ee;        /* cyan */
+  --agent-monthly: #ff2e9a;       /* magenta */
+  --agent-reflector: #6f819f;     /* muted */
+  --agent-orchestrator: #ff2e9a;  /* magenta */
 
   /* Status Colors */
-  --status-running: #00ff88;
-  --status-stopped: #ff4444;
-  --status-warning: #ffaa00;
+  --status-running: #34e5a3;
+  --status-stopped: #ff5274;
+  --status-warning: #f5c451;
 
   /* Spacing */
   --spacing-xs: 4px;
@@ -37,9 +38,9 @@
   --radius-lg: 12px;
   --radius-xl: 16px;
 
-  /* Typography */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  /* Typography — Command Deck fonts */
+  --font-sans: 'IBM Plex Sans Thai', 'Chakra Petch', -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Monaco, monospace;
 
   /* Shadows */
   --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);

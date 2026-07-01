@@ -725,6 +725,60 @@ class MT5LiveBroker:
 
         return resolved
 
+    def fetch_closed_deals(self, from_dt: datetime, to_dt: Optional[datetime] = None) -> List[dict]:
+        """Bulk-pull CLOSED positions for this bot's magic from MT5 deal history,
+        grouped by position_id. Used to persist MT5 history into our DB (MT5 only
+        retains ~1 month) so closed-trade data survives for later analysis —
+        including trades closed manually or while the bot was offline.
+
+        Returns one dict per closed position (same shape as update_positions /
+        reconcile_pending close-events) carrying mt5_position_id for idempotent
+        upserts. Positions still open (only an entry deal) are skipped.
+        """
+        if not MT5_AVAILABLE or mt5 is None:
+            return []
+        to_dt = to_dt or datetime.now()
+        deals = mt5.history_deals_get(from_dt, to_dt) or []
+        our = [d for d in deals if getattr(d, "magic", 0) == self.magic]
+
+        # Group deals by position_id
+        by_pos: Dict[int, list] = {}
+        for d in our:
+            pid = int(getattr(d, "position_id", 0) or 0)
+            if pid:
+                by_pos.setdefault(pid, []).append(d)
+
+        out: List[dict] = []
+        for pid, dlist in by_pos.items():
+            dlist.sort(key=lambda d: d.time)
+            # entry deal = first deal with DEAL_ENTRY_IN; exit = DEAL_ENTRY_OUT
+            entry = next((d for d in dlist if getattr(d, "entry", 0) == mt5.DEAL_ENTRY_IN), dlist[0])
+            exits = [d for d in dlist if getattr(d, "entry", 0) == mt5.DEAL_ENTRY_OUT]
+            if not exits:
+                continue  # still open — skip
+            close_deal = exits[-1]
+            pnl = round(sum(float(d.profit) for d in dlist), 2)
+            action = "BUY" if entry.type == mt5.DEAL_TYPE_BUY else "SELL"
+            result = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN")
+            close_reason = "TP_HIT" if pnl > 0 else ("SL_HIT" if pnl < 0 else "CLOSED")
+            out.append({
+                "mt5_position_id": pid,
+                "ticket":          pid,
+                "trade_id":        (entry.comment or "").strip(),
+                "action":          action,
+                "lot":             float(getattr(entry, "volume", 0.0)),
+                "lot_size":        float(getattr(entry, "volume", 0.0)),
+                "entry":           float(entry.price),
+                "entry_price":     float(entry.price),
+                "open_time":       datetime.fromtimestamp(entry.time).isoformat(),
+                "result":          result,
+                "close_price":     float(close_deal.price),
+                "close_time":      datetime.fromtimestamp(close_deal.time).isoformat(),
+                "close_reason":    close_reason,
+                "pnl":             pnl,
+            })
+        return out
+
     def update_positions(self, candle_time: datetime, current_price: Optional[float] = None) -> List[dict]:
         """
         เช็ค SL/TP / manual close — diff กับ _known_open_tickets เพื่อหา newly closed

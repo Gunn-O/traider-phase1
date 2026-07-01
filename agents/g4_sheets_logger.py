@@ -40,14 +40,22 @@ class SheetsLogger:
         logger.update_order_close(trade_id, result, close_price, ...)
     """
 
-    def __init__(self, enabled_override=None):
+    # Per-mode worksheet labels so Micro / Live / Backtest history never mix.
+    _MODE_LABEL = {'backtest': 'Backtest', 'paper': 'Paper', 'micro': 'Micro', 'live': 'Live'}
+
+    def __init__(self, enabled_override=None, mode: str = None):
         """
         Initialize Sheets Logger
 
         Args:
             enabled_override: Optional bool to override SHEETS_ENABLED env var
                               (useful for backtest --log-sheets flag)
+            mode: run mode (backtest/paper/micro/live) → routes to a per-mode tab
+                  ("Trade Log - Micro" etc.). None → shared "Trade Log" (legacy).
         """
+        self.mode = mode
+        self._tab_suffix = f" - {self._MODE_LABEL[mode]}" if mode in self._MODE_LABEL else ""
+
         if enabled_override is not None:
             self.enabled = enabled_override
         else:
@@ -94,14 +102,14 @@ class SheetsLogger:
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open_by_key(self.sheets_id)
 
-            # Initialize Trade Log worksheet
+            # Initialize Trade Log worksheet (per-mode tab when mode is set)
             self.trade_log_ws = self._get_or_create_worksheet(
-                "Trade Log", TRADE_LOG_COLUMNS
+                f"Trade Log{self._tab_suffix}", TRADE_LOG_COLUMNS
             )
 
-            # Initialize Portfolio State worksheet
+            # Initialize Portfolio State worksheet (per-mode tab)
             self.portfolio_ws = self._get_or_create_worksheet(
-                "Portfolio State", PORTFOLIO_STATE_FIELDS, rows=20
+                f"Portfolio State{self._tab_suffix}", PORTFOLIO_STATE_FIELDS, rows=20
             )
 
             logger.info("✓ Connected to Google Sheets")

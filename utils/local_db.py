@@ -53,7 +53,11 @@ CREATE TABLE IF NOT EXISTS trades (
     r55_pip_at_open    REAL,             -- 55-bar range at entry (volatility context)
     pattern_details_json TEXT,           -- json.dumps(signal.details) for pattern tuning
     -- Scanner v4.2 stop_segments support (2026-05-12)
-    scanner_segment_id TEXT              -- ISO timestamp of first bar in trend segment; used to skip same-segment entries after LOSS
+    scanner_segment_id TEXT,             -- ISO timestamp of first bar in trend segment; used to skip same-segment entries after LOSS
+    -- Per-mode data architecture (2026-06): denormalized mode + MT5 linkage
+    mode               TEXT,             -- backtest | paper | micro | live (from bot_id)
+    mt5_position_id    INTEGER,          -- MT5 position_id for idempotent history backfill
+    source             TEXT              -- 'bot' (opened by us) | 'mt5_import' (backfilled from broker)
 );
 
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -130,7 +134,36 @@ _EXTRA_TRADE_COLUMNS = [
     ("r55_pip_at_open",      "REAL"),
     ("pattern_details_json", "TEXT"),
     ("scanner_segment_id",   "TEXT"),
+    # Per-mode data architecture (2026-06)
+    ("mode",                 "TEXT"),
+    ("mt5_position_id",      "INTEGER"),
+    ("source",               "TEXT"),
 ]
+
+
+# Per-mode DB files — keep micro / live / paper / backtest histories isolated so
+# a reset or a backtest never touches real-account data. `db_for_mode` is the
+# single source of truth for which file a mode writes to.
+DB_BY_MODE = {
+    'backtest': 'traider_backtest.db',
+    'paper':    'traider_paper.db',
+    'sim':      'traider_paper.db',   # alias
+    'micro':    'traider_micro.db',
+    'live':     'traider_live.db',
+}
+
+
+def db_for_mode(mode: Optional[str]) -> str:
+    """Resolve the SQLite file for a run mode. Unknown/None → paper (safe default)."""
+    return DB_BY_MODE.get((mode or '').lower(), 'traider_paper.db')
+
+
+def mode_from_bot_id(bot_id: Optional[str]) -> Optional[str]:
+    """bot_id is `{tf}-{symbol}-{mode}` — pull the trailing mode token."""
+    if not bot_id:
+        return None
+    parts = str(bot_id).rsplit('-', 1)
+    return parts[1].lower() if len(parts) == 2 else None
 
 
 def _ensure_extra_trade_columns(conn: sqlite3.Connection) -> None:
@@ -197,16 +230,21 @@ class LocalDB:
              technique, action, entry_price, sl_price, tp_price,
              lot_size, lot_total_plan, rr_ratio, confidence, rsi_14,
              session, ai_reason, llm_tokens, llm_cost_usd, result, trailing_sl,
-             r55_pip_at_open, pattern_details_json, scanner_segment_id)
+             r55_pip_at_open, pattern_details_json, scanner_segment_id,
+             mode, mt5_position_id, source)
             VALUES
             (:trade_id, :bot_id, :plan_id, :order_num, :timestamp_open, :timeframe, :chart_type,
              :technique, :action, :entry_price, :sl_price, :tp_price,
              :lot_size, :lot_total_plan, :rr_ratio, :confidence, :rsi_14,
              :session, :ai_reason, :llm_tokens, :llm_cost_usd, :result, :trailing_sl,
-             :r55_pip_at_open, :pattern_details_json, :scanner_segment_id)
+             :r55_pip_at_open, :pattern_details_json, :scanner_segment_id,
+             :mode, :mt5_position_id, :source)
         """, {
             'trade_id': trade['trade_id'],
             'bot_id': trade.get('bot_id'),
+            'mode': trade.get('mode') or mode_from_bot_id(trade.get('bot_id')),
+            'mt5_position_id': trade.get('mt5_position_id'),
+            'source': trade.get('source', 'bot'),
             'plan_id': trade['plan_id'],
             'order_num': trade.get('order_num', 1),
             'timestamp_open': trade['timestamp_open'],
@@ -275,6 +313,83 @@ class LocalDB:
             """, (result, pnl, close_reason,
                   close_price, str(close_time), trade_id))
         self.conn.commit()
+
+    def upsert_mt5_deal(self, deal: dict, bot_id: Optional[str] = None,
+                        mode: Optional[str] = None) -> str:
+        """Idempotently persist a CLOSED MT5 position into the trades table so the
+        data survives MT5's ~1-month history retention.
+
+        Matching order (most → least specific):
+          1. existing row with this mt5_position_id  → update close fields
+          2. existing row whose trade_id prefix-matches the deal's comment → link + update
+          3. no match → insert a fresh 'mt5_import' closed row
+        Returns the trade_id of the affected row. Safe to call repeatedly.
+        """
+        pid = deal.get('mt5_position_id') or deal.get('ticket')
+        comment = (deal.get('trade_id') or '').strip()
+        result = deal.get('result', 'WIN')
+        pnl = deal.get('pnl', 0.0)
+        close_price = deal.get('close_price')
+        close_time = deal.get('close_time')
+        close_reason = deal.get('close_reason', 'CLOSED')
+
+        cur = self.conn.cursor()
+        # 1. by mt5_position_id
+        row = cur.execute("SELECT trade_id FROM trades WHERE mt5_position_id = ? LIMIT 1", (pid,)).fetchone()
+        # 2. by comment/trade_id prefix (the bot's row that opened this position)
+        if row is None and comment:
+            row = cur.execute(
+                "SELECT trade_id FROM trades WHERE trade_id = ? OR trade_id LIKE ? || '%' "
+                "OR ? LIKE trade_id || '%' LIMIT 1",
+                (comment, comment, comment),
+            ).fetchone()
+
+        if row is not None:
+            tid = row[0]
+            cur.execute("""
+                UPDATE trades SET
+                    result = ?, pnl_usd = ?, close_reason = ?,
+                    close_price = ?, timestamp_close = ?,
+                    mt5_position_id = COALESCE(?, mt5_position_id),
+                    mode = COALESCE(mode, ?)
+                WHERE trade_id = ?
+            """, (result, pnl, close_reason, close_price, str(close_time), pid, mode, tid))
+            self.conn.commit()
+            return tid
+
+        # 3. fresh import row
+        tid = comment or f"MT5-{pid}"
+        self.insert_trade({
+            'trade_id': tid,
+            'bot_id': bot_id,
+            'mode': mode,
+            'mt5_position_id': pid,
+            'source': 'mt5_import',
+            'plan_id': f"MT5-{pid}",
+            'order_num': 1,
+            'timestamp_open': deal.get('open_time'),
+            'timeframe': deal.get('timeframe', ''),
+            'chart_type': deal.get('chart_type', ''),
+            'technique': deal.get('technique', 'mt5_import'),
+            'action': deal.get('action', ''),
+            'entry_price': deal.get('entry_price') or deal.get('entry'),
+            'sl_price': deal.get('sl_price') or 0,
+            'tp_price': deal.get('tp_price') or 0,
+            'lot_size': deal.get('lot_size') or deal.get('lot') or 0,
+            'result': result,
+        })
+        # insert_trade defaults result to PENDING-or-given; set close fields now.
+        cur.execute("""
+            UPDATE trades SET result = ?, pnl_usd = ?, close_reason = ?,
+                close_price = ?, timestamp_close = ? WHERE trade_id = ?
+        """, (result, pnl, close_reason, close_price, str(close_time), tid))
+        self.conn.commit()
+        return tid
+
+    def get_known_mt5_position_ids(self) -> set:
+        """Set of mt5_position_id already persisted — lets a backfill skip them."""
+        cur = self.conn.execute("SELECT mt5_position_id FROM trades WHERE mt5_position_id IS NOT NULL")
+        return {r[0] for r in cur.fetchall()}
 
     def update_mae_mfe(self, trade_id: str, mae_pip: float, mfe_pip: float):
         """Bump the running MAE/MFE for an open trade. No-op if either value
@@ -506,6 +621,22 @@ class LocalDB:
             self.conn.execute("DELETE FROM trades")
             logger.info("✓ LocalDB: Cleared all trades")
         self.conn.commit()
+
+    def count_trades(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0])
+
+    def reset_mode_data(self) -> dict:
+        """Wipe ALL trades + per-bot state in THIS (per-mode) DB file. Because
+        each mode has its own file, this is a clean full reset for one mode.
+        Returns counts removed for confirmation."""
+        n_trades = self.count_trades()
+        n_state = int(self.conn.execute("SELECT COUNT(*) FROM bot_state_snapshots").fetchone()[0])
+        self.conn.execute("DELETE FROM trades")
+        self.conn.execute("DELETE FROM bot_state_snapshots")
+        self.conn.execute("DELETE FROM portfolio_snapshots")
+        self.conn.commit()
+        logger.info(f"✓ LocalDB reset ({self.db_path}): {n_trades} trades, {n_state} bot_state cleared")
+        return {"trades": n_trades, "bot_state": n_state}
 
     def vacuum(self):
         """Optimize database"""

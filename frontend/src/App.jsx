@@ -1,11 +1,15 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useBots } from './hooks/useBots'
 import { useBotState } from './hooks/useBotState'
+import { useAccount } from './hooks/useAccount'
 import Sidebar from './components/Sidebar'
 import TopBar from './components/TopBar'
-import Dashboard from './pages/Dashboard'
-import AgentActivity from './pages/AgentActivity'
+import Login from './pages/Login'
+import CommandCenter from './pages/CommandCenter'
+import Office from './pages/Office'
+import LiveTrade from './pages/LiveTrade'
+import Alerts from './pages/Alerts'
 import TradeHistory from './pages/TradeHistory'
 import Proposals from './pages/Proposals'
 import Settings from './pages/Settings'
@@ -13,74 +17,53 @@ import Backtest from './pages/Backtest'
 import Strategy from './pages/Strategy'
 
 export default function App() {
-  // New multi-bot model — primary state for Dashboard + TopBar
+  // Multi-bot state (primary) + legacy single-bot state for un-migrated pages.
   const { bots, isConnected, startBot, stopBot, emergencyStopAll } = useBots()
-
-  // Legacy single-bot view — pages that haven't migrated yet (AgentActivity,
-  // Proposals, Settings) consume this. Backed by /api/status which mirrors
-  // the first running bot.
   const { botState } = useBotState()
+  const { account } = useAccount()
+  const [authed, setAuthed] = useState(true)
 
-  // Selection state for the "Add Bot" form in TopBar.
-  const [selection, setSelection] = useState({
-    tradeKind:   'simulation',
-    accountType: 'cent',
-    symbol:      'XAUUSDc',
-    timeframe:   'M5',
-    dataSource:  'auto',
-  })
-  const updateSelection = (patch) => setSelection(prev => ({ ...prev, ...patch }))
+  // Sidebar nav counts (alerts derived from events; proposals from botState).
+  const counts = useMemo(() => {
+    const alerts = bots.reduce((s, b) => s + (b.events || []).filter(
+      (e) => ['subprocess_died', 'emergency_stopped', 'plan_cancelled', 'stopped'].includes(e.type)
+    ).length, 0)
+    return { alerts, proposals: botState?.proposals_pending || 0 }
+  }, [bots, botState])
+
+  if (!authed) {
+    return <Login onEnter={() => setAuthed(true)} />
+  }
 
   return (
-    <div className="app-layout">
-      <Sidebar
-        botState={botState}
-        isConnected={isConnected}
-      />
-      <div className="main-wrapper">
+    <div className="app">
+      <Sidebar account={account} isConnected={isConnected} counts={counts} />
+      <div className="main">
         <TopBar
           bots={bots}
-          selection={selection}
-          onSelectionChange={updateSelection}
           onAddBot={startBot}
           onEmergencyStop={emergencyStopAll}
+          onExit={() => setAuthed(false)}
+          alertCount={counts.alerts}
+          isConnected={isConnected}
         />
-        <main className="main-content">
+        <div className="scroll-area">
           <Routes>
-            <Route
-              path="/"
-              element={<Navigate to="/dashboard" replace/>}
-            />
-            <Route
-              path="/dashboard"
-              element={<Dashboard bots={bots} onStop={stopBot} selection={selection}/>}
-            />
-            <Route
-              path="/agents"
-              element={<AgentActivity botState={botState}/>}
-            />
-            <Route
-              path="/history"
-              element={<TradeHistory/>}
-            />
-            <Route
-              path="/proposals"
-              element={<Proposals botState={botState}/>}
-            />
-            <Route
-              path="/backtest"
-              element={<Backtest/>}
-            />
-            <Route
-              path="/strategy"
-              element={<Strategy/>}
-            />
-            <Route
-              path="/settings"
-              element={<Settings botState={botState}/>}
-            />
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<CommandCenter bots={bots} account={account} onAddBot={startBot} onStop={stopBot} isConnected={isConnected} />} />
+            <Route path="/office" element={<Office bots={bots} account={account} onAddBot={startBot} />} />
+            <Route path="/trade" element={<LiveTrade bots={bots} account={account} onAddBot={startBot} onEmergencyStop={emergencyStopAll} onStop={stopBot} />} />
+            <Route path="/strategy" element={<Strategy />} />
+            <Route path="/backtest" element={<Backtest />} />
+            <Route path="/history" element={<TradeHistory />} />
+            <Route path="/alerts" element={<Alerts bots={bots} />} />
+            <Route path="/proposals" element={<Proposals botState={botState} />} />
+            <Route path="/settings" element={<Settings botState={botState} />} />
+            {/* legacy alias → office */}
+            <Route path="/agents" element={<Navigate to="/office" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
-        </main>
+        </div>
       </div>
     </div>
   )

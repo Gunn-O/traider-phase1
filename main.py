@@ -438,7 +438,10 @@ class TraiderMainLoop:
             # SIM/LIVE: Use .env setting
             sheets_enabled_override = None
 
-        self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override)
+        # Per-mode Sheets tabs (Trade Log - Micro/Live/Backtest/Paper) so modes
+        # never share a log. Backtest overrides mode label regardless of account.
+        _sheets_mode = 'backtest' if self.is_backtest else self.trading_mode
+        self.sheets_logger = SheetsLogger(enabled_override=sheets_enabled_override, mode=_sheets_mode)
         logger.info(f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id={self.sheets_logger.sheets_id[:20]}..." if self.sheets_logger.sheets_id else f"📊 SheetsLogger: enabled={self.sheets_logger.enabled}, sheets_id=None")
 
         # Initialize LocalDB:
@@ -446,15 +449,18 @@ class TraiderMainLoop:
         #   - SIM/LIVE under api_server: persistent DB that survives launcher restarts
         # Separate paths so a backtest doesn't wipe live bot history.
         if self.is_backtest:
-            from utils.local_db import LocalDB
-            self.local_db = LocalDB(db_path='traider_backtest.db')
+            from utils.local_db import LocalDB, db_for_mode
+            self.local_db = LocalDB(db_path=db_for_mode('backtest'))
             self.local_db.clear_trades()
             if self.sheets_logger.enabled:
                 self.sheets_logger.set_batch_mode(True)
             logger.info("✓ Backtest mode: LocalDB + Sheets batch mode")
         elif _BOT_ID:
-            from utils.local_db import LocalDB
-            self.local_db = LocalDB(db_path='traider_sim.db')
+            from utils.local_db import LocalDB, db_for_mode
+            # Per-mode DB files: micro / live / paper stay isolated so a reset or
+            # backtest never touches real-account history.
+            self.local_db = LocalDB(db_path=db_for_mode(self.trading_mode))
+            logger.info(f"✓ LocalDB for mode {self.trading_mode!r}: {db_for_mode(self.trading_mode)}")
             # bot_state restore happens after portfolio_state_cache is initialized.
         else:
             self.local_db = None
@@ -1798,6 +1804,30 @@ class TraiderMainLoop:
 
             return candles_by_tf
 
+    def backfill_mt5_history(self, days: int = 7):
+        """Persist this bot's CLOSED MT5 deals into our per-mode LocalDB so the
+        data survives MT5's ~1-month history retention — including trades closed
+        manually or while the bot was offline. Idempotent via mt5_position_id.
+
+        No-op in backtest or with PaperBroker (no real MT5 history)."""
+        if self.is_backtest or not self.local_db:
+            return
+        if not hasattr(self.broker, 'fetch_closed_deals'):
+            return
+        try:
+            known = self.local_db.get_known_mt5_position_ids()
+            deals = self.broker.fetch_closed_deals(datetime.now() - timedelta(days=days))
+            n = 0
+            for d in deals:
+                if d.get('mt5_position_id') in known:
+                    continue
+                self.local_db.upsert_mt5_deal(d, bot_id=_BOT_ID, mode=self.trading_mode)
+                n += 1
+            if n:
+                logger.info(f"📥 MT5 backfill: persisted {n} closed deal(s) → {self.trading_mode} DB")
+        except Exception as e:
+            logger.warning(f"MT5 backfill failed (continuing): {e}")
+
     def monitor_positions(self, current_candle=None):
         """
         Monitor open positions and update when hit SL/TP
@@ -2566,9 +2596,17 @@ def main():
             active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
             tf_sec = tf_seconds.get(active_tf, 300)
             logger.info(f"Running in continuous mode... TF={active_tf}, bar-aligned sleep (Ctrl+C to stop)")
+            # Capture any MT5 history once on start, then periodically (every
+            # ~20 bars) so closed deals are persisted before MT5 forgets them.
+            traider.backfill_mt5_history()
+            _backfill_tick = 0
             while True:
                 traider.run_once()
                 traider.monitor_positions()
+
+                _backfill_tick += 1
+                if _backfill_tick % 20 == 0:
+                    traider.backfill_mt5_history()
 
                 now = time.time()
                 next_bar_ts = math.ceil(now / tf_sec) * tf_sec

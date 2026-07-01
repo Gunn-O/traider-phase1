@@ -1,134 +1,64 @@
 import { useEffect, useState } from 'react'
-import './TopBar.css'
+import { useTicks } from '../hooks/useTicks'
+import { Glyph, I } from './ui/primitives'
+import { AddBotModal } from './office/OfficeScene'
+import { FMT } from '../utils/format'
 
-const SYMBOL_OPTIONS_BY_SOURCE = {
-  auto: [
-    { value: 'XAUUSDc', label: 'XAUUSDc (Cent)' },
-    { value: 'XAUUSDm', label: 'XAUUSDm (Micro)' },
-    { value: 'XAUUSD',  label: 'XAUUSD (Standard)' },
-  ],
-  mt5: [
-    { value: 'XAUUSDc', label: 'XAUUSDc (Cent)' },
-    { value: 'XAUUSDm', label: 'XAUUSDm (Micro)' },
-    { value: 'XAUUSD',  label: 'XAUUSD (Standard)' },
-  ],
-  yf: [
-    { value: 'XAUUSD', label: 'Gold Futures (GC=F)' },
-  ],
-  tv: [
-    { value: 'XAUUSD', label: 'XAUUSD (OANDA)' },
-  ],
-}
-
-const TF_TABS = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4']
-
-export default function TopBar({ bots, selection, onSelectionChange, onAddBot, onEmergencyStop }) {
-  const { tradeKind, accountType, symbol, timeframe, dataSource } = selection
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-
-  const setTradeKind   = v => onSelectionChange({ tradeKind: v })
-  const setAccountType = v => onSelectionChange({ accountType: v })
-  const setSymbol      = v => onSelectionChange({ symbol: v })
-  const setTimeframe   = v => onSelectionChange({ timeframe: v })
-  const setDataSource  = v => onSelectionChange({ dataSource: v })
+// Command Deck top bar — status chips, live XAUUSD price, clock, alert bell,
+// operator, and compact Add-Bot / Stop-All / Exit controls. The full bot config
+// lives in the Live Trade control bar; this keeps a quick "+ Add Bot" handy.
+export default function TopBar({ bots = [], onAddBot, onEmergencyStop, onExit, alertCount = 0, isConnected = true }) {
+  const [clock, setClock] = useState('')
+  const [adding, setAdding] = useState(false)
+  const { ticks } = useTicks()
 
   useEffect(() => {
-    const allowed = SYMBOL_OPTIONS_BY_SOURCE[dataSource] || []
-    if (!allowed.find(o => o.value === symbol)) {
-      setSymbol(allowed[0]?.value || 'XAUUSDc')
+    const tick = () => {
+      const d = new Date()
+      const p = (n) => String(n).padStart(2, '0')
+      setClock(`${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`)
     }
-  }, [dataSource])
+    tick(); const id = setInterval(tick, 1000); return () => clearInterval(id)
+  }, [])
 
-  const symbolOptions = SYMBOL_OPTIONS_BY_SOURCE[dataSource] || SYMBOL_OPTIONS_BY_SOURCE.auto
-  const mode = tradeKind === 'simulation'
-    ? 'paper'
-    : (accountType === 'cent' ? 'micro' : 'live')
-
-  const candidateBotId = `${timeframe}-${symbol}-${mode}`
-  const alreadyRunning = bots.some(b => b.bot_id === candidateBotId && b.status === 'running')
-  const runningCount = bots.filter(b => b.status === 'running').length
-
-  const handleAdd = async () => {
-    setError('')
-    setBusy(true)
-    try {
-      await onAddBot({ tf: timeframe, symbol, mode, data_source: dataSource })
-    } catch (e) {
-      setError(e.message || String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const running = bots.filter((b) => b.status === 'running')
+  const sym = running[0]?.symbol || 'XAUUSDc'
+  const price = ticks?.[sym]?.bid
 
   return (
-    <div className="topbar">
-      <div className="topbar-left">
-        <div className="status-group">
-          <div className={`status-indicator ${runningCount > 0 ? 'running' : 'stopped'}`}>
-            <span className="status-dot"></span>
-            <span className="status-text">{runningCount} running</span>
-          </div>
-        </div>
-
-        <div className="tf-tabs">
-          {TF_TABS.map(tf => {
-            const hasBot = bots.some(b => b.tf === tf && b.status === 'running')
-            return (
-              <button
-                key={tf}
-                className={`tf-tab ${timeframe === tf ? 'active' : ''} ${hasBot ? 'has-bot' : ''}`}
-                onClick={() => setTimeframe(tf)}
-                title={hasBot ? `${tf} bot is running` : `Select ${tf}`}
-              >
-                {tf}{hasBot ? ' ●' : ''}
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="controls-group">
-          <select value={tradeKind} onChange={e => setTradeKind(e.target.value)} className="control-select">
-            <option value="simulation">Simulation</option>
-            <option value="broker">Broker</option>
-          </select>
-
-          {tradeKind === 'broker' && (
-            <select value={accountType} onChange={e => setAccountType(e.target.value)} className="control-select">
-              <option value="cent">Cent</option>
-              <option value="real">Real</option>
-            </select>
-          )}
-
-          <select value={dataSource} onChange={e => setDataSource(e.target.value)} className="control-select">
-            <option value="auto">Auto</option>
-            <option value="mt5">MT5</option>
-            <option value="yf">yfinance</option>
-            <option value="tv">TradingView</option>
-          </select>
-
-          <select value={symbol} onChange={e => setSymbol(e.target.value)} className="control-select">
-            {symbolOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-
-          <button
-            onClick={handleAdd}
-            className="btn btn-start"
-            disabled={busy || alreadyRunning}
-            title={alreadyRunning ? `${candidateBotId} already running` : 'Start a bot with this config'}
-          >
-            {busy ? '…' : alreadyRunning ? '✓ Running' : '+ Add Bot'}
-          </button>
-
-          {runningCount > 0 && (
-            <button onClick={onEmergencyStop} className="btn btn-emergency" title="Stop ALL bots immediately">
-              🚨 Stop All
-            </button>
-          )}
-        </div>
-
-        {error && <div className="topbar-error">{error}</div>}
+    <header className="topbar">
+      <div className="tb-status">
+        <span className={`status-chip ${isConnected ? 'on' : 'warn'}`} title={isConnected ? 'WebSocket connected' : 'WebSocket disconnected — backend running?'}>
+          <span className="led" style={{ background: isConnected ? 'var(--c-green)' : 'var(--c-red)', boxShadow: `0 0 8px ${isConnected ? 'var(--c-green)' : 'var(--c-red)'}` }} />
+          {isConnected ? 'WS LIVE' : 'WS OFF'}
+        </span>
+        <span className={`status-chip ${running.length ? 'on' : ''}`}>
+          <span className="led" style={{ background: running.length ? 'var(--c-green)' : 'var(--muted)', boxShadow: running.length ? '0 0 8px var(--c-green)' : 'none' }} />
+          {running.length} ACTIVE
+        </span>
+        <span className="status-chip"><Glyph d={I.target} size={14} /> XAUUSD <b className="gold mono">{price != null ? FMT.px(price) : '—'}</b></span>
       </div>
-    </div>
+      <div className="tb-right">
+        <span className="tb-clock mono">{clock}</span>
+        <button className="cd-btn btn-primary" style={{ padding: '7px 13px' }} onClick={() => setAdding(true)}>+ Add Bot</button>
+        {running.length > 0 && (
+          <button className="cd-btn btn-stopall" style={{ padding: '7px 13px' }} onClick={onEmergencyStop}>⛔ Stop All</button>
+        )}
+        <button className="tb-bell"><Glyph d={I.bell} size={16} />{alertCount > 0 && <span className="bell-dot mono">{alertCount}</span>}</button>
+        <div className="tb-user">
+          <span className="tb-avatar">C</span>
+          <div className="tb-user-info"><b>Operator</b><span className="mono dim">COMMANDER</span></div>
+        </div>
+        {onExit && <button className="cd-btn btn-exit" onClick={onExit}>EXIT</button>}
+      </div>
+      {adding && (
+        <>
+          <div className="os-backdrop" style={{ position: 'fixed', zIndex: 2000 }} onClick={() => setAdding(false)} />
+          <div style={{ position: 'fixed', inset: 0, zIndex: 2001, pointerEvents: 'none' }}>
+            <div style={{ pointerEvents: 'auto' }}><AddBotModal onClose={() => setAdding(false)} onAddBot={onAddBot} /></div>
+          </div>
+        </>
+      )}
+    </header>
   )
 }

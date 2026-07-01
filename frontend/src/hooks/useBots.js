@@ -3,6 +3,15 @@ import { useWebSocket } from './useWebSocket'
 
 const POLL_MS = 3000
 
+// Prefix-aware trade_id equality — mirrors api_server._trade_ids_match. MT5
+// truncates the position comment to 16 chars, so the same trade can arrive
+// with the full id from reconcile_pending and a truncated id from
+// update_positions; either being a prefix of the other means same trade.
+function tradeIdsMatch(a, b) {
+  if (!a || !b) return false
+  return a === b || a.startsWith(b) || b.startsWith(a)
+}
+
 export function useBots() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(true)
@@ -50,12 +59,24 @@ export function useBots() {
         let open_orders = b.open_orders || []
         let closed_orders = b.closed_orders || []
         const t = wsData.data?.type
+        const d = wsData.data?.data || {}
         if (t === 'plan_opened') {
-          open_orders = [...open_orders, wsData.data.data || {}]
-        } else if (t === 'plan_closed') {
-          const planId = wsData.data?.data?.plan_id
-          open_orders = open_orders.filter(o => o?.plan_id !== planId)
-          closed_orders = [...closed_orders, wsData.data.data || {}].slice(-50)
+          // Dedup by trade_id (prefix-aware) so a re-sent open doesn't double
+          // a row. MaiRuay sends 3 plan_opened events (one per entry, distinct
+          // trade_id) under one plan_id — all three are kept; the Positions
+          // view groups them back into a single plan row at render time.
+          if (!open_orders.some(o => tradeIdsMatch(o?.trade_id, d.trade_id))) {
+            open_orders = [...open_orders, d]
+          }
+        } else if (t === 'plan_closed' || t === 'plan_cancelled') {
+          // Remove the specific entry by trade_id — NOT plan_id — so closing
+          // one MaiRuay entry (or cancelling an unfilled LIMIT) doesn't evict
+          // its still-open siblings. Fall back to plan_id only for legacy
+          // single-entry events that carry no trade_id.
+          open_orders = open_orders.filter(o =>
+            d.trade_id ? !tradeIdsMatch(o?.trade_id, d.trade_id) : o?.plan_id !== d.plan_id
+          )
+          closed_orders = [...closed_orders, d].slice(-50)
         }
         return { ...b, events, open_orders, closed_orders }
       }))

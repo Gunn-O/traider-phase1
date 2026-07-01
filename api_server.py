@@ -100,17 +100,28 @@ def _add_event(bot_id: str, ev_type: str, msg: str = "", data: Optional[dict] = 
     bots[bot_id]["last_updated"] = datetime.now().isoformat()
 
 
-def _hydrate_bot_from_db(bot_id: str, db_path: str = "traider_sim.db") -> None:
+def _db_for_bot(bot_id: str) -> str:
+    """Resolve the per-mode DB file for a bot from its mode token."""
+    from utils.local_db import db_for_mode, mode_from_bot_id
+    return str(Path(__file__).resolve().parent / db_for_mode(mode_from_bot_id(bot_id)))
+
+
+def _hydrate_bot_from_db(bot_id: str, db_path: Optional[str] = None) -> None:
     """Replace bots[bot_id]['open_orders'] + ['closed_orders'] with whatever
     LocalDB shows for this bot_id right now. Called on /api/start and also
     exposed via POST /api/bots/{id}/sync so the UI can be refreshed after
     `reconcile_pending.py` without having to restart anything.
+
+    The DB file is resolved per-mode from the bot_id (micro/live/paper each
+    have their own file) unless an explicit db_path is given.
 
     Best-effort: any DB error is swallowed (returns with the in-memory state
     untouched). Trades older than `MAX_CLOSED_LOOKBACK` are not loaded so the
     Dashboard's "Recently Closed" panel stays focused on recent activity."""
     if bot_id not in bots:
         return
+    if db_path is None:
+        db_path = _db_for_bot(bot_id)
     if not os.path.exists(db_path):
         return
     try:
@@ -355,6 +366,13 @@ static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+# Serve the built React SPA (vite → static_build/) so opening :8080 directly
+# shows the current UI instead of the legacy static/dashboard.html. The launcher
+# normally runs vite dev on :3000, but this removes the stale-UI footgun.
+BUILD_DIR = Path(__file__).parent / "static_build"
+if (BUILD_DIR / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=BUILD_DIR / "assets"), name="spa-assets")
+
 # ============================================================================
 # WEBSOCKET MANAGER
 # ============================================================================
@@ -414,12 +432,16 @@ class StopRequest(BaseModel):
 
 @app.get("/")
 async def serve_dashboard():
-    """Serve dashboard HTML"""
+    """Serve the built React SPA (static_build/index.html); fall back to the
+    legacy static/dashboard.html only if no build exists."""
+    spa_index = BUILD_DIR / "index.html"
+    if spa_index.exists():
+        return FileResponse(spa_index)
     dashboard_path = static_dir / "dashboard.html"
     if not dashboard_path.exists():
         return HTMLResponse(
-            content="<h1>Dashboard not found</h1><p>Create static/dashboard.html first</p>",
-            status_code=404
+            content="<h1>UI not built</h1><p>Run <code>cd frontend &amp;&amp; npm run build</code> (or use the launcher's vite dev server on :3000).</p>",
+            status_code=404,
         )
     return FileResponse(dashboard_path)
 
@@ -474,11 +496,18 @@ def _already_in_closed(bot_id: str, trade_id: str) -> bool:
 
 
 def _already_in_open(bot_id: str, trade_id: str, plan_id: str) -> bool:
-    """True if an order with this trade_id OR plan_id is already in open_orders."""
+    """True if an order with this *trade_id* is already in open_orders.
+
+    Dedup is keyed on trade_id ONLY — NOT plan_id. MaiRuay multi-entry plans
+    legitimately put 3 orders (order_num 1/2/3) under one plan_id; keying on
+    plan_id here used to skip the 2nd and 3rd entries on plan_opened, leaving
+    the live event-driven open_orders with a single row while DB hydration
+    (which reads every PENDING row) showed all three — the source of the
+    "triple vs single" tracking mismatch. trade_id is unique per entry, so it
+    dedups genuine duplicates without dropping siblings. The UI then groups by
+    plan_id to render one row per plan."""
     for o in bots[bot_id].get("open_orders", []):
         if trade_id and _trade_ids_match(trade_id, o.get("trade_id", "") or ""):
-            return True
-        if plan_id and o.get("plan_id") == plan_id:
             return True
     return False
 
@@ -507,15 +536,26 @@ async def post_bot_event(bot_id: str, event: BotEvent):
     elif event.type == "plan_closed":
         plan_id = event.data.get("plan_id")
         tid     = event.data.get("trade_id", "")
-        # Always remove from open_orders (idempotent — filter by plan_id).
+        # Remove from open_orders by TRADE_ID (prefix-aware) — NOT plan_id.
+        # A MaiRuay plan has 3 entries sharing one plan_id; when one entry
+        # closes (e.g. order_num 1 hits TP) or a LIMIT entry is reconciled to
+        # CANCELLED, only THAT entry should leave open_orders. Filtering by
+        # plan_id used to evict the still-open siblings too, so a single
+        # close/cancel made the whole plan vanish from the Open panel while
+        # the others were genuinely still live in MT5.
         # Snapshot the matching open_order FIRST so we can backfill missing
         # fields on the close event (open_time / entry / sl / tp / lot etc).
         # Reconcile_pending CANCELLED events historically arrived with
         # open_time='' because old subprocesses didn't stamp it on the in-
-        # memory order; now we recover it from the open_order on its way
-        # out.
+        # memory order; now we recover it from the open_order on its way out.
+        def _open_matches(o):
+            if tid and _trade_ids_match(tid, o.get("trade_id", "") or ""):
+                return True
+            # Fallback for single-entry/legacy events with no trade_id: fall
+            # back to plan_id so old-style closes still clear their row.
+            return (not tid) and plan_id and o.get("plan_id") == plan_id
         _open_snap = next(
-            (o for o in bots[bot_id]["open_orders"] if o.get("plan_id") == plan_id),
+            (o for o in bots[bot_id]["open_orders"] if _open_matches(o)),
             None,
         )
         if _open_snap:
@@ -525,7 +565,7 @@ async def post_bot_event(bot_id: str, event: BotEvent):
                 if not _have and _open_snap.get(_k):
                     event.data[_k] = _open_snap[_k]
         bots[bot_id]["open_orders"] = [
-            o for o in bots[bot_id]["open_orders"] if o.get("plan_id") != plan_id
+            o for o in bots[bot_id]["open_orders"] if not _open_matches(o)
         ]
         # Last-resort backfill: if open_time STILL empty after pulling from
         # open_orders (e.g., bot subprocess never opened this trade in the
@@ -562,6 +602,77 @@ async def post_bot_event(bot_id: str, event: BotEvent):
         "data": {"ts": datetime.now().isoformat(), **event.dict()},
     })
     return {"ok": True}
+
+
+@app.get("/api/data/counts")
+async def data_counts():
+    """Trade-row counts per mode DB — backs the Settings 'Reset Data' card."""
+    from utils.local_db import db_for_mode
+    here = Path(__file__).resolve().parent
+    out = {}
+    for mode in ("backtest", "paper", "micro", "live"):
+        p = here / db_for_mode(mode)
+        n = 0
+        if p.exists():
+            try:
+                import sqlite3
+                con = sqlite3.connect(str(p))
+                n = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+                con.close()
+            except Exception:
+                n = 0
+        out[mode] = n
+    return {"counts": out}
+
+
+@app.post("/api/data/reset")
+async def data_reset(req: Request):
+    """Reset ALL logged data for ONE mode: wipe its per-mode LocalDB (trades +
+    bot_state) and clear its Google Sheets tab. Guarded — requires confirm=true
+    and refuses while a bot for that mode is still running.
+
+    Body: {"mode": "micro"|"live"|"paper"|"backtest", "confirm": true}"""
+    body = await req.json()
+    mode = (body.get("mode") or "").lower()
+    if mode not in ("backtest", "paper", "micro", "live"):
+        raise HTTPException(status_code=400, detail=f"invalid mode {mode!r}")
+    if not body.get("confirm"):
+        raise HTTPException(status_code=400, detail="confirm=true required")
+
+    # Refuse if a bot for this mode is currently running.
+    from utils.local_db import db_for_mode, mode_from_bot_id, LocalDB
+    running = [bid for bid, b in bots.items()
+               if b.get("status") == "running" and mode_from_bot_id(bid) == mode]
+    if running:
+        raise HTTPException(status_code=409, detail=f"stop running {mode} bot(s) first: {running}")
+
+    here = Path(__file__).resolve().parent
+    db_path = str(here / db_for_mode(mode))
+    db_result = {"trades": 0, "bot_state": 0}
+    if os.path.exists(db_path):
+        db = LocalDB(db_path=db_path)
+        db_result = db.reset_mode_data()
+        db.vacuum()
+        db.close()
+
+    # Clear the per-mode Sheets tab (best-effort).
+    sheets_result = "skipped"
+    try:
+        from agents.g4_sheets_logger import SheetsLogger
+        sl = SheetsLogger(mode=mode)
+        if sl.enabled:
+            sl.clear_sheets(confirm=True)
+            sheets_result = "cleared"
+    except Exception as e:
+        sheets_result = f"error: {e}"
+
+    # Drop in-memory open/closed for any bot of this mode so the UI clears too.
+    for bid, b in bots.items():
+        if mode_from_bot_id(bid) == mode:
+            b["open_orders"] = []
+            b["closed_orders"] = []
+
+    return {"ok": True, "mode": mode, "db": db_result, "sheets": sheets_result}
 
 
 @app.post("/api/bots/{bot_id}/sync")
@@ -863,8 +974,13 @@ def _localdb_paths() -> List[str]:
     files, so the analytics page queries both and merges."""
     here = Path(__file__).resolve().parent
     candidates = [
-        here / "traider_sim.db",
+        # Per-mode files (2026-06 data architecture)
+        here / "traider_micro.db",
+        here / "traider_live.db",
+        here / "traider_paper.db",
         here / "traider_backtest.db",
+        # Legacy shared file — kept so pre-split history still shows up
+        here / "traider_sim.db",
         here / os.getenv("LOCAL_DB_PATH", "traider_backtest.db"),
     ]
     seen, out = set(), []
@@ -937,7 +1053,8 @@ def _normalize_trade(row: dict, source_db: str) -> dict:
         "mae_pip":          row.get("mae_pip"),
         "mfe_pip":          row.get("mfe_pip"),
         "r55_pip_at_open":  row.get("r55_pip_at_open"),
-        "mode":             mode or "paper",
+        "mode":             (row.get("mode") or mode or "paper"),
+        "source":           row.get("source") or "bot",
         "source_db":        Path(source_db).name,
     }
 
@@ -1906,6 +2023,23 @@ def add_agent_log(agent: str, log_entry: Dict):
     bot_state["agent_logs"][agent].append(log_entry)
     # Keep last 50 entries per agent
     bot_state["agent_logs"][agent] = bot_state["agent_logs"][agent][-50:]
+
+
+# ============================================================================
+# SPA CATCH-ALL (must be the LAST route — client-side router deep links)
+# ============================================================================
+
+@app.get("/{full_path:path}")
+async def spa_catch_all(full_path: str):
+    """Serve the SPA index for client-side routes (/dashboard, /office, …) so
+    deep links work when api_server serves the build. Registered last, so all
+    /api, /ws, /static, /assets routes are matched first."""
+    if full_path.startswith(("api/", "api", "ws", "static/", "assets/", "docs", "openapi.json", "redoc")):
+        raise HTTPException(status_code=404, detail="Not found")
+    spa_index = BUILD_DIR / "index.html"
+    if spa_index.exists():
+        return FileResponse(spa_index)
+    raise HTTPException(status_code=404, detail="UI not built — run npm run build")
 
 
 # ============================================================================
