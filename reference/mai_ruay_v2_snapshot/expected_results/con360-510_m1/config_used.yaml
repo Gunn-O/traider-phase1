@@ -1,0 +1,86 @@
+strategy: mai_ruay_v2
+general:
+  r55_bars: 55
+  min_tp_pip: 200
+  pending_max_age: 5
+  proximity_cancel_enabled: true
+  proximity_cancel_pct_r55: 5
+  portfolio_start: 1000
+  risk_per_plan_pct: 10
+  lot_split_mode: equal_risk
+father:
+  count_min: 1
+  count_max: 10
+  body_min_pct_r55: 60
+  body_max_pct_r55: 0
+  per_bar_body_min: 4
+  vol_ratio_min: 1.0
+  vol_window: 20
+  doji_stop_pct: 2
+  big_bar_pct: 10
+  small_bar_allow: 2
+  head_trim_small_max: 2
+mother:
+  compare_mode: r55
+  body_min_pct: 2
+  body_max_pct: 25
+entries:
+- when:
+    father_min_pct: 80
+    mother_min_pct: 2
+    mother_max_pct: 25
+  legs:
+  - mode: mother_pct
+    value: 0
+    adj_on: true
+    tp_adj: 20
+- when:
+    father_min_pct: 60
+    mother_min_pct: 2
+    mother_max_pct: 5
+  legs:
+  - mode: mother_pct
+    value: 0
+- when:
+    father_min_pct: 60
+    mother_min_pct: 5
+    mother_max_pct: 10
+  legs:
+  - mode: mother_pct
+    value: 0
+- when:
+    father_min_pct: 60
+    mother_min_pct: 10
+    mother_max_pct: 15
+  legs:
+  - mode: mother_pct
+    value: 0
+- when:
+    father_min_pct: 60
+    mother_min_pct: 15
+    mother_max_pct: 25
+  legs:
+  - mode: mother_pct
+    value: 0
+tpsl:
+  tp_pct_father: 40
+  sl_pct_father: 20
+_run:
+  strategy: mai_ruay_v2
+  data: data/XAUUSD_M1_2026-06-09.csv
+  config: configs/mairuay_v2_1entry_con360-510.yaml
+  mode: correct
+  lot: risk
+  portfolio: 1000
+  inject_compat: false
+  winrate_mode: false
+  guards:
+    friday_close:
+      enable: true
+      close_hour_utc: 21
+      close_min: 0
+      no_trade_min: 120
+    gap:
+      enable: true
+      threshold_pct: 0.2
+      wait_bars: 80
