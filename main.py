@@ -338,6 +338,19 @@ class TraiderMainLoop:
         )
         self.balance = float(os.getenv('ACCOUNT_BALANCE', '300'))
 
+        # Lot-base portfolio — the notional that lot sizing is based on
+        # (budget = base × risk_per_plan_pct). Defaults to ACCOUNT_BALANCE; set
+        # LOT_BASE_PORTFOLIO to pin lots to a fixed value (e.g. 1000 to match the
+        # MaiRuay v2 snapshot golden) independent of the account balance.
+        # NOTE: this is NOT the live broker equity — lots do not auto-scale with
+        # realised P&L; it is a fixed, operator-set notional read from env.
+        _lot_base_env = os.getenv('LOT_BASE_PORTFOLIO', '').strip()
+        try:
+            self.lot_base_portfolio = float(_lot_base_env) if _lot_base_env else self.balance
+        except ValueError:
+            logger.warning(f"Invalid LOT_BASE_PORTFOLIO={_lot_base_env!r} — using ACCOUNT_BALANCE")
+            self.lot_base_portfolio = self.balance
+
         self.trading_mode = (
             getattr(args, 'mode', None)
             or bot_state.get("mode", "paper")
@@ -366,6 +379,8 @@ class TraiderMainLoop:
         logger.info(f"Active TF:      {os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()}  (env BACKTEST_TIMEFRAME)")
         logger.info(f"Data source:    {getattr(args, 'data_source', 'auto')}")
         logger.info(f"Balance (.env): ${self.balance:,.2f}")
+        logger.info(f"Lot base:       ${self.lot_base_portfolio:,.2f}  "
+                    f"(LOT_BASE_PORTFOLIO or ACCOUNT_BALANCE — fixed, not broker equity)")
         if self.is_backtest:
             logger.info(f"Backtest mode: Sheets logging {'ENABLED' if args.log_sheets else 'DISABLED'}")
         logger.info("="*70)
@@ -910,7 +925,7 @@ class TraiderMainLoop:
         logger.info(f"\n[STEP 2] Signal Engine ({active_tf} Single TF)...")
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
-            portfolio=self.balance,
+            portfolio=self.lot_base_portfolio,   # lot budget base (env, fixed) — not broker equity
             mountain_state=self.mountain_state,
             scanner_state=self.scanner_state,
         )

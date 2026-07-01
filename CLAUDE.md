@@ -19,7 +19,8 @@
   Live-path contract smoke: `python scripts/smoke_mairuay_v2_pipeline.py`.
 - **v2 = config-driven:** tier ใน YAML · TP/SL = %คงที่ของพ่อ จาก tech_point · LIMIT ที่ tech ·
   min_tp 200 · pending 5 แท่ง · proximity-cancel **5%R55** (เดิม 10%) · lot = equal_risk จาก
-  `portfolio` arg (live = balance จริง; parity/backtest = 1000).
+  `portfolio` arg = **lot-base portfolio** (env `LOT_BASE_PORTFOLIO`, default `ACCOUNT_BALANCE`;
+  ค่าคงที่ที่ operator ตั้ง — **ไม่ใช่** broker equity จริง). parity/backtest ใช้ 1000. `WINRATE_TEST=true` → 0.01.
 - **ตัดทิ้ง (v2 ไม่มี):** Round 2 (ไม้แก้) · lot ×2/÷2 · TP30-SL45 special · buffer · obstacle scanner ·
   3-entry split lot/3 · แม่เทียบ %พ่อ (v2 เทียบ %R55). Wiring R2 ถูกลบจาก signal_engine/main/g2/g3.
   `strategies/mai_ruay_karpathy.py` ย้ายไป `legacy/`.
