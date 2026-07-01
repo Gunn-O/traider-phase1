@@ -6,6 +6,28 @@
 
 ---
 
+## 🆕 MaiRuay v2 Engine Swap (2026-06-25)
+
+**MaiRuay = ตัวเดียว = v2** (`MAI_RUAY_M1` → `strategies/mai_ruay.py`). เดิมมี 2 variants
+(V2.04 + Karpathy) — **ตัดทิ้งทั้งคู่แล้ว**.
+
+- **Source of truth = `reference/mai_ruay_v2_snapshot/`** (validated engine `bt/strategies/mai_ruay_v2.py`
+  + `configs/mairuay_v2_1entry_con360-510.yaml`) — **ไม่ใช่** notebook เดิม. ห้ามแก้ไฟล์ใน `reference/`.
+- **Golden:** 177 ไม้ · WR 44.07% · net +24490.8 pip · พอร์ต 1000→8373.94.
+- **Gate = geometry parity** (ไม่ใช่ byte-identical): `python scripts/parity_mairuay_v2.py` ต้อง PASS
+  (336/336 signals: direction/kind/entry/sl/tp identical, lot ตรงที่ portfolio=1000).
+  Live-path contract smoke: `python scripts/smoke_mairuay_v2_pipeline.py`.
+- **v2 = config-driven:** tier ใน YAML · TP/SL = %คงที่ของพ่อ จาก tech_point · LIMIT ที่ tech ·
+  min_tp 200 · pending 5 แท่ง · proximity-cancel **5%R55** (เดิม 10%) · lot = equal_risk จาก
+  `portfolio` arg (live = balance จริง; parity/backtest = 1000).
+- **ตัดทิ้ง (v2 ไม่มี):** Round 2 (ไม้แก้) · lot ×2/÷2 · TP30-SL45 special · buffer · obstacle scanner ·
+  3-entry split lot/3 · แม่เทียบ %พ่อ (v2 เทียบ %R55). Wiring R2 ถูกลบจาก signal_engine/main/g2/g3.
+  `strategies/mai_ruay_karpathy.py` ย้ายไป `legacy/`.
+
+**หมายเหตุ:** ตาราง/checklist MaiRuay ด้านล่างที่อ้าง V2.04/Karpathy/R2 = **ประวัติศาสตร์** — ยึด v2 snapshot เป็นหลัก.
+
+---
+
 ## ⚠️ ไฟล์ที่ใช้งาน (Phase II)
 
 ### 🎯 Strategy Reference Notebooks (Source of Truth — 3 ไฟล์)
