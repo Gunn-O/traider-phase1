@@ -1481,6 +1481,11 @@ async def mt5_status():
 
     sym_name = bot_state.get("symbol", "XAUUSDc")
     out = {"connected": False, "terminal": None, "account": None, "symbol": None, "error": None}
+    # Lot-base notional the bot sizes lots from (fixed, UI-editable — NOT equity).
+    # Present on every return path so the UI can always show "sizing lots from $X".
+    _lb_val, _lb_src = _effective_lot_base()
+    out["lot_base_portfolio"] = _lb_val
+    out["lot_base_source"] = _lb_src
 
     try:
         # Initialize if not already (idempotent — returns True if already connected)
@@ -1812,6 +1817,69 @@ async def update_strategies(request: Request):
     except Exception as e:
         logger.error(f"Failed to update strategies: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+def _effective_lot_base() -> tuple:
+    """(value, source) for the notional the bot sizes lots from. Precedence:
+    config global_settings.lot_base_portfolio → env LOT_BASE_PORTFOLIO → ACCOUNT_BALANCE.
+    Mirrors main.resolve_lot_base_portfolio so the UI shows what the bot will use."""
+    try:
+        from utils.strategy_loader import get_lot_base_portfolio
+        cfg = get_lot_base_portfolio()
+        if cfg and cfg > 0:
+            return float(cfg), "config"
+    except Exception:
+        pass
+    env = os.getenv("LOT_BASE_PORTFOLIO", "").strip()
+    if env:
+        try:
+            v = float(env)
+            if v > 0:
+                return v, "env"
+        except ValueError:
+            pass
+    return float(os.getenv("ACCOUNT_BALANCE", "1000")), "account_balance"
+
+
+@app.get("/api/settings/lot-base")
+async def get_lot_base():
+    """Current lot-base portfolio (fixed notional lot sizing uses) — for the
+    Settings page. `configured` is the explicit value (null = falls back);
+    `effective` is what the bot actually uses this cycle."""
+    try:
+        from utils.strategy_loader import get_lot_base_portfolio
+        configured = get_lot_base_portfolio()
+    except Exception:
+        configured = None
+    effective, source = _effective_lot_base()
+    return {
+        "configured": configured,
+        "effective": effective,
+        "source": source,   # 'config' | 'env' | 'account_balance'
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "1000")),
+    }
+
+
+@app.post("/api/settings/lot-base")
+async def set_lot_base(request: Request):
+    """Set the lot-base portfolio (persisted to config/strategies.json).
+    Body: {"value": <number|null>} · ≤0 or null clears it (→ ACCOUNT_BALANCE).
+    A running bot picks it up on its next cycle — no restart needed."""
+    from utils.strategy_loader import save_lot_base_portfolio
+    try:
+        body = await request.json()
+        raw = body.get("value", None)
+        value = None if raw in (None, "") else float(raw)
+    except (ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "value must be a number or null"})
+    try:
+        stored = save_lot_base_portfolio(value)
+    except Exception as e:
+        logger.error(f"Failed to save lot_base_portfolio: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    effective, source = _effective_lot_base()
+    logger.info(f"lot_base_portfolio set → {stored} (effective={effective}, source={source})")
+    return {"success": True, "configured": stored, "effective": effective, "source": source}
 
 
 # ============================================================================

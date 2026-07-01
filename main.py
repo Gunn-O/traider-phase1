@@ -106,6 +106,33 @@ def post_bot_heartbeat(data: dict) -> None:
     except Exception:
         pass
 
+
+def resolve_lot_base_portfolio(balance: float) -> float:
+    """Resolve the lot-base notional lot sizing uses (budget = base × risk%).
+    Precedence (first hit wins):
+      1) config/strategies.json global_settings.lot_base_portfolio (live-editable
+         via the Settings UI — picked up per-cycle without restarting the bot)
+      2) env LOT_BASE_PORTFOLIO
+      3) ACCOUNT_BALANCE (`balance`)
+    This is a FIXED operator-set value — NOT the live broker equity; lots do not
+    auto-scale with realised P&L. Applies to every mode (paper/micro/live)."""
+    try:
+        from utils.strategy_loader import get_lot_base_portfolio
+        cfg_val = get_lot_base_portfolio()
+        if cfg_val and cfg_val > 0:
+            return float(cfg_val)
+    except Exception as _e:
+        logger.debug(f"lot_base config read failed ({_e}); falling back to env/balance")
+    env_val = os.getenv('LOT_BASE_PORTFOLIO', '').strip()
+    if env_val:
+        try:
+            v = float(env_val)
+            if v > 0:
+                return v
+        except ValueError:
+            logger.warning(f"Invalid LOT_BASE_PORTFOLIO={env_val!r} — using ACCOUNT_BALANCE")
+    return float(balance)
+
 # Load environment (override=True to ensure .env takes precedence over shell)
 load_dotenv(override=True)
 
@@ -338,18 +365,13 @@ class TraiderMainLoop:
         )
         self.balance = float(os.getenv('ACCOUNT_BALANCE', '300'))
 
-        # Lot-base portfolio — the notional that lot sizing is based on
-        # (budget = base × risk_per_plan_pct). Defaults to ACCOUNT_BALANCE; set
-        # LOT_BASE_PORTFOLIO to pin lots to a fixed value (e.g. 1000 to match the
-        # MaiRuay v2 snapshot golden) independent of the account balance.
-        # NOTE: this is NOT the live broker equity — lots do not auto-scale with
-        # realised P&L; it is a fixed, operator-set notional read from env.
-        _lot_base_env = os.getenv('LOT_BASE_PORTFOLIO', '').strip()
-        try:
-            self.lot_base_portfolio = float(_lot_base_env) if _lot_base_env else self.balance
-        except ValueError:
-            logger.warning(f"Invalid LOT_BASE_PORTFOLIO={_lot_base_env!r} — using ACCOUNT_BALANCE")
-            self.lot_base_portfolio = self.balance
+        # Lot-base portfolio — the fixed notional lot sizing is based on
+        # (budget = base × risk_per_plan_pct). Source precedence:
+        #   config global_settings.lot_base_portfolio (UI-editable, live) →
+        #   env LOT_BASE_PORTFOLIO → ACCOUNT_BALANCE. NOT the live broker equity.
+        # Refreshed per-cycle in run_once() so the Settings page can change it
+        # without restarting the bot. Applies to every mode (paper/micro/live).
+        self.lot_base_portfolio = resolve_lot_base_portfolio(self.balance)
 
         self.trading_mode = (
             getattr(args, 'mode', None)
@@ -920,12 +942,20 @@ class TraiderMainLoop:
 
                     break
 
+        # Refresh the lot-base notional from config each cycle so the Settings
+        # page can change it live (config global_settings.lot_base_portfolio)
+        # without a bot restart. Falls back to env / ACCOUNT_BALANCE.
+        _new_lot_base = resolve_lot_base_portfolio(self.balance)
+        if abs(_new_lot_base - self.lot_base_portfolio) > 1e-9:
+            logger.info(f"Lot base updated: ${self.lot_base_portfolio:,.2f} → ${_new_lot_base:,.2f}")
+            self.lot_base_portfolio = _new_lot_base
+
         # Step 2: Signal Engine (replaces G1 Pattern Detection)
         active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
         logger.info(f"\n[STEP 2] Signal Engine ({active_tf} Single TF)...")
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
-            portfolio=self.lot_base_portfolio,   # lot budget base (env, fixed) — not broker equity
+            portfolio=self.lot_base_portfolio,   # lot budget base (fixed, UI-editable) — not broker equity
             mountain_state=self.mountain_state,
             scanner_state=self.scanner_state,
         )
@@ -975,6 +1005,8 @@ class TraiderMainLoop:
             "signal_rr": round(signal_obj.rr, 2) if signal_obj else None,
             "active_plan": (portfolio_state or {}).get('active_plan_id'),
             "balance": self.balance,
+            # lot-base notional lot sizing currently uses (UI-editable, fixed)
+            "lot_base_portfolio": self.lot_base_portfolio,
         })
 
         if chart_type_hb == 'unclear':

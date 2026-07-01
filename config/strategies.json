@@ -1,6 +1,6 @@
 {
   "version": "66",
-  "last_updated": "2026-06-02",
+  "last_updated": "2026-07-02",
   "patterns": {
     "MOUNTAIN": {
       "active": false,
@@ -120,6 +120,7 @@
       "weekdays_only": [
         4
       ]
-    }
+    },
+    "lot_base_portfolio": 1000.0
   }
 }

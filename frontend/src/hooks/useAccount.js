@@ -25,6 +25,9 @@ export function useAccount(pollMs = 5000) {
           freeMargin: a.free_margin ?? a.margin_free ?? null,
           positions: a.positions_count ?? 0,
           connected: !!j.connected,
+          // lot-base notional the bot sizes lots from (fixed, UI-editable — not equity)
+          lotBase: j.lot_base_portfolio ?? null,
+          lotBaseSource: j.lot_base_source ?? null,
         })
       } catch { /* ignore */ }
     }
