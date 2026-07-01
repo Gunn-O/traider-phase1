@@ -416,17 +416,13 @@ def _analyze_bar(bars: List[OHLC], bar_idx: int, portfolio: float = 1000.0,
 def find_signal(
     bars: List[OHLC],
     portfolio: float = 1000.0,
-    round2_info: Optional[dict] = None,   # deprecated no-op (v2 has no Round 2) — removed in wiring cleanup
     debug: Optional[dict] = None,
 ) -> Optional[Signal]:
     """Analyse the last bar (bars[-1]) and return a MaiRuay v2 Signal, or None.
 
-    round2_info is accepted for backward-compat only and is ignored — v2 has no
-    Round 2. (The wiring that used to pass it is removed separately.)
+    portfolio sizes the lot budget (= portfolio × risk%). Parity/backtest pass
+    1000; live passes the real account balance. v2 has no Round 2.
     """
-    if round2_info:
-        logger.warning("mai_ruay.find_signal: round2_info ignored — MaiRuay v2 has no Round 2")
-
     if len(bars) < RANGE_WINDOW:
         if debug is not None:
             debug["skip"] = f"bars {len(bars)} < {RANGE_WINDOW}"

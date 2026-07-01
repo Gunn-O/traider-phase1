@@ -1,4 +1,11 @@
 """
+⛔ DEPRECATED — NOT WIRED. Kept for historical reference only.
+   The MAI_RUAY (Karpathy) variant was removed from the pipeline on the
+   MaiRuay-v2 swap: signal_engine no longer imports it and config/strategies.json
+   no longer lists the MAI_RUAY pattern. The single active MaiRuay strategy is now
+   MaiRuay v2 → strategies/mai_ruay.py (source of truth: reference/mai_ruay_v2_snapshot/).
+   Do not import this module from live code.
+
 MAI_RUAY (Karpathy / multi-TF) — Father/Mother v2.15M5_M1Karpathy
 
 Port 1:1 ของ engine จาก notebook

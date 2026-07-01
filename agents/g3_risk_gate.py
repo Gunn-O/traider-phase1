@@ -76,21 +76,14 @@ def guardian_check(decision: Dict, lot_info: Dict,
         }
 
     # ============ Rule 2: Consecutive Loss >= 3 ============
-    # MaiRuay v2 R2 bypass: ไม้แก้หลัง R1 SL ออกแบบให้เข้าทันที — ถ้า R1 SL
-    # ดัน consecutive_loss ถึง 3 พอดี R2 จะถูก block ทั้งที่ notebook spec
-    # บอกให้เข้าได้. R2 นับเป็น "extension" ของ R1 ในเชิง pattern (signal_engine
-    # clear r1_info หลัง R2 fire — ไม่มี R3).
-    is_round2 = bool(decision.get('is_round2', False))
     consecutive_loss = portfolio_state.get('consecutive_loss', 0)
-    if consecutive_loss >= RISK_CONFIG['max_consecutive_loss'] and not is_round2:
+    if consecutive_loss >= RISK_CONFIG['max_consecutive_loss']:
         logger.warning(f"BLOCK: Consecutive loss {consecutive_loss} >= {RISK_CONFIG['max_consecutive_loss']}")
         return {
             'approved': False,
             'block_reason': f'แพ้ติดกัน {consecutive_loss} ครั้ง',
             'blocked_by': 'consecutive_loss'
         }
-    if is_round2:
-        logger.info(f"R2 bypass: consecutive_loss {consecutive_loss} accepted (MaiRuay v2 ไม้แก้)")
 
     # ============ Rule 3: Total Loss > 30% ============
     total_loss_pct = portfolio_state.get('total_loss_pct', 0)

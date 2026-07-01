@@ -167,7 +167,6 @@ def run_signal_engine(
     portfolio: float,
     mountain_state: Optional[dict] = None,
     scanner_state: Optional[dict] = None,
-    mai_ruay_state: Optional[dict] = None,
 ) -> dict:
     """
     Run Signal Engine (replaces G1 pattern detection)
@@ -176,8 +175,6 @@ def run_signal_engine(
         candles_by_tf: Dict of candles by timeframe (e.g., {'M5': [candle1, candle2, ...]})
         portfolio: Current portfolio balance (USD)
         mountain_state: Mountain state for round 2 detection (from portfolio_state)
-        mai_ruay_state: MaiRuay v2 state — carries r1_info after a SL for R2 retry
-                        {'r1_info': {'tech', 'f_open_r1', 'entry_bar', 'direction'}, 'r1_bar_idx': int}
 
     Returns:
         world_state dict compatible with G2/G3 pipeline:
@@ -193,7 +190,7 @@ def run_signal_engine(
             'session': str,
             'metadata': dict,
             'mountain_state': dict (updated),
-            'mai_ruay_state': dict (updated — r1_info cleared on R2 hit or stale)
+            'scanner_state': dict (updated),
         }
     """
     # Active timeframe — config-driven (default M5, override via env BACKTEST_TIMEFRAME)
@@ -276,13 +273,10 @@ def run_signal_engine(
     import os as _os
     from utils.strategy_loader import is_pattern_active_for_tf
     from strategies import mountain as _mountain_strat
-    # Two MaiRuay variants — both can be active per-TF independently:
-    #   MAI_RUAY     = Karpathy multi-TF (notebook V2.15M5_M1Karpathy)
-    #                  → strategies/mai_ruay_karpathy.py
-    #   MAI_RUAY_M1  = V2.04 Bugfix1 M1-only (notebook V2.04_M1)
-    #                  → strategies/mai_ruay.py
+    # MaiRuay v2 — single config-driven strategy (Round 2 + Karpathy removed).
+    #   MAI_RUAY_M1 → strategies/mai_ruay.py
+    #   source of truth: reference/mai_ruay_v2_snapshot/
     from strategies import mai_ruay as _mai_ruay_m1_strat
-    from strategies import mai_ruay_karpathy as _mai_ruay_karp_strat
 
     current_tf = _os.getenv("BACKTEST_TIMEFRAME", "M5").upper()
 
@@ -304,53 +298,22 @@ def run_signal_engine(
         elif _dbg_mtn.get('skip'):
             skip_reasons['MOUNTAIN'] = _dbg_mtn['skip']
 
-    # MAI_RUAY_M1 — V2.04 Bugfix1 (M1 only) with multi-entry + Round 2
-    #   notebook: strategy/Mairuay_Basic_Father_V2.04_M1.ipynb
-    #   engine:   strategies/mai_ruay.py
-    updated_mai_ruay_state = dict(mai_ruay_state) if mai_ruay_state else {}
+    # MAI_RUAY_M1 — MaiRuay v2 (config-driven; Round 2 removed, single strategy)
+    #   source of truth: reference/mai_ruay_v2_snapshot/ · engine: strategies/mai_ruay.py
     if is_pattern_active_for_tf('MAI_RUAY_M1', current_tf):
-        # Tick the R2 countdown every cycle the engine runs (regardless of
-        # whether R1 fires). We use bars_elapsed (incremented per cycle) rather
-        # than (len(bars)-curr_bar) because main.py passes a SLIDE WINDOW to
-        # signal_engine — len(bars)-1 is always ~RANGE_WINDOW-1, so positional
-        # math vs the R1 entry bar is meaningless. The counter is the only
-        # cycle-accurate clock available to us.
-        _r1 = updated_mai_ruay_state.get('r1_info')
-        if _r1 is not None:
-            updated_mai_ruay_state['r1_bars_elapsed'] = updated_mai_ruay_state.get('r1_bars_elapsed', 0) + 1
-            if updated_mai_ruay_state['r1_bars_elapsed'] > 16:
-                logger.info(
-                    f"MaiRuay v2 r1_info expired (bars_elapsed="
-                    f"{updated_mai_ruay_state['r1_bars_elapsed']} > 16) → drop"
-                )
-                updated_mai_ruay_state.pop('r1_info', None)
-                updated_mai_ruay_state.pop('r1_bars_elapsed', None)
-                _r1 = None
-
         # ── Live mode: REPLACE the forming bar with a flat synthetic child ──
-        # Notebook spec: `child = bars[bar_idx]`, entry = `child.open` (= the
-        # moment mother closed). In backtest the bar at bar_idx is closed; in
-        # live with data_connector pos=0, ohlc_bars[-1] is the FORMING current
-        # bar — partial OHLC, unstable mid-formation.
+        # v2 uses `child = bars[bar_idx]`; entry = tech_point (LIMIT) so child.open
+        # only affects same-bar fill checks. In backtest the bar at bar_idx is
+        # closed; in live (data_connector pos=0) ohlc_bars[-1] is the FORMING
+        # current bar — partial/unstable mid-formation.
         #
-        # Old design (2026-06-01 → 2026-06-08): APPENDED synth at -1, leaving
-        # the forming bar at -2 where the engine then treated it as MOTHER.
-        # When a bar reversed mid-formation (e.g. 2026-06-03 10:10 UTC SELL:
-        # mid body -112 pip BEAR → closed 3 pip BULL doji), the engine fired
-        # on the transient body — a phantom trade.
-        #
-        # New design: REPLACE the forming bar with a flat synth (all OHLC =
-        # forming.open = mother.close at bar boundary). The engine then sees:
-        #   - bars[-1] = synth  (child, flat single point at entry price)
-        #   - bars[-2] = the bar that closed BEFORE the current bar (mother;
-        #                CLOSED & stable — no transient-body phantom)
+        # Replacing the forming bar with a flat synth (all OHLC = forming.open =
+        # mother.close at the bar boundary) makes the engine see:
+        #   - bars[-1] = synth  (child, flat point at entry price)
+        #   - bars[-2] = the last CLOSED bar (mother; stable — no phantom body)
         #   - bars[-3..] = father history (closed)
-        # The flat synth also makes the in-engine LIMIT fill check (Karpathy
-        # line 442-470) yield "no fill" for limits priced away from open,
-        # so they correctly become pending orders.
-        #
-        # Backtest path is unchanged (guarded by _is_backtest_mode). Mountain
-        # + Scanner use the original `ohlc_bars` below — no behavior change.
+        # This avoids firing on a transient mid-formation body. Backtest path is
+        # unchanged (guarded by _is_backtest_mode).
         _bars_for_mr = ohlc_bars
         if not _is_backtest_mode and ohlc_bars:
             _forming = ohlc_bars[-1]
@@ -364,83 +327,16 @@ def run_signal_engine(
             )
             _bars_for_mr = ohlc_bars[:-1] + [_synth_child]
             logger.debug(
-                f"MaiRuay_M1 live: replaced forming bar @ {_forming.time} with "
+                f"MaiRuay v2 live: replaced forming bar @ {_forming.time} with "
                 f"flat synth OHLC={_forming.open:.3f} (mother stays at bars[-2])"
             )
 
         _dbg_mr: dict = {}
         sig_mr = _mai_ruay_m1_strat.find_signal(bars=_bars_for_mr, portfolio=portfolio, debug=_dbg_mr)
-
-        # v2 R2 retry — only when:
-        #   - v2 engine is active
-        #   - round 1 produced None
-        #   - we have stored r1_info from a prior SL (still within 16-bar window)
-        if sig_mr is None and _r1:
-            # Recompute R1's child-bar index inside the CURRENT slide window so
-            # the engine's 6-bar father-start check is valid even though main.py
-            # passes a rolling window. r1_bars_elapsed counts cycles since arm;
-            # the R1 child sat at the last index when armed, so it has slid
-            # back by r1_bars_elapsed each cycle.
-            _bars_elapsed = updated_mai_ruay_state.get('r1_bars_elapsed', 0)
-            _r1_with_offset = dict(_r1)
-            _r1_with_offset['bar_offset_in_window'] = (len(_bars_for_mr) - 1) - _bars_elapsed
-            _dbg_r2: dict = {}
-            sig_mr = _mai_ruay_m1_strat.find_signal(
-                bars=_bars_for_mr, portfolio=portfolio,
-                round2_info=_r1_with_offset, debug=_dbg_r2,
-            )
-            if sig_mr is not None:
-                logger.info(
-                    f"MaiRuay_M1 R2 hit: bars_elapsed="
-                    f"{updated_mai_ruay_state.get('r1_bars_elapsed', 0)} dir={_r1['direction']}"
-                )
-                # R2 fired → consume r1_info (no R3 allowed)
-                updated_mai_ruay_state.pop('r1_info', None)
-                updated_mai_ruay_state.pop('r1_bars_elapsed', None)
-            elif _dbg_r2.get('skip'):
-                skip_reasons['MAI_RUAY_M1_R2'] = _dbg_r2['skip']
-
         if sig_mr is not None:
-            # New synth design: synth.time = forming.time = current bar's start,
-            # which already matches the candle_time main.py picks up from
-            # candles_by_tf[active_tf][-1]['timestamp']. No override needed —
-            # leaving synthetic_candle_time unset so main.py's override block
-            # at main.py:1167 is a no-op (preserved for backwards-compat).
             candidates.append(sig_mr)
         elif _dbg_mr.get('skip'):
             skip_reasons['MAI_RUAY_M1'] = _dbg_mr['skip']
-
-    # MAI_RUAY — Karpathy multi-TF (M1/M5/M15/M30)
-    #   notebook: strategy/Mairuay_Basic_Father_V2.15M5_M1Karpathy.ipynb
-    #   engine:   strategies/mai_ruay_karpathy.py
-    # No R2 / Round 2. Same flat-synth-replaces-forming-bar mechanic as
-    # MAI_RUAY_M1 above — see that block's comment for the full rationale.
-    if is_pattern_active_for_tf('MAI_RUAY', current_tf):
-        _bars_for_karp = ohlc_bars
-        if not _is_backtest_mode and ohlc_bars:
-            _forming_k = ohlc_bars[-1]
-            _synth_child_k = OHLC(
-                time=_forming_k.time,
-                open=_forming_k.open,
-                high=_forming_k.open,
-                low=_forming_k.open,
-                close=_forming_k.open,
-                bar_num=_forming_k.bar_num,
-            )
-            _bars_for_karp = ohlc_bars[:-1] + [_synth_child_k]
-            logger.debug(
-                f"MaiRuay Karpathy live: replaced forming bar @ {_forming_k.time} "
-                f"with flat synth OHLC={_forming_k.open:.3f}"
-            )
-
-        _dbg_karp: dict = {}
-        sig_karp = _mai_ruay_karp_strat.find_signal(
-            bars=_bars_for_karp, portfolio=portfolio, debug=_dbg_karp,
-        )
-        if sig_karp is not None:
-            candidates.append(sig_karp)
-        elif _dbg_karp.get('skip'):
-            skip_reasons['MAI_RUAY'] = _dbg_karp['skip']
 
     # UPTREND_SCANNER / DOWNTREND_SCANNER (notebook v4.2) — wrapper picks BUY
     # first, falls back to SELL. Each variant gated by its own (pattern, TF) flag.
@@ -507,7 +403,6 @@ def run_signal_engine(
             },
             'mountain_state': mountain_state,  # Return unchanged
             'scanner_state': updated_scanner_state,  # v4.2 segment tracking
-            'mai_ruay_state': updated_mai_ruay_state,  # v2 r1_info for R2 retry
             'skip_reasons': skip_reasons,       # Tier 2: per-strategy SKIP reasons
         }
 
@@ -518,8 +413,7 @@ def run_signal_engine(
     # Map pattern to chart_type
     chart_type_mapping = {
         'MOUNTAIN':          'mountain',
-        'MAI_RUAY':          'mai_ruay',      # Karpathy multi-TF
-        'MAI_RUAY_M1':       'mai_ruay',      # V2.04 Bugfix1 M1-only — same chart_type for dashboard filter
+        'MAI_RUAY_M1':       'mai_ruay',      # MaiRuay v2 (single variant) — dashboard filter key
         'UPTREND_SCANNER':   'uptrend',       # v4.2 scanner (BUY)
         'DOWNTREND_SCANNER': 'downtrend',     # v4.2 scanner (SELL)
     }
@@ -533,7 +427,7 @@ def run_signal_engine(
     # filter catches them. The variant is distinguishable via signal.pattern.)
     if signal.pattern == 'MOUNTAIN':
         technique = 'mountain'
-    elif signal.pattern in ('MAI_RUAY', 'MAI_RUAY_M1'):
+    elif signal.pattern == 'MAI_RUAY_M1':
         technique = 'mai_ruay'
     elif signal.pattern in ('UPTREND_SCANNER', 'DOWNTREND_SCANNER'):
         technique = 'scanner_v34'
@@ -591,7 +485,6 @@ def run_signal_engine(
         },
         'mountain_state': updated_mountain_state,  # Return updated state
         'scanner_state': updated_scanner_state,    # v4.2 segment tracking
-        'mai_ruay_state': updated_mai_ruay_state,  # v2 r1_info for R2 retry
         'skip_reasons': skip_reasons,                # Tier 2: SKIPs from non-firing strategies
     }
 

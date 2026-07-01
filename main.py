@@ -517,10 +517,6 @@ class TraiderMainLoop:
         # Loaded from bot_state_snapshots.state_json on startup; persisted on
         # each plan_closed event so a launcher restart preserves it.
         self.scanner_state: Optional[dict] = None
-        # MaiRuay v2 state — carries r1_info after a SL so signal_engine can
-        # retry R2 within 16 bars. Persisted on plan_closed; cleared on R2 fire
-        # or after 16 bars expire (handled inside signal_engine).
-        self.mai_ruay_state: Optional[dict] = None
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -629,30 +625,6 @@ class TraiderMainLoop:
                     logger.error(f"Live broker monitor failed (continuing): {e}")
             # check_and_update() expects candle dict (not separate params)
             closed = self.position_monitor.check_and_update(candle=current_candle)
-            # ── MaiRuay v2 R2 arm — group closed trades by plan_id; if any plan
-            # closed with negative P&L AND has r1_capture, arm r1_info so the
-            # next signal_engine cycle retries as ไม้แก้ within 16 bars.
-            if closed:
-                from collections import defaultdict as _dd
-                _by_plan = _dd(list)
-                for _t in closed:
-                    _by_plan[_t.get('plan_id', '')].append(_t)
-                for _plan_id, _plan_trades in _by_plan.items():
-                    # Only consider fully-closed plans (all trades filled with WIN/LOSS).
-                    # If a multi-entry plan has pending limits left, skip — wait for next cycle.
-                    if not all(_t.get('result') in ('WIN', 'LOSS') for _t in _plan_trades):
-                        continue
-                    _plan_pnl = sum((_t.get('pnl_usd') or _t.get('pnl') or 0) for _t in _plan_trades)
-                    _r1_cap = next((_t.get('r1_capture') for _t in _plan_trades if _t.get('r1_capture')), None)
-                    if _plan_pnl < 0 and _r1_cap:
-                        self.mai_ruay_state = {'r1_info': _r1_cap}
-                        logger.info(
-                            f"[{_plan_id}] MaiRuay v2 R1 SL — armed r1_info "
-                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']}, pnl=${_plan_pnl:.2f})"
-                        )
-                    elif _plan_pnl > 0 and self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
-                        # WIN clears any pending R2 — no ไม้แก้ after a TP win.
-                        self.mai_ruay_state = {}
             # MaiRuay v2 cancel-near-TP → cancel the MT5 pending order so the
             # broker matches our in-memory CANCELLED state. Backtest skips
             # this (PaperBroker has no native pending state to clean up).
@@ -941,15 +913,11 @@ class TraiderMainLoop:
             portfolio=self.balance,
             mountain_state=self.mountain_state,
             scanner_state=self.scanner_state,
-            mai_ruay_state=self.mai_ruay_state,
         )
 
         # Update state from Signal Engine output (mutated in place by detectors)
         self.mountain_state = world_state.get('mountain_state')
         self.scanner_state = world_state.get('scanner_state')
-        # MaiRuay v2 r1_info — signal_engine drops it after R2 fires (no R3) or
-        # after 16 bars expire; we mirror the latest value here for next cycle.
-        self.mai_ruay_state = world_state.get('mai_ruay_state') or {}
 
         # Update latest_candle for dashboard chart
         if current_candle and candle_time:
@@ -1063,9 +1031,6 @@ class TraiderMainLoop:
             'confidence': 1.0,  # Signal Engine is deterministic
             'setup': signal.pattern.lower() if hasattr(signal, 'pattern') else 'unknown',
             'skip_reason': None,
-            # MaiRuay v2 R2 flag — G3 uses this to bypass consecutive_loss limit
-            # so the ไม้แก้ retry can fire within 16 bars of the R1 SL.
-            'is_round2': bool(getattr(signal, 'is_round2', False)),
         }
 
         # llm_log kept for Sheets/LocalDB schema compatibility — always $0/no tokens.
@@ -1190,31 +1155,6 @@ class TraiderMainLoop:
         else:
             id_mode = 'simulate'
 
-        # MaiRuay v2 live mode uses a synthetic child bar so the engine
-        # detects the pattern at "mother close = child start" instead of
-        # waiting another full bar. signal_engine stamps the synthetic
-        # candle's timestamp on signal.details when it does this. Without
-        # the override below, candle_time would still be the LAST REAL bar's
-        # timestamp (= mother START), making timestamp_open shift back 1
-        # bar in the dashboard ("เข้าไปเปิดแท่งแม่"). Override to the
-        # synthetic time = child start = mother close moment.
-        _sig_for_synth = world_state.get('signal') if world_state else None
-        _synth_ct = None
-        if _sig_for_synth is not None:
-            _det = getattr(_sig_for_synth, 'details', None) or {}
-            _synth_ct = _det.get('synthetic_candle_time')
-        if _synth_ct:
-            try:
-                from dateutil import parser as _dtp_main
-                _orig_ct = candle_time
-                candle_time = _dtp_main.parse(str(_synth_ct))
-                logger.info(
-                    f"  ↳ MaiRuay synthetic candle_time override: "
-                    f"{_orig_ct} → {candle_time}"
-                )
-            except Exception as _e:
-                logger.warning(f"  ↳ synthetic candle_time parse failed ({_e}); keeping original")
-
         plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
 
         # Mountain trailing metadata — attach signal.details to orders for 3-stage trailing
@@ -1314,30 +1254,6 @@ class TraiderMainLoop:
                     'tp2_base':   float(d.get('tp2_base') or d.get('tp2') or 0),
                     'tech_point': float(d.get('tech_point') or d.get('base_lo') or 0),
                     'height':     float(d.get('height') or 0),  # pip
-                }
-            # MaiRuay v2 R2 prep: capture the info needed to retry as ไม้แก้
-            # if THIS plan ends in LOSS. signal_engine consumes r1_info on the
-            # next cycle to call find_signal(..., round2_info=r1_info).
-            # signal.is_round2 means we're ALREADY R2 — don't capture again
-            # (no R3 allowed by notebook spec). R2 logic only applies to the
-            # M1 variant (Karpathy has no R2).
-            if (order['pattern'] == 'MAI_RUAY_M1'
-                    and not bool(getattr(signal, 'is_round2', False))):
-                d = signal.details or {}
-                _fs = d.get('father_start')
-                # bars in world_state are 0-indexed; entry_bar = bar_idx (= last bar = mother_idx + 1)
-                # Use len(candles)-1 as bar_idx since signal was just produced at last bar.
-                _last_idx = len(candles_by_tf.get(active_tf, [])) - 1
-                # Pull the father's open price (R1) from the OHLC list — needed
-                # for the "father_combined" TP/SL calc in the R2 analyzer.
-                _f_open_r1 = 0.0
-                if _fs is not None and 0 <= _fs < len(candles_by_tf.get(active_tf, [])):
-                    _f_open_r1 = float(candles_by_tf[active_tf][_fs].get('open', 0.0))
-                order['r1_capture'] = {
-                    'tech':       float(d.get('tech_point', 0.0)),
-                    'f_open_r1':  _f_open_r1,
-                    'entry_bar':  _last_idx,
-                    'direction':  signal.direction,
                 }
             orders_with_ids.append(order)
 
@@ -2196,23 +2112,8 @@ class TraiderMainLoop:
                                 logger.info(f"[{plan_id}] Plan fully closed: {plan_result} (P&L: ${plan_pnl:.2f})")
                                 if plan_result == 'LOSS':
                                     portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
-                                    # MaiRuay v2 R2 capture: if this plan was MaiRuay R1, save r1_info
-                                    # so signal_engine can retry as ไม้แก้ within the next 16 bars.
-                                    _r1_cap = next(
-                                        (o.get('r1_capture') for o in filled if o.get('r1_capture')),
-                                        None,
-                                    )
-                                    if _r1_cap:
-                                        self.mai_ruay_state = {'r1_info': _r1_cap}
-                                        logger.info(
-                                            f"[{plan_id}] MaiRuay v2 R1 SL — armed r1_info "
-                                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']})"
-                                        )
                                 else:
                                     portfolio_state['consecutive_loss'] = 0
-                                    # WIN clears any pending R2 — no ไม้แก้ after a TP win.
-                                    if self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
-                                        self.mai_ruay_state = {}
                                 portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + plan_pnl
 
                             self.sheets_logger.update_portfolio_state(portfolio_state)
