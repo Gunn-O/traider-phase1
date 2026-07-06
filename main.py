@@ -1289,7 +1289,17 @@ class TraiderMainLoop:
                     order['filled'] = False
                     order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
                     order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
-            # Mountain v3 has NO trailing — closes at fixed %height SL/TP only.
+            # Mountain v3: LIMIT at base_lo+5%H — track as PENDING so the monitor
+            # fills it when price touches (not an instant position) and auto-expires
+            # at pending_bars. No TP-proximity cancel (tp_cancel_buffer_pips=0);
+            # repeak/base_change/expiry cancels come from the core via
+            # mountain_state['_cancel'] (routed in Step 0/2). No trailing.
+            elif (order['pattern'] == 'MOUNTAIN'
+                    and order.get('order_type', '').upper() == 'LIMIT'):
+                _mtn_details = getattr(signal, 'details', None) or {}
+                order['filled'] = False
+                order['pending_bars'] = int(_mtn_details.get('pending_bars', 5))
+                order['tp_cancel_buffer_pips'] = 0.0
             orders_with_ids.append(order)
 
         # Prepare decision for Sheets (add 'technique' field from signal.pattern)
@@ -1350,7 +1360,7 @@ class TraiderMainLoop:
                 )
                 # Only pass pending kwargs to PaperBroker (MT5 broker handles
                 # expiration server-side via order_send expiration field).
-                if _ot == 'LIMIT' and order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1'):
+                if _ot == 'LIMIT' and order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1', 'MOUNTAIN'):
                     try:
                         _open_kwargs['pending_bars'] = _pending_bars
                         _open_kwargs['tp_cancel_buffer_pips'] = _tp_cancel_buf

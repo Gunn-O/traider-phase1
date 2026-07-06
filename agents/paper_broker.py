@@ -144,16 +144,10 @@ class PaperBroker:
             self.ticket_counter += 1
             ticket = self.ticket_counter
 
-            # Trailing state (Mountain only) — encode in position dict
+            # Mountain v3 has NO trailing (closes at fixed %height SL/TP only).
+            # trail_meta is always None now; keep trail=None so the trailing-SL
+            # update block below is inert for every pattern.
             trail = None
-            if trail_meta:
-                trail = {
-                    'stage':      0,
-                    'tp1':        float(trail_meta.get('tp1') or 0),
-                    'tp2':        float(trail_meta.get('tp2_base') or trail_meta.get('tp2') or 0),
-                    'tech_point': float(trail_meta.get('tech_point') or trail_meta.get('base_lo') or 0),
-                    'height_usd': float(trail_meta.get('height') or 0) / 100.0,
-                }
 
             # PaperBroker fills MARKET and LIMIT identically (no order-book
             # simulation). MaiRuay v2 pending-LIMIT fill/cancel/expire logic

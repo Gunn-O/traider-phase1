@@ -308,10 +308,10 @@ def check_trailing_sl(order: dict, candle: dict) -> Optional[float]:
     Returns:
         new_sl (float) ถ้าต้อง update, None ถ้าไม่ต้อง
     """
-    trail_meta = order.get('trail_meta')
-    if trail_meta:
-        return _check_mountain_trailing(order, candle, trail_meta)
-    return None  # Per spec: only Mountain has trailing
+    # Mountain v3 has NO trailing — closes at fixed %height SL/TP only. No strategy
+    # sets trail_meta anymore; _check_mountain_trailing is dead (kept below for
+    # reference only). Always return None → no SL trailing for any pattern.
+    return None
 
 
 def _check_mountain_trailing(order: dict, candle: dict, trail_meta: dict) -> Optional[float]:
