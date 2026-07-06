@@ -75,3 +75,4 @@ last_sessions.json
 
 # vendored snapshot backtest outputs (regenerated on demand)
 reference/mai_ruay_v2_snapshot/runs/
+reference/mountain_v3_snapshot/runs/
