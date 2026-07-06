@@ -212,7 +212,10 @@ def run_signal_engine(
             'chart_type': 'unclear',
             'quality': 0.0,
             'signal': None,
-            'skip_reason': 'insufficient_data'
+            'skip_reason': 'insufficient_data',
+            # preserve stateful-strategy state so an early return doesn't wipe it
+            'mountain_state': mountain_state,
+            'scanner_state': scanner_state,
         }
 
     # V4.25: Time filter — Block trades near Friday market close.
@@ -259,7 +262,10 @@ def run_signal_engine(
             'chart_type': 'unclear',
             'quality': 0.0,
             'signal': None,
-            'skip_reason': 'near_market_close'
+            'skip_reason': 'near_market_close',
+            # preserve stateful-strategy state so the guard doesn't wipe it
+            'mountain_state': mountain_state,
+            'scanner_state': scanner_state,
         }
 
     # Convert to OHLC format
@@ -297,8 +303,13 @@ def run_signal_engine(
     updated_mountain_state = mountain_state if isinstance(mountain_state, dict) else {}
     if is_pattern_active_for_tf('MOUNTAIN', current_tf):
         _dbg_mtn: dict = {}
+        # Live: ohlc_bars[-1] is the FORMING bar (data_connector pos=0) with
+        # unstable high/low — Mountain's peak-lock/F8 read bar highs/lows, so
+        # analyse the last CLOSED bar. The adapter's last_bar_time dedup then
+        # processes each closed bar once. Backtest: bars are all closed → as-is.
+        _bars_for_mtn = ohlc_bars if _is_backtest_mode else ohlc_bars[:-1]
         sig_mtn = _mountain_strat.find_signal(
-            bars=ohlc_bars, portfolio=portfolio,
+            bars=_bars_for_mtn, portfolio=portfolio,
             mountain_state=updated_mountain_state, debug=_dbg_mtn, tf=current_tf,
         )
         if sig_mtn is not None and sig_mtn.pattern == 'MOUNTAIN':
