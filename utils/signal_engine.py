@@ -287,11 +287,19 @@ def run_signal_engine(
     # Snapshot panel so the user knows WHY no signal fired this cycle.
     skip_reasons: dict = {}
 
-    # MOUNTAIN — Mountain Round 1 (notebook v4.61). MOUNTAIN_R2 deprecated.
+    # MOUNTAIN — Mountain v3 (config-driven, per-TF: M1→tpsl R:R1.0, M5→rr85 R:R0.85).
+    # BUY only. The adapter drives the validated core on the live window and mutates
+    # mountain_state in place: persists core state (survives the window sliding) and
+    # sets mountain_state['_cancel'] = [tags] for pendings the core wants cancelled
+    # (repeak/base_change/expiry). No trailing — closes at fixed %height SL/TP only.
+    # main.py sets mountain_state['_live'] (pending/position tags) before this call
+    # and routes mountain_state['_cancel'] after it.
+    updated_mountain_state = mountain_state if isinstance(mountain_state, dict) else {}
     if is_pattern_active_for_tf('MOUNTAIN', current_tf):
         _dbg_mtn: dict = {}
         sig_mtn = _mountain_strat.find_signal(
-            bars=ohlc_bars, portfolio=portfolio, mountain_state=mountain_state, debug=_dbg_mtn
+            bars=ohlc_bars, portfolio=portfolio,
+            mountain_state=updated_mountain_state, debug=_dbg_mtn, tf=current_tf,
         )
         if sig_mtn is not None and sig_mtn.pattern == 'MOUNTAIN':
             candidates.append(sig_mtn)
@@ -401,7 +409,7 @@ def run_signal_engine(
                 'candles_checked': len(candles),
                 'range_55': round(range_usd, 2)
             },
-            'mountain_state': mountain_state,  # Return unchanged
+            'mountain_state': updated_mountain_state,  # persisted core state + _cancel (no-signal path)
             'scanner_state': updated_scanner_state,  # v4.2 segment tracking
             'skip_reasons': skip_reasons,       # Tier 2: per-strategy SKIP reasons
         }
@@ -453,13 +461,8 @@ def run_signal_engine(
         'details': signal.details
     }
 
-    # TODO: Mountain state tracking needs proper implementation
-    # xauusd_signal.py expects: {'prev_entry', 'prev_entry_bar', 'base_lo_r1', 'tp_bar'}
-    # For Phase 1, disable mountain state tracking
-    updated_mountain_state = None
-
-    if signal.pattern == 'MOUNTAIN':
-        logger.info("Mountain Round 1 detected (state tracking disabled in Phase 1)")
+    # Mountain v3 state is maintained by the adapter (in updated_mountain_state,
+    # mutated in place above). Nothing to do here.
 
     # Build world_state
     world_state = {

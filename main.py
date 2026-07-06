@@ -1204,10 +1204,7 @@ class TraiderMainLoop:
 
         plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
 
-        # Mountain trailing metadata — attach signal.details to orders for 3-stage trailing
-        # MAI_RUAY / others: trail_meta = None → position_monitor skips trailing (per user spec)
         signal = world_state.get('signal')
-        is_mountain = signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN'
 
         # Generate trade IDs for each order and set initial state
         orders_with_ids = []
@@ -1292,16 +1289,7 @@ class TraiderMainLoop:
                     order['filled'] = False
                     order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
                     order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
-            # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
-            if is_mountain:
-                d = signal.details or {}
-                order['trail_meta'] = {
-                    'stage':      0,
-                    'tp1':        float(d.get('tp1') or 0),
-                    'tp2_base':   float(d.get('tp2_base') or d.get('tp2') or 0),
-                    'tech_point': float(d.get('tech_point') or d.get('base_lo') or 0),
-                    'height':     float(d.get('height') or 0),  # pip
-                }
+            # Mountain v3 has NO trailing — closes at fixed %height SL/TP only.
             orders_with_ids.append(order)
 
         # Prepare decision for Sheets (add 'technique' field from signal.pattern)
@@ -1337,9 +1325,7 @@ class TraiderMainLoop:
         # and blocked future Mountain/MaiRuay signals.
         if self.broker is not None:
             logger.info(f"\n[Broker] Executing {len(orders_with_ids)} order(s)...")
-            trail_meta = None
-            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
-                trail_meta = getattr(signal, 'details', None) or {}
+            trail_meta = None   # Mountain v3 has no trailing (removed 3-stage)
             # MaiRuay v2 LIMIT extras — broker uses these to expire / cancel
             # pending limits per the notebook spec (5 bars, cancel within 10%R55
             # of TP). Mountain/Scanner do not set these → broker uses defaults.

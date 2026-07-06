@@ -5,25 +5,29 @@
     "MOUNTAIN": {
       "active": false,
       "implemented": true,
-      "name": "Mountain Round 1",
-      "description": "ภูเขารอบ 1 — LL ต่ำสุด → SH หลังฐาน → Entry ที่ฐาน ± 5%height (notebook v4.61)",
+      "name": "ภูเขา v3 (config-driven)",
+      "description": "Mountain v3 (BUY only) — swing ฐาน(ก้น)+ยอด, ล็อกยอดเมื่อ retrace แตะ base_lo+10%สูง (C), ฟิลเตอร์ F1/F4/F6/F7a/F7b/F8 + valid@C, วาง LIMIT ที่ base_lo+5%สูง, TP/SL = %คงที่ของความสูง, 1 ยอด 1 ไม้, pending 5 แท่ง (cancel เมื่อ repeak/base_change/expiry), ไม่มี trailing (ปิดที่ SL/TP ตายตัว). Engine: strategies/mountain.py → strategies/mountain_v3_core.py · source of truth: reference/mountain_v3_snapshot/ · per-TF: M1→tpsl (R:R 1.0), M5→rr85 (R:R 0.85)",
       "direction": "BUY",
-      "version": "4.61",
+      "version": "v3",
       "validations": [
-        "ขนาดภูเขา (X+Y) >= 10 แท่ง",
-        "ห้ามมี Low ทะลุ thresh_10 (base_lo + 20%height) ในช่วง 20-80%",
-        "ฐาน→entry ไม่เกิน 42 แท่ง",
-        "SH หลัง peak <= 2 อัน (ถ้า > 25 แท่ง)",
-        "Buffer zone = 5% × height (เก่า 10%)",
-        "TP3 = base_lo + 80% × height (เก่า 100%)",
-        "SL = entry - 60% × height"
+        "F1: ความสูง (peak_hi − base_lo) ≥ 50% R55",
+        "F4: ขนาดภูเขา X(ฐาน→ยอด)+Y(ยอด→C) ≥ 10 แท่ง",
+        "F6: ฐาน→entry ≤ 42 แท่ง",
+        "F7a: SH+SL ช่วง ฐาน→ยอด ≤ 2 (ถ้า ฐาน→ยอด > 10 แท่ง)",
+        "F7b: SH+SL ช่วง ยอด→C ≤ 2 (ถ้า ฐาน→C > 10 แท่ง)",
+        "F8: ห้ามมี Low ≤ base_lo ระหว่าง C→entry (first-seen, ตัดถาวร)",
+        "valid@C: ภูเขาต้อง valid ตั้งแต่ตอนล็อกยอด (no-look-ahead)",
+        "peak lock: retrace แตะ base_lo + 10% × ความสูง → ล็อกยอด (จุด C)",
+        "Entry LIMIT ที่ base_lo + 5% × ความสูง (BUY เท่านั้น)",
+        "M1 (tpsl): TP 45% / SL 35% ของความสูง → R:R 1.0",
+        "M5 (rr85): TP 40% / SL 35% ของความสูง → R:R 0.85",
+        "min_tp 200 pip · lot = equal_risk จาก budget = portfolio × 10%",
+        "ไม่มี trailing / TP1-TP2-TP3 / zone 30% / force-close (v3 ปิดที่ SL/TP ตายตัว)"
       ],
       "priority": 2,
       "allowed_tfs": [
         "M1",
-        "M5",
-        "M15",
-        "M30"
+        "M5"
       ]
     },
     "MAI_RUAY_M1": {
