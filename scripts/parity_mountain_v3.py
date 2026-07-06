@@ -85,7 +85,7 @@ def main() -> int:
         label = "SNAPSHOT MountainV3 (self-check)"
     else:
         try:
-            from strategies.mountain import MountainV3 as Core   # repo ported core
+            from strategies.mountain_v3_core import MountainV3 as Core   # repo ported core
         except (ImportError, AttributeError) as e:
             print("=" * 64)
             print("  Mountain v3 PARITY — repo core NOT available yet")

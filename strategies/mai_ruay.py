@@ -28,21 +28,22 @@ Geometry (mirrors analyze_bar):
 """
 from __future__ import annotations
 
-import math
 import logging
 from typing import List, Optional
 
 from utils.xauusd_signal import OHLC, Signal, EntryPoint
+# Shared pure helpers — SAME implementation as Mountain v3 + the snapshots.
+from strategies._util import (
+    PIP, _r, _round_lot, _compute_lots, _calc_r55, _body_pips, _is_bull, _is_bear,
+)
 
 logger = logging.getLogger(__name__)
 
 PATTERN_NAME = "MAI_RUAY_M1"   # kept for pipeline/DB/Sheets continuity (one MaiRuay = v2)
 
-# ─── Constants (mirror bt/data.py) ─────────────────────────────────
-PIP           = 0.01     # 1 pip = 0.01 USD (XAUUSD)
+# ─── Constants ─────────────────────────────────────────────────────
 RANGE_WINDOW  = 55       # R55 lookback
 PENDING_BARS  = 5        # LIMIT pending expiry (bars) — = general.pending_max_age
-_MIN_LOT      = 0.01     # per-leg lot floor
 
 # ─── Config (must match mairuay_v2_1entry_con360-510.yaml exactly) ─
 # *_pct values are percentages (divided by 100 when used as multipliers).
@@ -89,58 +90,6 @@ CONFIG = {
     ],
     "tpsl": {"tp_pct_father": 40, "sl_pct_father": 20},
 }
-
-
-def _r(x, n):
-    return round(float(x), n)
-
-
-# ─── lot sizing (mirror bt/strategies/mai_ruay_v2._round_lot / _compute_lots) ──
-def _round_lot(x: float) -> float:
-    """<0.01 → 0.01 (min); ≥0.01 → floor to 0.01."""
-    if x < _MIN_LOT:
-        return _MIN_LOT
-    return math.floor(x * 100 + 1e-9) / 100
-
-
-def _compute_lots(dists_pips, budget, split_mode):
-    """lot per leg from budget (= portfolio×risk%). dists_pips = SL distance per leg (pip, >0).
-      equal_risk : risk per leg = budget/N → lot_i = (budget/N)/dist_i
-      equal_lot  : L = budget/Σdist → lot_i = L
-    round per leg, then if Σ(lot_i×dist_i) > budget drop the LAST leg and recompute,
-    down to 1 leg. returns list[lot] (len = kept legs)."""
-    n = len(dists_pips)
-    while n >= 1:
-        sub = dists_pips[:n]
-        if split_mode == "equal_lot":
-            total = sum(sub)
-            L = budget / total if total > 0 else _MIN_LOT
-            raw = [L] * n
-        else:  # equal_risk
-            per = budget / n
-            raw = [(per / d if d > 0 else 0.0) for d in sub]
-        lots = [_round_lot(x) for x in raw]
-        total_risk = sum(l * d for l, d in zip(lots, sub))
-        if total_risk <= budget or n == 1:
-            return lots
-        n -= 1
-    return []
-
-
-# ─── R55 + bar helpers (mirror mai_ruay_v2) ────────────────────────
-def _calc_r55(bars: List[OHLC], end_idx: int, n: int = RANGE_WINDOW) -> float:
-    start = max(0, end_idx - n + 1)
-    window = bars[start:end_idx + 1]
-    if not window:
-        return 0.0
-    hi = max(b.high for b in window)
-    lo = min(b.low for b in window)
-    return (hi - lo) / PIP
-
-
-def _body_pips(b: OHLC) -> float: return abs(b.open - b.close) / PIP
-def _is_bull(b: OHLC) -> bool:    return b.close > b.open
-def _is_bear(b: OHLC) -> bool:    return b.close < b.open
 
 
 # ─── father (mirror _find_father) ──────────────────────────────────
