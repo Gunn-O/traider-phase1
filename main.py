@@ -31,8 +31,10 @@ from typing import Dict, List
 from dotenv import load_dotenv
 
 # Import agents (Phase II — Signal Engine Architecture)
-# REMOVED: g1_pattern_detector, g3_analyst, g3_risk_manager, g4_reflector (Phase I cleanup)
+# REMOVED: g1_pattern_detector, g3_analyst, g3_risk_manager (Phase I cleanup)
+# g4_reflector re-added as Python-only execution-quality daily summary (no AI).
 from agents.g2_prefilter import G2Prefilter
+from agents.g4_reflector import should_run_daily, build_daily_report, log_daily_report
 from agents.g4_weekly_strategist import G4WeeklyStrategist, aggregate_weekly_stats, should_run_weekly
 from agents.g4_monthly_evolver import G4MonthlyEvolver, aggregate_monthly_stats, should_run_monthly
 from agents.g3_risk_gate import guardian_check
@@ -519,6 +521,14 @@ class TraiderMainLoop:
 
         # Initialize Broker (Paper/Micro/Live)
         self.broker = create_broker(self.trading_mode, self.symbol)
+        # Stamp execution-quality logging context onto the broker so it can
+        # tag records with the right mode and skip the backtest path (no real
+        # execution → keep the broker-behaviour baseline uncontaminated).
+        try:
+            self.broker.exec_is_backtest = self.is_backtest
+            self.broker.exec_mode = self.trading_mode
+        except Exception:
+            pass
 
         # Pre-fetch cache — background thread keeps candle data warm so run_once()
         # Step 1 doesn't pay the 2-8s network wait inside the critical path.
@@ -547,6 +557,7 @@ class TraiderMainLoop:
         self.last_daily_date = None  # V4.3: For Reflector
         self.weekly_stats = {}
         self.reflection_summary = "No history yet — trade normally"
+        self.execution_report = None  # latest Python-only daily execution-quality report
 
         # Mountain state tracking (for Round 2 detection)
         self.mountain_state = None  # Will be updated by Signal Engine
@@ -697,6 +708,102 @@ class TraiderMainLoop:
                     'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
                 })
 
+    def _cancel_near_tp_live(self, candles_by_tf, active_tf, candle_time):
+        """Live/SIM faithful port of the backtest cancel-near-TP filter for
+        MaiRuay v2 pending LIMITs (same 5%R55 buffer, same geometry).
+
+        Backtest applies this inside `_process_pending_limit()` against each
+        closed candle's high/low. Live/SIM skips that pipeline (MT5 owns fills
+        via reconcile_pending/update_positions), so a LIMIT that drifts within
+        5%R55 of TP *before ever touching entry* would otherwise wait out the
+        full 5-bar expiry — diverging from the golden, which cancels it at once
+        (entering next to the exit is bad RR).
+
+        Uses the LAST CLOSED bar (pos=1 = candles[-2]); the forming bar
+        (pos=0 = candles[-1]) has an unstable intra-bar high/low and must never
+        drive a cancel (the Plan 2026-06-01 forming-bar divergence).
+
+        Safety: emit a CANCELLED event ONLY when broker.cancel_pending_by_ticket
+        actually removes a live pending order. That call does its own
+        orders_get(ticket) check first, so an already-FILLED ticket (now a
+        position running toward TP) is a no-op → we never touch it."""
+        if self.is_backtest or self.broker is None:
+            return
+        if not hasattr(self.broker, 'cancel_pending_by_ticket'):
+            return  # PaperBroker (sim) has no native pending order book
+        bars = (candles_by_tf or {}).get(active_tf) or []
+        if len(bars) < 2:
+            return
+        closed_bar = bars[-2]  # last fully-closed bar (pos=1); [-1] is forming
+        hi = closed_bar.get('high', 0) or 0
+        lo = closed_bar.get('low', 0) or 0
+        if hi <= 0 or lo <= 0:
+            return
+
+        PIP = 0.01
+        events = []
+        for o in self.position_monitor.get_pending_limits():
+            if (o.get('pattern') or '').upper() not in ('MAI_RUAY', 'MAI_RUAY_M1'):
+                continue
+            buf = float(o.get('tp_cancel_buffer_pips') or 0.0) * PIP
+            if buf <= 0:
+                continue
+            ticket = o.get('broker_ticket')
+            if not ticket:
+                continue
+            tp = o.get('tp_price', o.get('tp', 0)) or 0
+            entry = o.get('entry_price', o.get('entry', 0)) or 0
+            act = o.get('action')
+            tripped = (
+                (act == 'BUY'  and hi >= (tp - buf)) or
+                (act == 'SELL' and lo <= (tp + buf))
+            )
+            if not tripped:
+                continue
+
+            # Only proceed if MT5 truly still holds it as a pending order.
+            try:
+                cancelled = self.broker.cancel_pending_by_ticket(int(ticket))
+            except Exception as e:
+                logger.warning(f"[{o.get('trade_id')}] live cancel-near-TP send failed: {e}")
+                continue
+            if not cancelled:
+                continue  # already filled/gone → leave the live position alone
+
+            o['result'] = 'CANCELLED'
+            o['filled'] = False
+            _edge = hi if act == 'BUY' else lo
+            _thr = (tp - buf) if act == 'BUY' else (tp + buf)
+            logger.info(
+                f"[{o.get('trade_id')}] LIVE LIMIT cancelled (near TP) — "
+                f"{act} closed-bar {'high' if act == 'BUY' else 'low'} "
+                f"{_edge:.2f} vs tp-/+buf {_thr:.2f}"
+            )
+            _ts = closed_bar.get('timestamp')
+            events.append({
+                'trade_id': o.get('trade_id'),
+                'type': 'close',
+                'result': 'CANCELLED',
+                'close_reason': 'CANCEL_NEAR_TP',
+                'close_price': entry,
+                'pnl_usd': 0.0,
+                'pnl': 0.0,
+                'timestamp_close': _ts.isoformat() if hasattr(_ts, 'isoformat') else str(_ts or ''),
+                'action': act,
+                'pattern': (o.get('pattern') or '').upper(),
+                'plan_id': o.get('plan_id', ''),
+                'entry_price': entry,
+                'sl_price': o.get('sl_price', o.get('sl', 0)),
+                'tp_price': tp,
+                'lot_size': o.get('lot_size', o.get('lot', 0)),
+                'timestamp_open': o.get('timestamp_open', ''),
+                # No 'broker_ticket' — already cancelled above; omitting it stops
+                # _handle_closed_events from issuing a redundant TRADE_ACTION_REMOVE.
+            })
+
+        if events:
+            self._handle_closed_events(events, candle_time)
+
     def run_once(self, candle_time=None, candles_by_tf=None, current_candle=None):
         """
         Run pipeline once (for testing or backtest single point)
@@ -840,8 +947,19 @@ class TraiderMainLoop:
         # Step 0b: Daily/Weekly/Monthly triggers
         current_date = candle_time.date() if candle_time else datetime.now().date()
 
-        # Phase II: Reflector removed (not needed in backtest)
-        # Daily reflection skipped in Phase II
+        # Daily Reflector (Phase II — Python-only, $0): attach execution-quality
+        # summary to a daily report + WARN on behaviour change. Skipped in
+        # backtest (no real execution → nothing to characterise). Guarded so a
+        # summary failure never affects the trading loop.
+        if not self.is_backtest and should_run_daily(self.last_daily_date, current_date):
+            try:
+                _month_tag = f"{current_date:%Y-%m}"
+                _daily = build_daily_report(months=[_month_tag])
+                log_daily_report(_daily)
+                self.execution_report = _daily
+            except Exception as _e:
+                logger.warning(f"[Reflector] daily execution summary failed: {_e}")
+            self.last_daily_date = current_date
 
         # Weekly Strategist — รันทุก 7 วัน (analysis only)
         if self.weekly_strategist and should_run_weekly(self.last_weekly_date, current_date):
@@ -945,6 +1063,19 @@ class TraiderMainLoop:
                         logger.debug(f"Extracted current_candle from {tf}")
 
                     break
+
+        # Live/SIM: faithful cancel-near-TP for MaiRuay v2 pending LIMITs,
+        # driven by the LAST CLOSED bar. Backtest runs this inside
+        # _process_pending_limit(); live skips that pipeline (MT5 owns fills),
+        # so without this a MaiRuay LIMIT that drifts within 5%R55 of TP before
+        # touching entry would sit pending until the 5-bar expiry — diverging
+        # from the validated golden. Backtest is untouched (guarded).
+        if not self.is_backtest and candles_by_tf:
+            try:
+                _active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+                self._cancel_near_tp_live(candles_by_tf, _active_tf, candle_time)
+            except Exception as e:
+                logger.error(f"live cancel-near-TP failed (continuing): {e}")
 
         # Refresh the lot-base notional from config each cycle so the Settings
         # page can change it live (config global_settings.lot_base_portfolio)
@@ -1253,14 +1384,48 @@ class TraiderMainLoop:
         else:
             id_mode = 'simulate'
 
-        plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
-
         signal = world_state.get('signal')
+
+        # ── Pattern-aware OPEN stamp (plan_id / trade_id / timestamp_open) ──
+        # The cycle-level `candle_time` is taken from the FORMING bar
+        # (candles[-1]) because position monitoring needs the current bar. But
+        # Mountain's core analyses the last CLOSED bar (signal_engine feeds it
+        # ohlc_bars[:-1] in live), so stamping a Mountain plan with candle_time
+        # records the entry ONE bar (one TF) AHEAD of the bar the core placed
+        # on — the user's "22:05 vs 22:00" report. Re-anchor Mountain's stamp
+        # to the core's real signal bar, surfaced by the adapter as
+        # details['signal_bar_time'] = the closed bar time. Only the OPEN stamp
+        # moves; `candle_time` (monitoring, close events) is untouched.
+        #   • MaiRuay keeps candle_time — its engine deliberately treats the
+        #     forming bar as the entry/child bar (flat synth, see signal_engine).
+        #   • Backtest passes closed bars only → signal_bar_time == candle_time,
+        #     so this is a no-op there (guarded by `not self.is_backtest`).
+        stamp_time = candle_time
+        if (signal is not None
+                and getattr(signal, 'pattern', '') == 'MOUNTAIN'
+                and not self.is_backtest):
+            _sbt = (getattr(signal, 'details', None) or {}).get('signal_bar_time')
+            if _sbt:
+                try:
+                    from dateutil import parser as _sbt_parser
+                    stamp_time = _sbt_parser.parse(_sbt) if isinstance(_sbt, str) else _sbt
+                    logger.info(
+                        f"Mountain open-stamp re-anchored to signal bar {stamp_time.isoformat()} "
+                        f"(was forming-bar candle_time {candle_time.isoformat() if hasattr(candle_time, 'isoformat') else candle_time})"
+                    )
+                except (ValueError, TypeError) as _sbt_err:
+                    logger.warning(
+                        f"Mountain signal_bar_time parse failed ({_sbt!r}: {_sbt_err}) — "
+                        f"falling back to candle_time"
+                    )
+                    stamp_time = candle_time
+
+        plan_id = generate_plan_id(candle_time=stamp_time, mode=id_mode)
 
         # Generate trade IDs for each order and set initial state
         orders_with_ids = []
         # Pre-compute the open timestamp once. We store the SAME value the
-        # DB row gets (candle_time.isoformat() or now()) so that when the
+        # DB row gets (stamp_time.isoformat() or now()) so that when the
         # plan_closed event fires later and reads `order['timestamp_open']`,
         # it matches what's in the DB row and the Dashboard "Open Time"
         # column populates. Previously this field was only set on the DB
@@ -1272,12 +1437,12 @@ class TraiderMainLoop:
         # this regression multiple times — root cause was the missing
         # attachment here, NOT in the close path.
         _open_ts_iso = (
-            candle_time.isoformat()
-            if hasattr(candle_time, 'isoformat')
-            else (str(candle_time) if candle_time else datetime.now().isoformat())
+            stamp_time.isoformat()
+            if hasattr(stamp_time, 'isoformat')
+            else (str(stamp_time) if stamp_time else datetime.now().isoformat())
         )
         for order in plan['orders']:
-            order['trade_id'] = generate_trade_id(plan_id, order['order_num'], candle_time=candle_time, mode=id_mode)
+            order['trade_id'] = generate_trade_id(plan_id, order['order_num'], candle_time=stamp_time, mode=id_mode)
             order['plan_id'] = plan_id  # Required for portfolio state updates
             order['result'] = 'PENDING'  # Required for PositionMonitor
             order['entry_price'] = order['entry']  # Alias for compatibility
@@ -1388,7 +1553,7 @@ class TraiderMainLoop:
             logger.info(f"\n[Broker] Executing {len(orders_with_ids)} order(s)...")
             trail_meta = None   # Mountain v3 has no trailing (removed 3-stage)
             # MaiRuay v2 LIMIT extras — broker uses these to expire / cancel
-            # pending limits per the notebook spec (5 bars, cancel within 10%R55
+            # pending limits per the notebook spec (5 bars, cancel within 5%R55
             # of TP). Mountain/Scanner do not set these → broker uses defaults.
             _sig_details = getattr(signal, 'details', None) or {}
             _pending_bars = int(_sig_details.get('pending_bars', 5))
@@ -1514,12 +1679,12 @@ class TraiderMainLoop:
                 self.sheets_logger.log_plan_open,
                 plan_id, orders_with_ids, decision_for_sheets,
                 world_state, llm_log,
-                candle_time=candle_time,
+                candle_time=stamp_time,
             )
         else:
             self.sheets_logger.log_plan_open(
                 plan_id, orders_with_ids, decision_for_sheets,
-                world_state, llm_log, candle_time=candle_time,
+                world_state, llm_log, candle_time=stamp_time,
             )
 
         # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
@@ -1547,7 +1712,11 @@ class TraiderMainLoop:
                     'bot_id': _BOT_ID or None,
                     'plan_id': plan_id,
                     'order_num': order.get('order_num', 1),
-                    'timestamp_open': candle_time.isoformat() if candle_time else datetime.now().isoformat(),
+                    # Use the per-order open stamp set above (= stamp_time:
+                    # Mountain→signal bar, others→candle_time) so the DB row,
+                    # the in-memory order, and plan_id all agree. Falls back to
+                    # candle_time only if the attach step was skipped.
+                    'timestamp_open': order.get('timestamp_open') or (candle_time.isoformat() if candle_time else datetime.now().isoformat()),
                     'timeframe': world_state.get('selected_tf', 'M5'),
                     'chart_type': world_state.get('chart_type', ''),
                     'technique': decision_for_sheets.get('technique', ''),

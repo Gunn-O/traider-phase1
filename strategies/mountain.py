@@ -245,5 +245,11 @@ def find_signal(
             # is_mountain consumer doesn't KeyError until the trailing path is torn out
             "tp1": 0.0, "tp2_base": 0.0, "tech_point": base_lo,
             "swing_bar_nums": set(),
+            # Time of the bar the core actually placed on = the last CLOSED bar
+            # (signal_engine feeds ohlc_bars[:-1] in live, so bars[-1] here is the
+            # closed signal bar, NOT the forming bar). main.py stamps the plan's
+            # open time / plan_id from this so live matches the core's real signal
+            # bar (the "22:00 vs 22:05" fix) instead of the forming-bar candle_time.
+            "signal_bar_time": cur_time,
         },
     )
