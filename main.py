@@ -565,6 +565,19 @@ class TraiderMainLoop:
         # Loaded from bot_state_snapshots.state_json on startup; persisted on
         # each plan_closed event so a launcher restart preserves it.
         self.scanner_state: Optional[dict] = None
+        # Weekend / market-reopen refresh: naive datetime of the last processed
+        # bar. None until the first bar is seen; seeded below from the persisted
+        # last_candle_time so a mid-week restart resumes with a tiny gap (no
+        # false reset). A gap ≥ _weekend_gap_hours between consecutive bars means
+        # the weekend/session close was crossed → reset fires on the FIRST bar
+        # after the gap (the Sunday ~22:00 reopen bar — an ISO-week trigger would
+        # miss the Sun 22:00–23:59 reopen window). Checked each live cycle in
+        # _weekend_refresh_if_gap().
+        self._last_bar_time = None
+        # Gap (hours) that counts as a weekend/session close. Weekend gap ≈ 49h;
+        # mid-week reboots/maintenance are minutes–~1h, so 24h separates them
+        # cleanly. Env-overridable without touching config/strategies.json.
+        self._weekend_gap_hours = float(os.getenv('WEEKEND_GAP_RESET_HOURS', '24'))
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -605,6 +618,25 @@ class TraiderMainLoop:
                         f"down_seg={saved_scanner.get('down_segment_id')}, "
                         f"stopped(up={n_up}, down={n_down})"
                     )
+                # Seed the last-bar-time reference so a mid-week restart resumes
+                # with a tiny gap (no false reset); a restart after the weekend
+                # sees a ≥ _weekend_gap_hours gap → reset fires. Stored naive so
+                # the later subtraction never mixes naive/aware datetimes.
+                _saved_ct = saved.get('last_candle_time')
+                if _saved_ct:
+                    try:
+                        from dateutil import parser as _ctp
+                        _ct = _ctp.parse(_saved_ct) if isinstance(_saved_ct, str) else _saved_ct
+                        self._last_bar_time = (
+                            _ct.replace(tzinfo=None) if getattr(_ct, 'tzinfo', None) else _ct
+                        )
+                        logger.info(
+                            f"✓ Last bar-time restored for weekend guard: {self._last_bar_time}"
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"Could not seed last bar-time from last_candle_time={_saved_ct!r}: {_e}"
+                        )
                 logger.info(
                     f"✓ Bot state restored from LocalDB for {_BOT_ID}: "
                     f"consec_loss={saved.get('consecutive_loss', 0)}, "
@@ -645,7 +677,7 @@ class TraiderMainLoop:
         # Backtest/PaperBroker has no native pending state → skipped via hasattr.
         if self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket'):
             for _t in closed:
-                if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED', 'CANCEL_MOUNTAIN')
+                if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED', 'CANCEL_MOUNTAIN', 'CANCEL_WEEKEND')
                         and _t.get('broker_ticket')
                         and (_t.get('pattern') or '').upper() in ('MAI_RUAY', 'MAI_RUAY_M1', 'MOUNTAIN')):
                     try:
@@ -707,6 +739,152 @@ class TraiderMainLoop:
                     'last_candle_time': str(candle_time) if candle_time else None,
                     'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
                 })
+
+    def _weekend_refresh_if_gap(self, candle_time, portfolio_state=None) -> bool:
+        """On the FIRST bar after a weekend/session close (a gap ≥
+        self._weekend_gap_hours between consecutive processed bars), refresh
+        strategy state so a stale armed setup / unfilled pending LIMIT from the
+        previous trading week cannot fire into the new week. LIVE/SIM only
+        (gated at call site).
+
+        Trigger is GAP-based, NOT ISO-week: gold reopens Sunday ~22:00 UTC which
+        is still the SAME ISO week as Friday (isoweekday 7), so an ISO-week
+        trigger would not fire until Monday 00:00 — missing the Sun 22:00–23:59
+        reopen window that is exactly when the stale-Friday setup fires. The gap
+        trigger fires on the Sunday reopen bar itself.
+
+        User-confirmed scope (2026-08-01):
+          trigger  = consecutive-bar gap ≥ WEEKEND_GAP_RESET_HOURS (default 24h)
+          clear    = mountain_state (armed / _used / _used_peaks / _base_check via
+                     the adapter) + UNFILLED pending LIMITs (Mountain + MaiRuay);
+                     consecutive_loss → 0
+          preserve = scanner_state, total_loss_pct, realized_pnl, and any FILLED
+                     position or HALF-FILLED plan (a plan with ≥1 filled leg runs
+                     to its TP/SL — its still-pending legs are NOT cancelled)
+
+        Orphan-safe cancel: against a live MT5 broker a pending is marked
+        CANCELLED only once the broker confirms the order was removed; if the
+        broker says it is gone (filled at reopen / already expired) the order is
+        LEFT for the normal reconcile to adopt as a position, so we never mark a
+        just-filled order CANCELLED (which would orphan the MT5 position).
+        Paper/backtest (no cancel_pending_by_ticket) mark CANCELLED normally.
+
+        Placed AFTER Step-0 monitoring (fills/closes reconciled) and BEFORE the
+        signal engine. Does NOT touch the 442802e Friday-close continuity fix —
+        that preserves state during the Friday-close window; this fires only on
+        the reopen bar. Returns True when a reset was performed.
+        """
+        if candle_time is None or not hasattr(candle_time, 'replace'):
+            return False
+        # Normalize to naive so naive/aware subtraction never crashes.
+        cur = candle_time.replace(tzinfo=None) if getattr(candle_time, 'tzinfo', None) else candle_time
+        prev = self._last_bar_time
+        self._last_bar_time = cur          # advance the reference every cycle
+        if prev is None:
+            return False                   # first bar seen this process → seed only
+        try:
+            gap_hours = (cur - prev).total_seconds() / 3600.0
+        except Exception:
+            return False
+        if gap_hours < self._weekend_gap_hours:
+            return False                   # normal intraday bar / short interruption
+
+        logger.info(
+            f"🗓️  Weekend/session gap detected ({gap_hours:.1f}h ≥ "
+            f"{self._weekend_gap_hours:.0f}h: {prev} → {cur}) — refreshing strategy "
+            f"state (open/half-filled plans preserved)"
+        )
+
+        # 1) Plans with any FILLED leg are "live" → preserve the whole plan,
+        #    including its still-pending legs (half-filled multi-entry).
+        live_plan_ids = {
+            o.get('plan_id')
+            for o in self.position_monitor.open_orders
+            if o.get('filled', False) and o.get('plan_id')
+        }
+
+        # 2) Cancel UNFILLED pending LIMITs whose plan has no filled leg.
+        #    Orphan-safe: against a real broker, confirm removal BEFORE marking
+        #    CANCELLED; if the broker won't remove it (filled/gone) leave it for
+        #    reconcile to adopt. Paper/backtest have no cancel_pending_by_ticket
+        #    → mark CANCELLED normally (their pendings are in-memory only).
+        _live_broker = self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket')
+        _ct_iso = candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time or '')
+        cancel_events, left_for_reconcile = [], 0
+        for o in self.position_monitor.open_orders:
+            if not (o.get('result') == 'PENDING'
+                    and not o.get('filled', True)      # SAFE default: unsure → keep
+                    and o.get('plan_id') not in live_plan_ids
+                    and (o.get('pattern') or '').upper() in ('MOUNTAIN', 'MAI_RUAY', 'MAI_RUAY_M1')):
+                continue
+            if _live_broker:
+                _tkt = o.get('broker_ticket')
+                if not _tkt:
+                    left_for_reconcile += 1
+                    logger.info(f"[{o.get('trade_id')}] weekend: no broker_ticket — leaving for reconcile")
+                    continue
+                _removed = False
+                try:
+                    _removed = bool(self.broker.cancel_pending_by_ticket(int(_tkt)))
+                except Exception as e:
+                    logger.warning(f"[{o.get('trade_id')}] weekend cancel_pending failed: {e}")
+                    _removed = False
+                if not _removed:
+                    left_for_reconcile += 1
+                    logger.info(
+                        f"[{o.get('trade_id')}] weekend: broker did not remove ticket {_tkt} "
+                        f"(filled/gone) — leaving for reconcile to adopt (no orphan)"
+                    )
+                    continue
+            # Confirmed removed (live) OR paper/backtest → mark CANCELLED.
+            o['result'] = 'CANCELLED'
+            o['filled'] = False
+            o['close_reason'] = 'CANCEL_WEEKEND'
+            o['close_price'] = o.get('entry_price', o.get('entry', 0))
+            o['pnl_usd'] = 0.0
+            o['timestamp_close'] = _ct_iso
+            cancel_events.append(o)
+        if cancel_events or left_for_reconcile:
+            logger.info(
+                f"Weekend refresh: cancelled {len(cancel_events)} unfilled pending LIMIT(s), "
+                f"left {left_for_reconcile} for reconcile "
+                f"(preserved live plans: {sorted(p for p in live_plan_ids if p)})"
+            )
+        if cancel_events:
+            self._handle_closed_events(cancel_events, candle_time)
+
+        # 3) Clear in-memory Mountain armed/peak-lock/base-check state. Rebuilt
+        #    fresh next cycle; FILLED Mountain positions are re-tracked from
+        #    open_orders (main.py:1099-1111), so this is safe for open positions.
+        self.mountain_state = None
+
+        # 4) Reset consecutive_loss ONLY (circuit-breaker accumulators
+        #    total_loss_pct / realized_pnl are preserved). Update every store the
+        #    guardian may read: the in-scope portfolio_state (this cycle), the
+        #    cache, Sheets (next cycle reload), and LocalDB (restart).
+        if isinstance(portfolio_state, dict):
+            portfolio_state['consecutive_loss'] = 0
+        if isinstance(self.portfolio_state_cache, dict):
+            self.portfolio_state_cache['consecutive_loss'] = 0
+        try:
+            if isinstance(portfolio_state, dict) and hasattr(self.sheets_logger, 'update_portfolio_state'):
+                self.sheets_logger.update_portfolio_state(portfolio_state)
+        except Exception as e:
+            logger.warning(f"Weekend refresh: Sheets consecutive_loss reset failed: {e}")
+        if self.local_db and _BOT_ID:
+            try:
+                self.local_db.upsert_bot_state(_BOT_ID, {
+                    'consecutive_loss': 0,
+                    'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                    'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                    'last_candle_time': _ct_iso,
+                    'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
+                })
+            except Exception as e:
+                logger.warning(f"Weekend refresh: LocalDB persist failed: {e}")
+
+        logger.info("🗓️  Weekend refresh complete — armed/pending cleared, consecutive_loss=0")
+        return True
 
     def _cancel_near_tp_live(self, candles_by_tf, active_tf, candle_time):
         """Live/SIM faithful port of the backtest cancel-near-TP filter for
@@ -1063,6 +1241,18 @@ class TraiderMainLoop:
                         logger.debug(f"Extracted current_candle from {tf}")
 
                     break
+
+        # Weekend / market-reopen refresh (LIVE/SIM only): on the first bar after
+        # a weekend/session gap (≥ WEEKEND_GAP_RESET_HOURS), clear stale armed
+        # Mountain state + unfilled pending LIMITs so a Friday setup can't fire
+        # into the Sunday reopen. FILLED and half-filled plans are preserved.
+        # Runs BEFORE the signal engine so the week starts from a clean
+        # mountain_state. Guarded so a failure never breaks the loop.
+        if not self.is_backtest:
+            try:
+                self._weekend_refresh_if_gap(candle_time, portfolio_state)
+            except Exception as e:
+                logger.error(f"weekend refresh failed (continuing): {e}")
 
         # Live/SIM: faithful cancel-near-TP for MaiRuay v2 pending LIMITs,
         # driven by the LAST CLOSED bar. Backtest runs this inside
