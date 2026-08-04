@@ -13,6 +13,7 @@ const NAV = [
     { path: '/strategy', label: 'Strategy', th: 'กลยุทธ์', icon: I.layers },
     { path: '/backtest', label: 'Backtest', th: 'ทดสอบย้อนหลัง', icon: I.flask },
     { path: '/history', label: 'Trade History', th: 'ประวัติเทรด', icon: I.history },
+    { path: '/execution', label: 'Execution', th: 'คุณภาพการยิง', icon: I.bolt },
   ] },
   { section: 'SYSTEM · ระบบ', items: [
     { path: '/alerts', label: 'Alert Center', th: 'แจ้งเตือน', icon: I.bell, countKey: 'alerts' },
