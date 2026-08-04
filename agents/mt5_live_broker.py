@@ -26,6 +26,17 @@ except ImportError:
     mt5 = None
     MT5_AVAILABLE = False
 
+# Execution-quality logger — wraps the entry order_send and records SL/TP/manual
+# close slippage. Import guarded so a broken/missing logger never breaks trading.
+try:
+    from agents.g4_execution_logger import (
+        send_order_with_logging as _exec_send,
+        log_close_execution as _exec_log_close,
+    )
+except Exception:  # pragma: no cover — defensive
+    _exec_send = None
+    _exec_log_close = None
+
 logger = logging.getLogger(__name__)
 
 # Magic numbers — identify orders ของ bot แยกตาม mode
@@ -90,6 +101,11 @@ class MT5LiveBroker:
         # Used by main.py reconciliation to sync DB/Sheets log to the real
         # broker state instead of the engine snapshot.
         self._broker_sl_tp: Dict[int, Tuple[float, float]] = {}
+        # Per-ticket open context for execution-quality close logging.
+        # ticket → {direction, plan_id, trade_id}. update_positions() detects
+        # SL/TP closes via history and lacks the original direction/ids — this
+        # cache supplies them so log_close_execution can sign slippage correctly.
+        self._exec_open_meta: Dict[int, dict] = {}
 
         self._verify_environment()
         logger.info(
@@ -339,8 +355,21 @@ class MT5LiveBroker:
             )
             return None
 
-        # Send
-        result = mt5.order_send(request)
+        # Send — routed through execution-quality logger (measures latency,
+        # retcode, entry slippage vs requested price, and spread at fire time).
+        # Falls back to a plain order_send if the logger import failed. The
+        # logger never raises and returns MT5's result unchanged.
+        _exec_meta = {
+            "plan_id":     plan_id,
+            "trade_id":    trade_id or comment,
+            "direction":   action,
+            "candle_time": candle_time,
+            "mode":        self.mode,
+        }
+        if _exec_send is not None:
+            result = _exec_send(mt5, request, _exec_meta)
+        else:
+            result = mt5.order_send(request)
         if result is None:
             logger.error(f"order_send returned None: {mt5.last_error()}")
             return None
@@ -369,6 +398,14 @@ class MT5LiveBroker:
             self._broker_sl_tp[ticket] = (float(broker_sl), float(broker_tp))
         except Exception:
             pass
+        # Cache open context for execution-quality close logging (direction +
+        # ids). Keyed by the order ticket; for filled MARKET / LIMIT the MT5
+        # position ticket equals this order ticket.
+        self._exec_open_meta[ticket] = {
+            "direction": action,
+            "plan_id":   plan_id,
+            "trade_id":  trade_id or comment,
+        }
         # Register trailing state if metadata provided (Mountain only)
         if trail_meta:
             self._trail_state[ticket] = {
@@ -824,11 +861,45 @@ class MT5LiveBroker:
                 f"close_price={hist['close_price']:.5f} pnl={pnl:.2f}"
             )
 
+            # ── Execution-quality: SL/TP close slippage (expected vs actual) ──
+            # The SL/TP close is where broker behaviour-change shows up sharpest
+            # (SL slippage during news). expected = the level the broker held;
+            # actual = the real deal price. Fully guarded — never breaks flow.
+            try:
+                if _exec_log_close is not None:
+                    _meta = self._exec_open_meta.get(ticket, {})
+                    _sl_tp = self._broker_sl_tp.get(ticket)
+                    _close_reason = pos_dict["close_reason"]  # TP_HIT | SL_HIT
+                    _close_type = "TP" if _close_reason == "TP_HIT" else "SL"
+                    _expected = None
+                    if _sl_tp:
+                        _expected = _sl_tp[1] if _close_type == "TP" else _sl_tp[0]
+                    _exec_log_close(
+                        mt5,
+                        {
+                            "plan_id":     _meta.get("plan_id", ""),
+                            "trade_id":    trade_id,
+                            "direction":   _meta.get("direction"),
+                            "candle_time": candle_time,
+                            "mode":        self.mode,
+                            "symbol":      self.symbol,
+                        },
+                        expected_price=_expected,
+                        actual_price=hist["close_price"],
+                        close_type=_close_type,
+                    )
+            except Exception as _e:
+                logger.warning(f"exec close-log failed (close OK): {_e}")
+
         # Update known set to current state + cleanup trail_state for closed tickets
         self._known_open_tickets = current_tickets
         for ticket in list(self._trail_state):
             if ticket not in current_tickets:
                 self._trail_state.pop(ticket, None)
+        # Cleanup exec open-meta + broker_sl_tp for tickets that are gone
+        for ticket in list(self._exec_open_meta):
+            if ticket not in current_tickets:
+                self._exec_open_meta.pop(ticket, None)
         return newly_closed
 
     def get_open_positions(self) -> List[dict]:
@@ -895,6 +966,30 @@ class MT5LiveBroker:
             f"💹 LIVE close sent | ticket={pos.ticket} reason={reason} "
             f"close_price={price:.5f} pnl={pnl:.2f}"
         )
+
+        # ── Execution-quality: manual/trail close slippage ──
+        # expected = the bid/ask we targeted; actual = MT5's real fill price.
+        try:
+            if _exec_log_close is not None:
+                _actual = float(getattr(result, "price", price) or price)
+                _ct = reason if reason in ("SL", "TP", "TRAIL", "MANUAL") else "MANUAL"
+                _meta = self._exec_open_meta.get(int(pos.ticket), {})
+                _exec_log_close(
+                    mt5,
+                    {
+                        "plan_id":     _meta.get("plan_id", ""),
+                        "trade_id":    closed["trade_id"],
+                        "direction":   action,
+                        "candle_time": candle_time,
+                        "mode":        self.mode,
+                        "symbol":      self.symbol,
+                    },
+                    expected_price=price,
+                    actual_price=_actual,
+                    close_type=_ct,
+                )
+        except Exception as _e:
+            logger.warning(f"exec close-log failed (close OK): {_e}")
         return closed
 
     def close_all(self, candle_time: datetime) -> List[dict]:
