@@ -14,6 +14,13 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import logging
 
+# Execution-quality logger — records spread baseline at signal time (paper mode).
+# Import guarded so a broken/missing logger never breaks order execution.
+try:
+    from agents.g4_execution_logger import log_paper_snapshot as _exec_log_paper
+except Exception:  # pragma: no cover — defensive
+    _exec_log_paper = None
+
 # MetaTrader5 is only available on Windows
 try:
     import MetaTrader5 as mt5
@@ -183,11 +190,57 @@ class PaperBroker:
                 f"ticket={ticket} entry={entry:.2f} "
                 f"sl={sl:.2f} tp={tp:.2f} lot={lot} order_type={ot_upper}"
             )
+
+            # ── Execution-quality: paper spread baseline at "would-fire" point ──
+            # Skip in backtest (no real execution → would pollute the baseline).
+            # exec_is_backtest / exec_mode are stamped by main.py after broker
+            # creation; default to safe values when absent. Never raises.
+            self._log_paper_exec(action, entry, plan_id, candle_time, trade_id)
+
             return ticket
 
         except Exception as e:
             logger.error(f"PaperBroker open_position error: {e}")
             return None
+
+    def _log_paper_exec(self, action, entry, plan_id, candle_time, trade_id):
+        """Emit a paper_signal execution-quality record (spread baseline).
+
+        Fully guarded — logging must NEVER break order flow. Skips the
+        backtest path entirely (no real execution to characterise). When
+        DATA_MODE=mt5 and MT5 is connected, pulls the live bid/ask so the
+        spread baseline is real; on yfinance / no-tick it logs meta only.
+        """
+        try:
+            if _exec_log_paper is None:
+                return
+            # Backtest → skip (exec_is_backtest stamped by main.py; default False)
+            if getattr(self, "exec_is_backtest", False):
+                return
+
+            spread_pip = bid = ask = None
+            try:
+                bid, ask = self.get_current_price()  # raises on yfinance / no MT5
+                spread_pip = round((ask - bid) * 100, 2)  # 1 pip = 0.01 USD
+            except Exception:
+                pass  # no tick available → log meta only (spread=None)
+
+            _exec_log_paper(
+                {
+                    "plan_id":     plan_id,
+                    "trade_id":    trade_id,
+                    "candle_time": candle_time,
+                    "direction":   action,
+                    "entry":       entry,
+                    "mode":        getattr(self, "exec_mode", "paper"),
+                    "symbol":      self.symbol,
+                },
+                spread_pip=spread_pip,
+                bid=bid,
+                ask=ask,
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning(f"paper exec-log failed (order OK): {e}")
 
     def update_positions(self, candle_time: datetime, current_price: Optional[float] = None) -> List[dict]:
         """

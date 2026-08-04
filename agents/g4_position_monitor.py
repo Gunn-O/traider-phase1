@@ -26,8 +26,10 @@ def _process_pending_limit(order: dict, candle: dict, bars_seen: int) -> Optiona
     """Process an unfilled MaiRuay v2 LIMIT order against this candle.
 
     Notebook v2.04 spec (run_backtest:684-711):
-      1. Cancel-near-TP — if high/low has already moved within 10%R55 of TP,
-         cancel the LIMIT (entering near the exit is bad RR)
+      1. Cancel-near-TP — if high/low has already moved within the proximity
+         buffer of TP (v2 config: 5%R55 → tp_cancel_buffer_pips), cancel the
+         LIMIT (entering near the exit is bad RR). Backtest only; the live/SIM
+         equivalent lives in main.py._cancel_near_tp_live (closed-bar driven).
       2. Fill check — touch entry price → mark filled (no update, fall through
          to SL/TP check on same bar — same_bar injection)
       3. Expire — bars_seen > expire_at_bar → cancel
@@ -159,6 +161,9 @@ def check_positions_on_candle_close(candle: dict, open_orders: List[dict],
         # broker.reconcile_pending() each cycle is the authority: it converts
         # MT5 EXPIRED orders into CANCELLED close-events and filled positions
         # into trackable rows. Unfilled LIMITs in open_orders just wait.
+        # Proximity cancel-near-TP for those waiting LIMITs is applied in
+        # main.py._cancel_near_tp_live off the last CLOSED bar (never the
+        # forming bar), keeping live faithful to the backtest 5%R55 filter.
         if (order.get('order_type', '').upper() == 'LIMIT'
                 and not order.get('filled', True)):
             if not is_backtest:
