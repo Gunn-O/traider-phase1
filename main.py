@@ -31,8 +31,10 @@ from typing import Dict, List
 from dotenv import load_dotenv
 
 # Import agents (Phase II — Signal Engine Architecture)
-# REMOVED: g1_pattern_detector, g3_analyst, g3_risk_manager, g4_reflector (Phase I cleanup)
+# REMOVED: g1_pattern_detector, g3_analyst, g3_risk_manager (Phase I cleanup)
+# g4_reflector re-added as Python-only execution-quality daily summary (no AI).
 from agents.g2_prefilter import G2Prefilter
+from agents.g4_reflector import should_run_daily, build_daily_report, log_daily_report
 from agents.g4_weekly_strategist import G4WeeklyStrategist, aggregate_weekly_stats, should_run_weekly
 from agents.g4_monthly_evolver import G4MonthlyEvolver, aggregate_monthly_stats, should_run_monthly
 from agents.g3_risk_gate import guardian_check
@@ -105,6 +107,33 @@ def post_bot_heartbeat(data: dict) -> None:
         _urlreq_post.urlopen(req, timeout=2).read()
     except Exception:
         pass
+
+
+def resolve_lot_base_portfolio(balance: float) -> float:
+    """Resolve the lot-base notional lot sizing uses (budget = base × risk%).
+    Precedence (first hit wins):
+      1) config/strategies.json global_settings.lot_base_portfolio (live-editable
+         via the Settings UI — picked up per-cycle without restarting the bot)
+      2) env LOT_BASE_PORTFOLIO
+      3) ACCOUNT_BALANCE (`balance`)
+    This is a FIXED operator-set value — NOT the live broker equity; lots do not
+    auto-scale with realised P&L. Applies to every mode (paper/micro/live)."""
+    try:
+        from utils.strategy_loader import get_lot_base_portfolio
+        cfg_val = get_lot_base_portfolio()
+        if cfg_val and cfg_val > 0:
+            return float(cfg_val)
+    except Exception as _e:
+        logger.debug(f"lot_base config read failed ({_e}); falling back to env/balance")
+    env_val = os.getenv('LOT_BASE_PORTFOLIO', '').strip()
+    if env_val:
+        try:
+            v = float(env_val)
+            if v > 0:
+                return v
+        except ValueError:
+            logger.warning(f"Invalid LOT_BASE_PORTFOLIO={env_val!r} — using ACCOUNT_BALANCE")
+    return float(balance)
 
 # Load environment (override=True to ensure .env takes precedence over shell)
 load_dotenv(override=True)
@@ -338,6 +367,14 @@ class TraiderMainLoop:
         )
         self.balance = float(os.getenv('ACCOUNT_BALANCE', '300'))
 
+        # Lot-base portfolio — the fixed notional lot sizing is based on
+        # (budget = base × risk_per_plan_pct). Source precedence:
+        #   config global_settings.lot_base_portfolio (UI-editable, live) →
+        #   env LOT_BASE_PORTFOLIO → ACCOUNT_BALANCE. NOT the live broker equity.
+        # Refreshed per-cycle in run_once() so the Settings page can change it
+        # without restarting the bot. Applies to every mode (paper/micro/live).
+        self.lot_base_portfolio = resolve_lot_base_portfolio(self.balance)
+
         self.trading_mode = (
             getattr(args, 'mode', None)
             or bot_state.get("mode", "paper")
@@ -366,6 +403,8 @@ class TraiderMainLoop:
         logger.info(f"Active TF:      {os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()}  (env BACKTEST_TIMEFRAME)")
         logger.info(f"Data source:    {getattr(args, 'data_source', 'auto')}")
         logger.info(f"Balance (.env): ${self.balance:,.2f}")
+        logger.info(f"Lot base:       ${self.lot_base_portfolio:,.2f}  "
+                    f"(LOT_BASE_PORTFOLIO or ACCOUNT_BALANCE — fixed, not broker equity)")
         if self.is_backtest:
             logger.info(f"Backtest mode: Sheets logging {'ENABLED' if args.log_sheets else 'DISABLED'}")
         logger.info("="*70)
@@ -482,6 +521,14 @@ class TraiderMainLoop:
 
         # Initialize Broker (Paper/Micro/Live)
         self.broker = create_broker(self.trading_mode, self.symbol)
+        # Stamp execution-quality logging context onto the broker so it can
+        # tag records with the right mode and skip the backtest path (no real
+        # execution → keep the broker-behaviour baseline uncontaminated).
+        try:
+            self.broker.exec_is_backtest = self.is_backtest
+            self.broker.exec_mode = self.trading_mode
+        except Exception:
+            pass
 
         # Pre-fetch cache — background thread keeps candle data warm so run_once()
         # Step 1 doesn't pay the 2-8s network wait inside the critical path.
@@ -510,6 +557,7 @@ class TraiderMainLoop:
         self.last_daily_date = None  # V4.3: For Reflector
         self.weekly_stats = {}
         self.reflection_summary = "No history yet — trade normally"
+        self.execution_report = None  # latest Python-only daily execution-quality report
 
         # Mountain state tracking (for Round 2 detection)
         self.mountain_state = None  # Will be updated by Signal Engine
@@ -517,10 +565,19 @@ class TraiderMainLoop:
         # Loaded from bot_state_snapshots.state_json on startup; persisted on
         # each plan_closed event so a launcher restart preserves it.
         self.scanner_state: Optional[dict] = None
-        # MaiRuay v2 state — carries r1_info after a SL so signal_engine can
-        # retry R2 within 16 bars. Persisted on plan_closed; cleared on R2 fire
-        # or after 16 bars expire (handled inside signal_engine).
-        self.mai_ruay_state: Optional[dict] = None
+        # Weekend / market-reopen refresh: naive datetime of the last processed
+        # bar. None until the first bar is seen; seeded below from the persisted
+        # last_candle_time so a mid-week restart resumes with a tiny gap (no
+        # false reset). A gap ≥ _weekend_gap_hours between consecutive bars means
+        # the weekend/session close was crossed → reset fires on the FIRST bar
+        # after the gap (the Sunday ~22:00 reopen bar — an ISO-week trigger would
+        # miss the Sun 22:00–23:59 reopen window). Checked each live cycle in
+        # _weekend_refresh_if_gap().
+        self._last_bar_time = None
+        # Gap (hours) that counts as a weekend/session close. Weekend gap ≈ 49h;
+        # mid-week reboots/maintenance are minutes–~1h, so 24h separates them
+        # cleanly. Env-overridable without touching config/strategies.json.
+        self._weekend_gap_hours = float(os.getenv('WEEKEND_GAP_RESET_HOURS', '24'))
 
         # Initialize session stats tracking
         self.session_stats = {
@@ -561,6 +618,25 @@ class TraiderMainLoop:
                         f"down_seg={saved_scanner.get('down_segment_id')}, "
                         f"stopped(up={n_up}, down={n_down})"
                     )
+                # Seed the last-bar-time reference so a mid-week restart resumes
+                # with a tiny gap (no false reset); a restart after the weekend
+                # sees a ≥ _weekend_gap_hours gap → reset fires. Stored naive so
+                # the later subtraction never mixes naive/aware datetimes.
+                _saved_ct = saved.get('last_candle_time')
+                if _saved_ct:
+                    try:
+                        from dateutil import parser as _ctp
+                        _ct = _ctp.parse(_saved_ct) if isinstance(_saved_ct, str) else _saved_ct
+                        self._last_bar_time = (
+                            _ct.replace(tzinfo=None) if getattr(_ct, 'tzinfo', None) else _ct
+                        )
+                        logger.info(
+                            f"✓ Last bar-time restored for weekend guard: {self._last_bar_time}"
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"Could not seed last bar-time from last_candle_time={_saved_ct!r}: {_e}"
+                        )
                 logger.info(
                     f"✓ Bot state restored from LocalDB for {_BOT_ID}: "
                     f"consec_loss={saved.get('consecutive_loss', 0)}, "
@@ -588,6 +664,323 @@ class TraiderMainLoop:
         if seg not in bucket:
             bucket.append(seg)
             logger.info(f"Scanner: marked {direction} segment {seg} STOPPED after LOSS")
+
+    def _handle_closed_events(self, closed, candle_time):
+        """Route closed/cancelled order events through the money-path downstream:
+        broker-cancel the pending ticket, post plan_closed, update LocalDB, mark
+        Scanner stop-segments, persist bot counters. Shared by the Step-0 monitor
+        sweep AND the Mountain v3 core-cancel routing (Step 2) so both reuse ONE
+        proven path (no duplication)."""
+        if not closed:
+            return
+        # Cancel the broker's pending order so MT5 matches our CANCELLED state.
+        # Backtest/PaperBroker has no native pending state → skipped via hasattr.
+        if self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket'):
+            for _t in closed:
+                if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED', 'CANCEL_MOUNTAIN', 'CANCEL_WEEKEND')
+                        and _t.get('broker_ticket')
+                        and (_t.get('pattern') or '').upper() in ('MAI_RUAY', 'MAI_RUAY_M1', 'MOUNTAIN')):
+                    try:
+                        self.broker.cancel_pending_by_ticket(int(_t['broker_ticket']))
+                    except Exception as e:
+                        logger.warning(
+                            f"[{_t.get('trade_id')}] cancel_pending_by_ticket failed: {e}"
+                        )
+        for t in closed:
+            logger.info(
+                f"✅ Position closed: {t['trade_id']} "
+                f"{t['result']} pnl={t.get('pnl', 0):.2f} "
+                f"reason={t.get('close_reason')} @ {t.get('close_price')}"
+            )
+
+            post_bot_event("plan_closed", f"{t['result']} {t.get('close_reason', '')}", {
+                "plan_id": t.get('plan_id', ''),
+                "trade_id": t.get('trade_id', ''),
+                "action": t.get('action', ''),
+                "result": t.get('result', ''),
+                "close_reason": t.get('close_reason', ''),
+                "close_price": t.get('close_price', 0),
+                "pnl": t.get('pnl_usd', t.get('pnl', 0)),
+                # api_server replaces the open_orders dict with this event.data
+                # verbatim when moving to closed_orders, so the Dashboard Positions
+                # panel needs entry/SL/TP/lot here too — otherwise columns go blank.
+                "entry": t.get('entry_price', t.get('entry', 0)),
+                "sl":    t.get('sl_price', t.get('sl', 0)),
+                "tp":    t.get('tp_price', t.get('tp', 0)),
+                "lot":   t.get('lot_size', t.get('lot', 0)),
+                "pattern": (t.get('pattern') or t.get('chart_type') or '').upper(),
+                "close_time": str(t.get('timestamp_close', '') or t.get('close_time', '')),
+                "open_time": str(t.get('timestamp_open', '') or ''),
+            })
+
+            # Update LocalDB whenever available (backtest always; SIM/LIVE only
+            # when running under api_server with a bot_id).
+            if self.local_db:
+                self.local_db.update_trade_result(
+                    trade_id=t['trade_id'],
+                    result=t['result'],
+                    pnl=t.get('pnl_usd', t.get('pnl', 0)),
+                    close_price=t.get('close_price', 0),
+                    close_time=t.get('timestamp_close', candle_time),
+                    close_reason=t.get('close_reason', ''),
+                    mae_pip=t.get('mae_pip'),
+                    mfe_pip=t.get('mfe_pip'),
+                )
+
+            # Scanner v4.2 stop_segments: on LOSS, block new entries in that segment.
+            self._record_scanner_loss_segment(t)
+            # Persist bot counters so a restart doesn't reset consecutive_loss /
+            # realized_pnl mid-session (scanner stop-sets go into extras).
+            if self.local_db and _BOT_ID:
+                self.local_db.upsert_bot_state(_BOT_ID, {
+                    'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
+                    'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                    'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                    'last_candle_time': str(candle_time) if candle_time else None,
+                    'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
+                })
+
+    def _weekend_refresh_if_gap(self, candle_time, portfolio_state=None) -> bool:
+        """On the FIRST bar after a weekend/session close (a gap ≥
+        self._weekend_gap_hours between consecutive processed bars), refresh
+        strategy state so a stale armed setup / unfilled pending LIMIT from the
+        previous trading week cannot fire into the new week. LIVE/SIM only
+        (gated at call site).
+
+        Trigger is GAP-based, NOT ISO-week: gold reopens Sunday ~22:00 UTC which
+        is still the SAME ISO week as Friday (isoweekday 7), so an ISO-week
+        trigger would not fire until Monday 00:00 — missing the Sun 22:00–23:59
+        reopen window that is exactly when the stale-Friday setup fires. The gap
+        trigger fires on the Sunday reopen bar itself.
+
+        User-confirmed scope (2026-08-01):
+          trigger  = consecutive-bar gap ≥ WEEKEND_GAP_RESET_HOURS (default 24h)
+          clear    = mountain_state (armed / _used / _used_peaks / _base_check via
+                     the adapter) + UNFILLED pending LIMITs (Mountain + MaiRuay);
+                     consecutive_loss → 0
+          preserve = scanner_state, total_loss_pct, realized_pnl, and any FILLED
+                     position or HALF-FILLED plan (a plan with ≥1 filled leg runs
+                     to its TP/SL — its still-pending legs are NOT cancelled)
+
+        Orphan-safe cancel: against a live MT5 broker a pending is marked
+        CANCELLED only once the broker confirms the order was removed; if the
+        broker says it is gone (filled at reopen / already expired) the order is
+        LEFT for the normal reconcile to adopt as a position, so we never mark a
+        just-filled order CANCELLED (which would orphan the MT5 position).
+        Paper/backtest (no cancel_pending_by_ticket) mark CANCELLED normally.
+
+        Placed AFTER Step-0 monitoring (fills/closes reconciled) and BEFORE the
+        signal engine. Does NOT touch the 442802e Friday-close continuity fix —
+        that preserves state during the Friday-close window; this fires only on
+        the reopen bar. Returns True when a reset was performed.
+        """
+        if candle_time is None or not hasattr(candle_time, 'replace'):
+            return False
+        # Normalize to naive so naive/aware subtraction never crashes.
+        cur = candle_time.replace(tzinfo=None) if getattr(candle_time, 'tzinfo', None) else candle_time
+        prev = self._last_bar_time
+        self._last_bar_time = cur          # advance the reference every cycle
+        if prev is None:
+            return False                   # first bar seen this process → seed only
+        try:
+            gap_hours = (cur - prev).total_seconds() / 3600.0
+        except Exception:
+            return False
+        if gap_hours < self._weekend_gap_hours:
+            return False                   # normal intraday bar / short interruption
+
+        logger.info(
+            f"🗓️  Weekend/session gap detected ({gap_hours:.1f}h ≥ "
+            f"{self._weekend_gap_hours:.0f}h: {prev} → {cur}) — refreshing strategy "
+            f"state (open/half-filled plans preserved)"
+        )
+
+        # 1) Plans with any FILLED leg are "live" → preserve the whole plan,
+        #    including its still-pending legs (half-filled multi-entry).
+        live_plan_ids = {
+            o.get('plan_id')
+            for o in self.position_monitor.open_orders
+            if o.get('filled', False) and o.get('plan_id')
+        }
+
+        # 2) Cancel UNFILLED pending LIMITs whose plan has no filled leg.
+        #    Orphan-safe: against a real broker, confirm removal BEFORE marking
+        #    CANCELLED; if the broker won't remove it (filled/gone) leave it for
+        #    reconcile to adopt. Paper/backtest have no cancel_pending_by_ticket
+        #    → mark CANCELLED normally (their pendings are in-memory only).
+        _live_broker = self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket')
+        _ct_iso = candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time or '')
+        cancel_events, left_for_reconcile = [], 0
+        for o in self.position_monitor.open_orders:
+            if not (o.get('result') == 'PENDING'
+                    and not o.get('filled', True)      # SAFE default: unsure → keep
+                    and o.get('plan_id') not in live_plan_ids
+                    and (o.get('pattern') or '').upper() in ('MOUNTAIN', 'MAI_RUAY', 'MAI_RUAY_M1')):
+                continue
+            if _live_broker:
+                _tkt = o.get('broker_ticket')
+                if not _tkt:
+                    left_for_reconcile += 1
+                    logger.info(f"[{o.get('trade_id')}] weekend: no broker_ticket — leaving for reconcile")
+                    continue
+                _removed = False
+                try:
+                    _removed = bool(self.broker.cancel_pending_by_ticket(int(_tkt)))
+                except Exception as e:
+                    logger.warning(f"[{o.get('trade_id')}] weekend cancel_pending failed: {e}")
+                    _removed = False
+                if not _removed:
+                    left_for_reconcile += 1
+                    logger.info(
+                        f"[{o.get('trade_id')}] weekend: broker did not remove ticket {_tkt} "
+                        f"(filled/gone) — leaving for reconcile to adopt (no orphan)"
+                    )
+                    continue
+            # Confirmed removed (live) OR paper/backtest → mark CANCELLED.
+            o['result'] = 'CANCELLED'
+            o['filled'] = False
+            o['close_reason'] = 'CANCEL_WEEKEND'
+            o['close_price'] = o.get('entry_price', o.get('entry', 0))
+            o['pnl_usd'] = 0.0
+            o['timestamp_close'] = _ct_iso
+            cancel_events.append(o)
+        if cancel_events or left_for_reconcile:
+            logger.info(
+                f"Weekend refresh: cancelled {len(cancel_events)} unfilled pending LIMIT(s), "
+                f"left {left_for_reconcile} for reconcile "
+                f"(preserved live plans: {sorted(p for p in live_plan_ids if p)})"
+            )
+        if cancel_events:
+            self._handle_closed_events(cancel_events, candle_time)
+
+        # 3) Clear in-memory Mountain armed/peak-lock/base-check state. Rebuilt
+        #    fresh next cycle; FILLED Mountain positions are re-tracked from
+        #    open_orders (main.py:1099-1111), so this is safe for open positions.
+        self.mountain_state = None
+
+        # 4) Reset consecutive_loss ONLY (circuit-breaker accumulators
+        #    total_loss_pct / realized_pnl are preserved). Update every store the
+        #    guardian may read: the in-scope portfolio_state (this cycle), the
+        #    cache, Sheets (next cycle reload), and LocalDB (restart).
+        if isinstance(portfolio_state, dict):
+            portfolio_state['consecutive_loss'] = 0
+        if isinstance(self.portfolio_state_cache, dict):
+            self.portfolio_state_cache['consecutive_loss'] = 0
+        try:
+            if isinstance(portfolio_state, dict) and hasattr(self.sheets_logger, 'update_portfolio_state'):
+                self.sheets_logger.update_portfolio_state(portfolio_state)
+        except Exception as e:
+            logger.warning(f"Weekend refresh: Sheets consecutive_loss reset failed: {e}")
+        if self.local_db and _BOT_ID:
+            try:
+                self.local_db.upsert_bot_state(_BOT_ID, {
+                    'consecutive_loss': 0,
+                    'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
+                    'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
+                    'last_candle_time': _ct_iso,
+                    'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
+                })
+            except Exception as e:
+                logger.warning(f"Weekend refresh: LocalDB persist failed: {e}")
+
+        logger.info("🗓️  Weekend refresh complete — armed/pending cleared, consecutive_loss=0")
+        return True
+
+    def _cancel_near_tp_live(self, candles_by_tf, active_tf, candle_time):
+        """Live/SIM faithful port of the backtest cancel-near-TP filter for
+        MaiRuay v2 pending LIMITs (same 5%R55 buffer, same geometry).
+
+        Backtest applies this inside `_process_pending_limit()` against each
+        closed candle's high/low. Live/SIM skips that pipeline (MT5 owns fills
+        via reconcile_pending/update_positions), so a LIMIT that drifts within
+        5%R55 of TP *before ever touching entry* would otherwise wait out the
+        full 5-bar expiry — diverging from the golden, which cancels it at once
+        (entering next to the exit is bad RR).
+
+        Uses the LAST CLOSED bar (pos=1 = candles[-2]); the forming bar
+        (pos=0 = candles[-1]) has an unstable intra-bar high/low and must never
+        drive a cancel (the Plan 2026-06-01 forming-bar divergence).
+
+        Safety: emit a CANCELLED event ONLY when broker.cancel_pending_by_ticket
+        actually removes a live pending order. That call does its own
+        orders_get(ticket) check first, so an already-FILLED ticket (now a
+        position running toward TP) is a no-op → we never touch it."""
+        if self.is_backtest or self.broker is None:
+            return
+        if not hasattr(self.broker, 'cancel_pending_by_ticket'):
+            return  # PaperBroker (sim) has no native pending order book
+        bars = (candles_by_tf or {}).get(active_tf) or []
+        if len(bars) < 2:
+            return
+        closed_bar = bars[-2]  # last fully-closed bar (pos=1); [-1] is forming
+        hi = closed_bar.get('high', 0) or 0
+        lo = closed_bar.get('low', 0) or 0
+        if hi <= 0 or lo <= 0:
+            return
+
+        PIP = 0.01
+        events = []
+        for o in self.position_monitor.get_pending_limits():
+            if (o.get('pattern') or '').upper() not in ('MAI_RUAY', 'MAI_RUAY_M1'):
+                continue
+            buf = float(o.get('tp_cancel_buffer_pips') or 0.0) * PIP
+            if buf <= 0:
+                continue
+            ticket = o.get('broker_ticket')
+            if not ticket:
+                continue
+            tp = o.get('tp_price', o.get('tp', 0)) or 0
+            entry = o.get('entry_price', o.get('entry', 0)) or 0
+            act = o.get('action')
+            tripped = (
+                (act == 'BUY'  and hi >= (tp - buf)) or
+                (act == 'SELL' and lo <= (tp + buf))
+            )
+            if not tripped:
+                continue
+
+            # Only proceed if MT5 truly still holds it as a pending order.
+            try:
+                cancelled = self.broker.cancel_pending_by_ticket(int(ticket))
+            except Exception as e:
+                logger.warning(f"[{o.get('trade_id')}] live cancel-near-TP send failed: {e}")
+                continue
+            if not cancelled:
+                continue  # already filled/gone → leave the live position alone
+
+            o['result'] = 'CANCELLED'
+            o['filled'] = False
+            _edge = hi if act == 'BUY' else lo
+            _thr = (tp - buf) if act == 'BUY' else (tp + buf)
+            logger.info(
+                f"[{o.get('trade_id')}] LIVE LIMIT cancelled (near TP) — "
+                f"{act} closed-bar {'high' if act == 'BUY' else 'low'} "
+                f"{_edge:.2f} vs tp-/+buf {_thr:.2f}"
+            )
+            _ts = closed_bar.get('timestamp')
+            events.append({
+                'trade_id': o.get('trade_id'),
+                'type': 'close',
+                'result': 'CANCELLED',
+                'close_reason': 'CANCEL_NEAR_TP',
+                'close_price': entry,
+                'pnl_usd': 0.0,
+                'pnl': 0.0,
+                'timestamp_close': _ts.isoformat() if hasattr(_ts, 'isoformat') else str(_ts or ''),
+                'action': act,
+                'pattern': (o.get('pattern') or '').upper(),
+                'plan_id': o.get('plan_id', ''),
+                'entry_price': entry,
+                'sl_price': o.get('sl_price', o.get('sl', 0)),
+                'tp_price': tp,
+                'lot_size': o.get('lot_size', o.get('lot', 0)),
+                'timestamp_open': o.get('timestamp_open', ''),
+                # No 'broker_ticket' — already cancelled above; omitting it stops
+                # _handle_closed_events from issuing a redundant TRADE_ACTION_REMOVE.
+            })
+
+        if events:
+            self._handle_closed_events(events, candle_time)
 
     def run_once(self, candle_time=None, candles_by_tf=None, current_candle=None):
         """
@@ -629,104 +1022,9 @@ class TraiderMainLoop:
                     logger.error(f"Live broker monitor failed (continuing): {e}")
             # check_and_update() expects candle dict (not separate params)
             closed = self.position_monitor.check_and_update(candle=current_candle)
-            # ── MaiRuay v2 R2 arm — group closed trades by plan_id; if any plan
-            # closed with negative P&L AND has r1_capture, arm r1_info so the
-            # next signal_engine cycle retries as ไม้แก้ within 16 bars.
-            if closed:
-                from collections import defaultdict as _dd
-                _by_plan = _dd(list)
-                for _t in closed:
-                    _by_plan[_t.get('plan_id', '')].append(_t)
-                for _plan_id, _plan_trades in _by_plan.items():
-                    # Only consider fully-closed plans (all trades filled with WIN/LOSS).
-                    # If a multi-entry plan has pending limits left, skip — wait for next cycle.
-                    if not all(_t.get('result') in ('WIN', 'LOSS') for _t in _plan_trades):
-                        continue
-                    _plan_pnl = sum((_t.get('pnl_usd') or _t.get('pnl') or 0) for _t in _plan_trades)
-                    _r1_cap = next((_t.get('r1_capture') for _t in _plan_trades if _t.get('r1_capture')), None)
-                    if _plan_pnl < 0 and _r1_cap:
-                        self.mai_ruay_state = {'r1_info': _r1_cap}
-                        logger.info(
-                            f"[{_plan_id}] MaiRuay v2 R1 SL — armed r1_info "
-                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']}, pnl=${_plan_pnl:.2f})"
-                        )
-                    elif _plan_pnl > 0 and self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
-                        # WIN clears any pending R2 — no ไม้แก้ after a TP win.
-                        self.mai_ruay_state = {}
-            # MaiRuay v2 cancel-near-TP → cancel the MT5 pending order so the
-            # broker matches our in-memory CANCELLED state. Backtest skips
-            # this (PaperBroker has no native pending state to clean up).
-            if closed and self.broker is not None and hasattr(self.broker, 'cancel_pending_by_ticket'):
-                for _t in closed:
-                    if (_t.get('close_reason') in ('CANCEL_NEAR_TP', 'EXPIRED')
-                            and _t.get('broker_ticket')
-                            and (_t.get('pattern') or '').upper() in ('MAI_RUAY', 'MAI_RUAY_M1')):
-                        try:
-                            self.broker.cancel_pending_by_ticket(int(_t['broker_ticket']))
-                        except Exception as e:
-                            logger.warning(
-                                f"[{_t.get('trade_id')}] cancel_pending_by_ticket failed: {e}"
-                            )
-            if closed:
-                for t in closed:
-                    logger.info(
-                        f"✅ Position closed: {t['trade_id']} "
-                        f"{t['result']} pnl={t.get('pnl', 0):.2f} "
-                        f"reason={t.get('close_reason')} @ {t.get('close_price')}"
-                    )
-
-                    post_bot_event("plan_closed", f"{t['result']} {t.get('close_reason', '')}", {
-                        "plan_id": t.get('plan_id', ''),
-                        "trade_id": t.get('trade_id', ''),
-                        "action": t.get('action', ''),
-                        "result": t.get('result', ''),
-                        "close_reason": t.get('close_reason', ''),
-                        "close_price": t.get('close_price', 0),
-                        "pnl": t.get('pnl_usd', t.get('pnl', 0)),
-                        # api_server replaces the open_orders dict with this
-                        # event.data verbatim when moving to closed_orders, so
-                        # the Dashboard Positions panel needs entry/SL/TP/lot
-                        # here too — otherwise those columns go blank.
-                        "entry": t.get('entry_price', t.get('entry', 0)),
-                        "sl":    t.get('sl_price', t.get('sl', 0)),
-                        "tp":    t.get('tp_price', t.get('tp', 0)),
-                        "lot":   t.get('lot_size', t.get('lot', 0)),
-                        "pattern": (t.get('pattern') or t.get('chart_type') or '').upper(),
-                        "close_time": str(t.get('timestamp_close', '') or t.get('close_time', '')),
-                        "open_time": str(t.get('timestamp_open', '') or ''),
-                    })
-
-                    # Update LocalDB whenever it's available (backtest always; SIM/LIVE
-                    # only when running under api_server with a bot_id).
-                    if self.local_db:
-                        self.local_db.update_trade_result(
-                            trade_id=t['trade_id'],
-                            result=t['result'],
-                            pnl=t.get('pnl_usd', t.get('pnl', 0)),
-                            close_price=t.get('close_price', 0),
-                            close_time=t.get('timestamp_close', candle_time),
-                            close_reason=t.get('close_reason', ''),
-                            mae_pip=t.get('mae_pip'),
-                            mfe_pip=t.get('mfe_pip'),
-                        )
-
-                    # Notebook v4.2 stop_segments: on LOSS of a Scanner trade,
-                    # mark its segment so the detector blocks new entries in
-                    # that same trend segment until the trend resets.
-                    self._record_scanner_loss_segment(t)
-                    # Persist bot counters so a launcher restart doesn't reset
-                    # consecutive_loss / realized_pnl mid-session. Scanner state
-                    # (segment ids + stopped sets) goes into `extras` so the
-                    # stop_segments survives restart — otherwise a LOSS-stopped
-                    # downtrend would re-arm on reboot.
-                    if self.local_db and _BOT_ID:
-                        self.local_db.upsert_bot_state(_BOT_ID, {
-                            'consecutive_loss': self.portfolio_state_cache.get('consecutive_loss', 0),
-                            'total_loss_pct':   self.portfolio_state_cache.get('total_loss_pct', 0),
-                            'realized_pnl_usd': self.portfolio_state_cache.get('realized_pnl_usd', 0),
-                            'last_candle_time': str(candle_time) if candle_time else None,
-                            'extras': {'scanner_state': self.scanner_state} if self.scanner_state else {},
-                        })
+            # Route SL/TP/expiry/cancel closes through the shared downstream
+            # (broker-cancel + plan_closed + LocalDB + scanner stop + persist).
+            self._handle_closed_events(closed, candle_time)
         else:
             # Fallback to old monitor_positions for simulate mode
             self.monitor_positions(current_candle=current_candle)
@@ -827,8 +1125,19 @@ class TraiderMainLoop:
         # Step 0b: Daily/Weekly/Monthly triggers
         current_date = candle_time.date() if candle_time else datetime.now().date()
 
-        # Phase II: Reflector removed (not needed in backtest)
-        # Daily reflection skipped in Phase II
+        # Daily Reflector (Phase II — Python-only, $0): attach execution-quality
+        # summary to a daily report + WARN on behaviour change. Skipped in
+        # backtest (no real execution → nothing to characterise). Guarded so a
+        # summary failure never affects the trading loop.
+        if not self.is_backtest and should_run_daily(self.last_daily_date, current_date):
+            try:
+                _month_tag = f"{current_date:%Y-%m}"
+                _daily = build_daily_report(months=[_month_tag])
+                log_daily_report(_daily)
+                self.execution_report = _daily
+            except Exception as _e:
+                logger.warning(f"[Reflector] daily execution summary failed: {_e}")
+            self.last_daily_date = current_date
 
         # Weekly Strategist — รันทุก 7 วัน (analysis only)
         if self.weekly_strategist and should_run_weekly(self.last_weekly_date, current_date):
@@ -933,23 +1242,99 @@ class TraiderMainLoop:
 
                     break
 
+        # Weekend / market-reopen refresh (LIVE/SIM only): on the first bar after
+        # a weekend/session gap (≥ WEEKEND_GAP_RESET_HOURS), clear stale armed
+        # Mountain state + unfilled pending LIMITs so a Friday setup can't fire
+        # into the Sunday reopen. FILLED and half-filled plans are preserved.
+        # Runs BEFORE the signal engine so the week starts from a clean
+        # mountain_state. Guarded so a failure never breaks the loop.
+        if not self.is_backtest:
+            try:
+                self._weekend_refresh_if_gap(candle_time, portfolio_state)
+            except Exception as e:
+                logger.error(f"weekend refresh failed (continuing): {e}")
+
+        # Live/SIM: faithful cancel-near-TP for MaiRuay v2 pending LIMITs,
+        # driven by the LAST CLOSED bar. Backtest runs this inside
+        # _process_pending_limit(); live skips that pipeline (MT5 owns fills),
+        # so without this a MaiRuay LIMIT that drifts within 5%R55 of TP before
+        # touching entry would sit pending until the 5-bar expiry — diverging
+        # from the validated golden. Backtest is untouched (guarded).
+        if not self.is_backtest and candles_by_tf:
+            try:
+                _active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
+                self._cancel_near_tp_live(candles_by_tf, _active_tf, candle_time)
+            except Exception as e:
+                logger.error(f"live cancel-near-TP failed (continuing): {e}")
+
+        # Refresh the lot-base notional from config each cycle so the Settings
+        # page can change it live (config global_settings.lot_base_portfolio)
+        # without a bot restart. Falls back to env / ACCOUNT_BALANCE.
+        _new_lot_base = resolve_lot_base_portfolio(self.balance)
+        if abs(_new_lot_base - self.lot_base_portfolio) > 1e-9:
+            logger.info(f"Lot base updated: ${self.lot_base_portfolio:,.2f} → ${_new_lot_base:,.2f}")
+            self.lot_base_portfolio = _new_lot_base
+
         # Step 2: Signal Engine (replaces G1 Pattern Detection)
         active_tf = os.getenv('BACKTEST_TIMEFRAME', 'M5').upper()
         logger.info(f"\n[STEP 2] Signal Engine ({active_tf} Single TF)...")
+
+        # Mountain v3: feed the core its live pendings/positions so the adapter's
+        # _manage_armed can cancel on repeak/base_change/expiry. pending = unfilled
+        # Mountain LIMITs (by entry_label tag); positions = FILLED Mountain LIMITs
+        # (report their CORE plan-id, parsed from the tag mountain:tech#<corepid>:<k>,
+        # since the core matches ints, not the live PT-/RT- plan_id string).
+        if not isinstance(self.mountain_state, dict):
+            self.mountain_state = {}
+        _mtn_pending, _mtn_pos_pids = [], []
+        for _o in self.position_monitor.open_orders:
+            if (_o.get('pattern') or '').upper() != 'MOUNTAIN' or _o.get('result') != 'PENDING':
+                continue
+            _lbl = _o.get('entry_label') or ''
+            if _o.get('filled', True):
+                try:
+                    _mtn_pos_pids.append(int(str(_lbl).split('#', 1)[1].split(':', 1)[0]))
+                except (IndexError, ValueError):
+                    pass
+            elif _lbl:
+                _mtn_pending.append(_lbl)
+        self.mountain_state['_live'] = {'pending_tags': _mtn_pending, 'position_plan_ids': _mtn_pos_pids}
+
         world_state = run_signal_engine(
             candles_by_tf=candles_by_tf,
-            portfolio=self.balance,
+            portfolio=self.lot_base_portfolio,   # lot budget base (fixed, UI-editable) — not broker equity
             mountain_state=self.mountain_state,
             scanner_state=self.scanner_state,
-            mai_ruay_state=self.mai_ruay_state,
         )
 
         # Update state from Signal Engine output (mutated in place by detectors)
+        _mtn_cancel = list((self.mountain_state or {}).get('_cancel') or []) \
+            if isinstance(self.mountain_state, dict) else []
         self.mountain_state = world_state.get('mountain_state')
         self.scanner_state = world_state.get('scanner_state')
-        # MaiRuay v2 r1_info — signal_engine drops it after R2 fires (no R3) or
-        # after 16 bars expire; we mirror the latest value here for next cycle.
-        self.mai_ruay_state = world_state.get('mai_ruay_state') or {}
+
+        # Mountain v3 core-cancels (repeak/base_change/expiry): cancel the matching
+        # pending LIMITs NOW via the shared close path (broker cancel + plan_closed +
+        # DB; the per-cycle active_plans_by_pattern cleanup frees the slot). Immediate
+        # (same cycle) so the limit can't fill in the intervening bar.
+        if _mtn_cancel:
+            _ct_iso = candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time or '')
+            _cancel_events = []
+            for _o in self.position_monitor.open_orders:
+                if (_o.get('entry_label') in _mtn_cancel
+                        and (_o.get('pattern') or '').upper() == 'MOUNTAIN'
+                        and _o.get('result') == 'PENDING' and not _o.get('filled', True)):
+                    _o['result'] = 'CANCELLED'
+                    _o['filled'] = False
+                    _o['close_reason'] = 'CANCEL_MOUNTAIN'
+                    _o['close_price'] = _o.get('entry_price', _o.get('entry', 0))
+                    _o['pnl_usd'] = 0.0
+                    _o['timestamp_close'] = _ct_iso
+                    _cancel_events.append(_o)
+            if _cancel_events:
+                logger.info(f"Mountain v3: cancelling {len(_cancel_events)} pending "
+                            f"(repeak/base_change/expiry)")
+                self._handle_closed_events(_cancel_events, candle_time)
 
         # Update latest_candle for dashboard chart
         if current_candle and candle_time:
@@ -992,6 +1377,8 @@ class TraiderMainLoop:
             "signal_rr": round(signal_obj.rr, 2) if signal_obj else None,
             "active_plan": (portfolio_state or {}).get('active_plan_id'),
             "balance": self.balance,
+            # lot-base notional lot sizing currently uses (UI-editable, fixed)
+            "lot_base_portfolio": self.lot_base_portfolio,
         })
 
         if chart_type_hb == 'unclear':
@@ -1063,9 +1450,6 @@ class TraiderMainLoop:
             'confidence': 1.0,  # Signal Engine is deterministic
             'setup': signal.pattern.lower() if hasattr(signal, 'pattern') else 'unknown',
             'skip_reason': None,
-            # MaiRuay v2 R2 flag — G3 uses this to bypass consecutive_loss limit
-            # so the ไม้แก้ retry can fire within 16 bars of the R1 SL.
-            'is_round2': bool(getattr(signal, 'is_round2', False)),
         }
 
         # llm_log kept for Sheets/LocalDB schema compatibility — always $0/no tokens.
@@ -1127,9 +1511,9 @@ class TraiderMainLoop:
         sig_order_type = sig_details.get('order_type', 'MARKET')
 
         # ── Multi-entry vs single-entry ──────────────────────────────────
-        # MaiRuay v2 produces signal.entries = [3 EntryPoint objects], each
-        # with its own price/lot/is_market/tp. Mountain + Scanner + MaiRuay v1
-        # produce signal.entries = None → single order path (1 plan = 1 order).
+        # MaiRuay v2 and Mountain v3 produce signal.entries = [EntryPoint...],
+        # each with its own price/lot/is_market/tp (Mountain = BUY LIMIT legs).
+        # Scanner produces signal.entries = None → single order path.
         sig_entries = getattr(signal, 'entries', None)
         if sig_entries:
             orders_list = []
@@ -1190,42 +1574,48 @@ class TraiderMainLoop:
         else:
             id_mode = 'simulate'
 
-        # MaiRuay v2 live mode uses a synthetic child bar so the engine
-        # detects the pattern at "mother close = child start" instead of
-        # waiting another full bar. signal_engine stamps the synthetic
-        # candle's timestamp on signal.details when it does this. Without
-        # the override below, candle_time would still be the LAST REAL bar's
-        # timestamp (= mother START), making timestamp_open shift back 1
-        # bar in the dashboard ("เข้าไปเปิดแท่งแม่"). Override to the
-        # synthetic time = child start = mother close moment.
-        _sig_for_synth = world_state.get('signal') if world_state else None
-        _synth_ct = None
-        if _sig_for_synth is not None:
-            _det = getattr(_sig_for_synth, 'details', None) or {}
-            _synth_ct = _det.get('synthetic_candle_time')
-        if _synth_ct:
-            try:
-                from dateutil import parser as _dtp_main
-                _orig_ct = candle_time
-                candle_time = _dtp_main.parse(str(_synth_ct))
-                logger.info(
-                    f"  ↳ MaiRuay synthetic candle_time override: "
-                    f"{_orig_ct} → {candle_time}"
-                )
-            except Exception as _e:
-                logger.warning(f"  ↳ synthetic candle_time parse failed ({_e}); keeping original")
-
-        plan_id = generate_plan_id(candle_time=candle_time, mode=id_mode)
-
-        # Mountain trailing metadata — attach signal.details to orders for 3-stage trailing
-        # MAI_RUAY / others: trail_meta = None → position_monitor skips trailing (per user spec)
         signal = world_state.get('signal')
-        is_mountain = signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN'
+
+        # ── Pattern-aware OPEN stamp (plan_id / trade_id / timestamp_open) ──
+        # The cycle-level `candle_time` is taken from the FORMING bar
+        # (candles[-1]) because position monitoring needs the current bar. But
+        # Mountain's core analyses the last CLOSED bar (signal_engine feeds it
+        # ohlc_bars[:-1] in live), so stamping a Mountain plan with candle_time
+        # records the entry ONE bar (one TF) AHEAD of the bar the core placed
+        # on — the user's "22:05 vs 22:00" report. Re-anchor Mountain's stamp
+        # to the core's real signal bar, surfaced by the adapter as
+        # details['signal_bar_time'] = the closed bar time. Only the OPEN stamp
+        # moves; `candle_time` (monitoring, close events) is untouched.
+        #   • MaiRuay keeps candle_time — its engine deliberately treats the
+        #     forming bar as the entry/child bar (flat synth, see signal_engine).
+        #   • Backtest passes closed bars only → signal_bar_time == candle_time,
+        #     so this is a no-op there (guarded by `not self.is_backtest`).
+        stamp_time = candle_time
+        if (signal is not None
+                and getattr(signal, 'pattern', '') == 'MOUNTAIN'
+                and not self.is_backtest):
+            _sbt = (getattr(signal, 'details', None) or {}).get('signal_bar_time')
+            if _sbt:
+                try:
+                    from dateutil import parser as _sbt_parser
+                    stamp_time = _sbt_parser.parse(_sbt) if isinstance(_sbt, str) else _sbt
+                    logger.info(
+                        f"Mountain open-stamp re-anchored to signal bar {stamp_time.isoformat()} "
+                        f"(was forming-bar candle_time {candle_time.isoformat() if hasattr(candle_time, 'isoformat') else candle_time})"
+                    )
+                except (ValueError, TypeError) as _sbt_err:
+                    logger.warning(
+                        f"Mountain signal_bar_time parse failed ({_sbt!r}: {_sbt_err}) — "
+                        f"falling back to candle_time"
+                    )
+                    stamp_time = candle_time
+
+        plan_id = generate_plan_id(candle_time=stamp_time, mode=id_mode)
 
         # Generate trade IDs for each order and set initial state
         orders_with_ids = []
         # Pre-compute the open timestamp once. We store the SAME value the
-        # DB row gets (candle_time.isoformat() or now()) so that when the
+        # DB row gets (stamp_time.isoformat() or now()) so that when the
         # plan_closed event fires later and reads `order['timestamp_open']`,
         # it matches what's in the DB row and the Dashboard "Open Time"
         # column populates. Previously this field was only set on the DB
@@ -1237,12 +1627,12 @@ class TraiderMainLoop:
         # this regression multiple times — root cause was the missing
         # attachment here, NOT in the close path.
         _open_ts_iso = (
-            candle_time.isoformat()
-            if hasattr(candle_time, 'isoformat')
-            else (str(candle_time) if candle_time else datetime.now().isoformat())
+            stamp_time.isoformat()
+            if hasattr(stamp_time, 'isoformat')
+            else (str(stamp_time) if stamp_time else datetime.now().isoformat())
         )
         for order in plan['orders']:
-            order['trade_id'] = generate_trade_id(plan_id, order['order_num'], candle_time=candle_time, mode=id_mode)
+            order['trade_id'] = generate_trade_id(plan_id, order['order_num'], candle_time=stamp_time, mode=id_mode)
             order['plan_id'] = plan_id  # Required for portfolio state updates
             order['result'] = 'PENDING'  # Required for PositionMonitor
             order['entry_price'] = order['entry']  # Alias for compatibility
@@ -1305,40 +1695,17 @@ class TraiderMainLoop:
                     order['filled'] = False
                     order['pending_bars'] = int(_sig_details_for_order.get('pending_bars', 5))
                     order['tp_cancel_buffer_pips'] = float(_sig_details_for_order.get('tp_cancel_buffer_pips', 0.0))
-            # Attach trail_meta — Mountain only. Each order gets its own dict so stage tracks per-order.
-            if is_mountain:
-                d = signal.details or {}
-                order['trail_meta'] = {
-                    'stage':      0,
-                    'tp1':        float(d.get('tp1') or 0),
-                    'tp2_base':   float(d.get('tp2_base') or d.get('tp2') or 0),
-                    'tech_point': float(d.get('tech_point') or d.get('base_lo') or 0),
-                    'height':     float(d.get('height') or 0),  # pip
-                }
-            # MaiRuay v2 R2 prep: capture the info needed to retry as ไม้แก้
-            # if THIS plan ends in LOSS. signal_engine consumes r1_info on the
-            # next cycle to call find_signal(..., round2_info=r1_info).
-            # signal.is_round2 means we're ALREADY R2 — don't capture again
-            # (no R3 allowed by notebook spec). R2 logic only applies to the
-            # M1 variant (Karpathy has no R2).
-            if (order['pattern'] == 'MAI_RUAY_M1'
-                    and not bool(getattr(signal, 'is_round2', False))):
-                d = signal.details or {}
-                _fs = d.get('father_start')
-                # bars in world_state are 0-indexed; entry_bar = bar_idx (= last bar = mother_idx + 1)
-                # Use len(candles)-1 as bar_idx since signal was just produced at last bar.
-                _last_idx = len(candles_by_tf.get(active_tf, [])) - 1
-                # Pull the father's open price (R1) from the OHLC list — needed
-                # for the "father_combined" TP/SL calc in the R2 analyzer.
-                _f_open_r1 = 0.0
-                if _fs is not None and 0 <= _fs < len(candles_by_tf.get(active_tf, [])):
-                    _f_open_r1 = float(candles_by_tf[active_tf][_fs].get('open', 0.0))
-                order['r1_capture'] = {
-                    'tech':       float(d.get('tech_point', 0.0)),
-                    'f_open_r1':  _f_open_r1,
-                    'entry_bar':  _last_idx,
-                    'direction':  signal.direction,
-                }
+            # Mountain v3: LIMIT at base_lo+5%H — track as PENDING so the monitor
+            # fills it when price touches (not an instant position) and auto-expires
+            # at pending_bars. No TP-proximity cancel (tp_cancel_buffer_pips=0);
+            # repeak/base_change/expiry cancels come from the core via
+            # mountain_state['_cancel'] (routed in Step 0/2). No trailing.
+            elif (order['pattern'] == 'MOUNTAIN'
+                    and order.get('order_type', '').upper() == 'LIMIT'):
+                _mtn_details = getattr(signal, 'details', None) or {}
+                order['filled'] = False
+                order['pending_bars'] = int(_mtn_details.get('pending_bars', 5))
+                order['tp_cancel_buffer_pips'] = 0.0
             orders_with_ids.append(order)
 
         # Prepare decision for Sheets (add 'technique' field from signal.pattern)
@@ -1374,11 +1741,9 @@ class TraiderMainLoop:
         # and blocked future Mountain/MaiRuay signals.
         if self.broker is not None:
             logger.info(f"\n[Broker] Executing {len(orders_with_ids)} order(s)...")
-            trail_meta = None
-            if signal and getattr(signal, 'pattern', '').upper() == 'MOUNTAIN':
-                trail_meta = getattr(signal, 'details', None) or {}
+            trail_meta = None   # Mountain v3 has no trailing (removed 3-stage)
             # MaiRuay v2 LIMIT extras — broker uses these to expire / cancel
-            # pending limits per the notebook spec (5 bars, cancel within 10%R55
+            # pending limits per the notebook spec (5 bars, cancel within 5%R55
             # of TP). Mountain/Scanner do not set these → broker uses defaults.
             _sig_details = getattr(signal, 'details', None) or {}
             _pending_bars = int(_sig_details.get('pending_bars', 5))
@@ -1401,7 +1766,7 @@ class TraiderMainLoop:
                 )
                 # Only pass pending kwargs to PaperBroker (MT5 broker handles
                 # expiration server-side via order_send expiration field).
-                if _ot == 'LIMIT' and order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1'):
+                if _ot == 'LIMIT' and order['pattern'] in ('MAI_RUAY', 'MAI_RUAY_M1', 'MOUNTAIN'):
                     try:
                         _open_kwargs['pending_bars'] = _pending_bars
                         _open_kwargs['tp_cancel_buffer_pips'] = _tp_cancel_buf
@@ -1504,12 +1869,12 @@ class TraiderMainLoop:
                 self.sheets_logger.log_plan_open,
                 plan_id, orders_with_ids, decision_for_sheets,
                 world_state, llm_log,
-                candle_time=candle_time,
+                candle_time=stamp_time,
             )
         else:
             self.sheets_logger.log_plan_open(
                 plan_id, orders_with_ids, decision_for_sheets,
-                world_state, llm_log, candle_time=candle_time,
+                world_state, llm_log, candle_time=stamp_time,
             )
 
         # Log to LocalDB whenever it's available (backtest always; SIM/LIVE only
@@ -1537,7 +1902,11 @@ class TraiderMainLoop:
                     'bot_id': _BOT_ID or None,
                     'plan_id': plan_id,
                     'order_num': order.get('order_num', 1),
-                    'timestamp_open': candle_time.isoformat() if candle_time else datetime.now().isoformat(),
+                    # Use the per-order open stamp set above (= stamp_time:
+                    # Mountain→signal bar, others→candle_time) so the DB row,
+                    # the in-memory order, and plan_id all agree. Falls back to
+                    # candle_time only if the attach step was skipped.
+                    'timestamp_open': order.get('timestamp_open') or (candle_time.isoformat() if candle_time else datetime.now().isoformat()),
                     'timeframe': world_state.get('selected_tf', 'M5'),
                     'chart_type': world_state.get('chart_type', ''),
                     'technique': decision_for_sheets.get('technique', ''),
@@ -2196,23 +2565,8 @@ class TraiderMainLoop:
                                 logger.info(f"[{plan_id}] Plan fully closed: {plan_result} (P&L: ${plan_pnl:.2f})")
                                 if plan_result == 'LOSS':
                                     portfolio_state['consecutive_loss'] = portfolio_state.get('consecutive_loss', 0) + 1
-                                    # MaiRuay v2 R2 capture: if this plan was MaiRuay R1, save r1_info
-                                    # so signal_engine can retry as ไม้แก้ within the next 16 bars.
-                                    _r1_cap = next(
-                                        (o.get('r1_capture') for o in filled if o.get('r1_capture')),
-                                        None,
-                                    )
-                                    if _r1_cap:
-                                        self.mai_ruay_state = {'r1_info': _r1_cap}
-                                        logger.info(
-                                            f"[{plan_id}] MaiRuay v2 R1 SL — armed r1_info "
-                                            f"(dir={_r1_cap['direction']}, entry_bar={_r1_cap['entry_bar']})"
-                                        )
                                 else:
                                     portfolio_state['consecutive_loss'] = 0
-                                    # WIN clears any pending R2 — no ไม้แก้ after a TP win.
-                                    if self.mai_ruay_state and self.mai_ruay_state.get('r1_info'):
-                                        self.mai_ruay_state = {}
                                 portfolio_state['realized_pnl_usd'] = portfolio_state.get('realized_pnl_usd', 0) + plan_pnl
 
                             self.sheets_logger.update_portfolio_state(portfolio_state)

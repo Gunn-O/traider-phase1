@@ -1,0 +1,52 @@
+# ============================================================================
+# configs/mountain_v3_default.yaml
+# ----------------------------------------------------------------------------
+# ภูเขา v3 (clean) — config เริ่มต้น · สเปก: docs/MOUNTAIN_V3_CLEAN_SPEC.md
+# โครง flat (key เปล่า ตามตาราง §Config) · 7 กลุ่ม (จัดหมวดใน console ผ่าน field_labels)
+# หน่วย: ค่า _pct เป็นเปอร์เซ็นต์ (strategy หาร 100 ตอนใช้เป็นตัวคูณ) · ทิศ BUY อย่างเดียว
+#
+# *** STAGE 1: strategy อ่านเฉพาะ กลุ่ม 1-5 (แกน+ฟิลเตอร์) — กลุ่ม 6-7 (entry/TP-SL)
+#     ยังไม่ถูกใช้ (วาง order ใน stage ถัดไป) แต่ใส่ครบตามสเปกไว้แล้ว ***
+# ============================================================================
+strategy: mountain_v3            # tag จับคู่ strategy↔config ใน console
+
+r55_bars: 55                     # หน้าต่างคำนวณ R55 (แท่ง) — ช่วงราคาอ้างอิงของทุกเงื่อนไข
+
+# ── กลุ่ม 1: ทั่วไป ──
+portfolio_start: 1000            # เงินทุนเริ่มต้น (USD) — source เดียวของ lot (ไม่ทบต้น)
+risk_per_plan_pct: 10            # ความเสี่ยงต่อแผน (% พอร์ต) — budget = พอร์ต × ค่านี้/100
+
+# ── กลุ่ม 2: แท่งคู่ (swing) ──
+pair_join_max_pip: 50            # จุดเชื่อมแท่งคู่: |close1 − open2| ≤ ค่านี้ (pip)
+pair_min_body_pct_r55: 1         # เนื้อขั้นต่ำของแต่ละแท่งในคู่ (%R55)
+thick_exc_pct_r55: 10            # แท่งหนา: body > ค่านี้ (%R55) → ตรวจเพื่อนบ้าน ซ้าย1+ขวา1 (แทน 3+2)
+
+# ── กลุ่ม 3: โครงภูเขา ──
+min_height_pct_r55: 50           # F1: ความสูง (peak_hi − base_lo) ≥ ค่านี้ (%R55) ถึงนับเป็นภูเขา
+min_mountain_bars: 10            # F4: ขนาดภูเขา X(ฐาน→ยอด)+Y(ยอด→entry) ≥ ค่านี้ (แท่ง)
+max_base_to_entry_bars: 42       # F6: ความยาว ฐาน→entry ≤ ค่านี้ (แท่ง)
+peak_lock_pct: 10                # ล็อกยอดเมื่อราคา retrace ลงมาแตะ base_lo + ค่านี้% × ความสูง (กัน W ลามลูก 2)
+
+# ── กลุ่ม 4: ฟิลเตอร์ขาขึ้น-ลง (F7) ── (แต่ละขาเช็คทั้งยอดย่อย SH + ก้นย่อย SL)
+upleg_check_min_bars: 10         # F7a: เช็คขาขึ้นเฉพาะถ้า ฐาน→ยอด เกินค่านี้ (แท่ง · >10 → ครอบ 11-12)
+upleg_max_count: 2               # F7a: SH+SL (ยอด+ก้นย่อย รวม) ช่วง ฐาน→ยอด เกินค่านี้ (จุด) → ขาขึ้นไม่สะอาด
+downleg_check_min_bars: 10       # F7b: เช็คขาลงเฉพาะถ้า ฐาน→C เกินค่านี้ (แท่ง · >10 → ครอบ 11-12)
+downleg_max_count: 2             # F7b: SH หรือ SL (ยอด/ก้นย่อย) ช่วง ยอด→C เกินค่านี้ (จุด) → ขาลงไม่สะอาด
+
+# ── กลุ่ม 5: กลยุทธ entry ──
+pending_expiry_bars: 5           # limit หมดอายุหลังวางครบกี่แท่ง → ยก (แต่ละ leg นับเอง)
+entries:                         # หลายไม้ · offset จาก base_lo (%ความสูงภูเขา) · TP/SL = base (ด้านล่าง) ± per-leg adj
+  # leg: { offset_pct_height: N } → price = base_lo + N% × ความสูง
+  #   +N = เหนือ base_lo (แพง · fill ก่อน · R:R แย่กว่า) · 0 = base_lo เป๊ะ · −N = ใต้ base_lo (ถูก · ได้เปรียบ)
+  #   per-leg adjust (optional · %ความสูง · ไม่ใส่ = no-op ใช้ base): เพิ่มในไม้ที่ต้องการ เช่น
+  #     { offset_pct_height: -10, tp_adj: 10, sl_adj: -5, adj_on: true }
+  #     tp_adj +→TP ไกลขึ้น · sl_adj +→SL ไกลขึ้น/−→ใกล้ · adj_on:false = ปิด adjust ไม้นั้น (ใช้ base)
+  #   nested → แก้ผ่าน Raw YAML mode ใน console (form generate เฉพาะ scalar)
+- when:
+    height_min_pct_r55: 50
+  legs:
+  - offset_pct_height: 5
+    adj_on: false
+tp_pct_height: 40                # TP = base_lo + ค่านี้% × ความสูง
+sl_pct_height: 35                # SL = base_lo − ค่านี้% × ความสูง
+min_tp_pip: 200                  # ระยะ TP ขั้นต่ำ (pip)

@@ -15,6 +15,7 @@ import Proposals from './pages/Proposals'
 import Settings from './pages/Settings'
 import Backtest from './pages/Backtest'
 import Strategy from './pages/Strategy'
+import ExecutionQuality from './pages/ExecutionQuality'
 
 export default function App() {
   // Multi-bot state (primary) + legacy single-bot state for un-migrated pages.
@@ -56,6 +57,7 @@ export default function App() {
             <Route path="/strategy" element={<Strategy />} />
             <Route path="/backtest" element={<Backtest />} />
             <Route path="/history" element={<TradeHistory />} />
+            <Route path="/execution" element={<ExecutionQuality />} />
             <Route path="/alerts" element={<Alerts bots={bots} />} />
             <Route path="/proposals" element={<Proposals botState={botState} />} />
             <Route path="/settings" element={<Settings botState={botState} />} />

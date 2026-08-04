@@ -1,4 +1,9 @@
 """
+⛔ DEPRECATED — tests the OLD V2.04 engine (SL 40% / TP 45% / TP30-SL45 / Round 2 /
+   3-entry split), all removed in the MaiRuay-v2 rewrite. Superseded by the geometry
+   parity gate scripts/parity_mairuay_v2.py (vs reference/mai_ruay_v2_snapshot/).
+   Kept for reference; do not run against the current strategies/mai_ruay.py.
+
 Smoke test สำหรับ strategies/mai_ruay.py (v2.04 engine)
 
 ตรวจสอบว่า engine v2.04 ทำงานครบ logic + ไม่ crash บน CSV M1 จริง:

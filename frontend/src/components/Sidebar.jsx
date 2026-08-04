@@ -13,6 +13,7 @@ const NAV = [
     { path: '/strategy', label: 'Strategy', th: 'กลยุทธ์', icon: I.layers },
     { path: '/backtest', label: 'Backtest', th: 'ทดสอบย้อนหลัง', icon: I.flask },
     { path: '/history', label: 'Trade History', th: 'ประวัติเทรด', icon: I.history },
+    { path: '/execution', label: 'Execution', th: 'คุณภาพการยิง', icon: I.bolt },
   ] },
   { section: 'SYSTEM · ระบบ', items: [
     { path: '/alerts', label: 'Alert Center', th: 'แจ้งเตือน', icon: I.bell, countKey: 'alerts' },
@@ -45,6 +46,10 @@ export default function Sidebar({ account, isConnected, counts = {} }) {
           {floating != null && <> · <span className={floating >= 0 ? 'pos' : 'neg'}>{FMT.signed(floating)}</span></>}
         </div>
         <div className="sa-meter"><div className="sa-meter-fill" style={{ width: `${meterPct}%` }} /></div>
+        <div className="sa-row" style={{ marginTop: 8 }} title="Lots are sized from this fixed notional, not live equity">
+          <span className="label-dim">LOT BASE · ทุนคิดล็อต</span>
+          <span className="mono">{account?.lotBase != null ? FMT.usd(account.lotBase) : '—'}</span>
+        </div>
       </div>
 
       <nav className="nav">

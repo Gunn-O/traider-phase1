@@ -49,6 +49,19 @@ RISK_CONFIG = {
 
 
 # ============================================================================
+# EXECUTION QUALITY LOGGER (Phase II)
+# ============================================================================
+# Records execution quality (slippage / rejection / fill-time / spread) to
+# monthly JSONL under EXECUTION_LOG_DIR, separate from the trade log. Builds a
+# broker-behaviour baseline (B-book → A-book detection). Read via os.getenv at
+# point-of-use inside agents/g4_execution_logger.py (dotenv loaded in main.py);
+# these constants mirror the defaults for other consumers / documentation.
+import os as _os_exec
+EXECUTION_LOG_ENABLED = _os_exec.getenv('EXECUTION_LOG_ENABLED', 'true').strip().lower() == 'true'
+EXECUTION_LOG_DIR = _os_exec.getenv('EXECUTION_LOG_DIR', 'logs/execution')
+
+
+# ============================================================================
 # LOT CALCULATION
 # ============================================================================
 

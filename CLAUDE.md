@@ -6,6 +6,53 @@
 
 ---
 
+## 🆕 MaiRuay v2 Engine Swap (2026-06-25)
+
+**MaiRuay = ตัวเดียว = v2** (`MAI_RUAY_M1` → `strategies/mai_ruay.py`). เดิมมี 2 variants
+(V2.04 + Karpathy) — **ตัดทิ้งทั้งคู่แล้ว**.
+
+- **Source of truth = `reference/mai_ruay_v2_snapshot/`** (validated engine `bt/strategies/mai_ruay_v2.py`
+  + `configs/mairuay_v2_1entry_con360-510.yaml`) — **ไม่ใช่** notebook เดิม. ห้ามแก้ไฟล์ใน `reference/`.
+- **Golden:** 177 ไม้ · WR 44.07% · net +24490.8 pip · พอร์ต 1000→8373.94.
+- **Gate = geometry parity** (ไม่ใช่ byte-identical): `python scripts/parity_mairuay_v2.py` ต้อง PASS
+  (336/336 signals: direction/kind/entry/sl/tp identical, lot ตรงที่ portfolio=1000).
+  Live-path contract smoke: `python scripts/smoke_mairuay_v2_pipeline.py`.
+- **v2 = config-driven:** tier ใน YAML · TP/SL = %คงที่ของพ่อ จาก tech_point · LIMIT ที่ tech ·
+  min_tp 200 · pending 5 แท่ง · proximity-cancel **5%R55** (เดิม 10%) · lot = equal_risk จาก
+  `portfolio` arg = **lot-base portfolio** (env `LOT_BASE_PORTFOLIO`, default `ACCOUNT_BALANCE`;
+  ค่าคงที่ที่ operator ตั้ง — **ไม่ใช่** broker equity จริง). parity/backtest ใช้ 1000. `WINRATE_TEST=true` → 0.01.
+- **ตัดทิ้ง (v2 ไม่มี):** Round 2 (ไม้แก้) · lot ×2/÷2 · TP30-SL45 special · buffer · obstacle scanner ·
+  3-entry split lot/3 · แม่เทียบ %พ่อ (v2 เทียบ %R55). Wiring R2 ถูกลบจาก signal_engine/main/g2/g3.
+  `strategies/mai_ruay_karpathy.py` ย้ายไป `legacy/`.
+
+**หมายเหตุ:** ตาราง/checklist MaiRuay ด้านล่างที่อ้าง V2.04/Karpathy/R2 = **ประวัติศาสตร์** — ยึด v2 snapshot เป็นหลัก.
+
+---
+
+## 🆕 Mountain v3 Engine Swap (2026-07-06)
+
+**Mountain = v3** (`MOUNTAIN` → `strategies/mountain.py` adapter → `strategies/mountain_v3_core.py`).
+เดิมคือ Mountain v4.45/v67 (trailing 3-stage) — **ตัดทิ้ง trailing แล้ว** (ปิดที่ SL/TP ตายตัว).
+
+- **Source of truth = `reference/mountain_v3_snapshot/`** (validated engine `bt/strategies/mountain_v3.py`
+  + 2 configs). ห้ามแก้ไฟล์ใน `reference/`.
+- **Golden (M1, 2 config):** `mountain_v3_tpsl` 194/62.37%/+21745.8/→5675.77 (R:R 1.0) ·
+  `mountain_v3_tpsl_rr85` 181/66.30%/+19953.9/→5280.46 (R:R 0.85).
+- **Gate = byte-identical** (แข็งกว่า MaiRuay): `python scripts/parity_mountain_v3.py` รัน repo core
+  ใน snapshot engine → 5 ไฟล์ identical ทั้ง 2 config. Adapter faithfulness:
+  `python scripts/verify_mountain_v3_adapter.py` (placements ตรง golden 222/205).
+- **v3 = config-driven:** BUY only · swing ฐาน+ยอด → ล็อกยอดที่ base_lo+10%H (C) → F1/F4/F6/F7a/F7b/F8 +
+  valid@C → LIMIT ที่ base_lo+5%H · TP/SL = %คงที่ของความสูง · min_tp 200 · pending 5 แท่ง ·
+  cancel เมื่อ repeak/base_change/expiry · lot = equal_risk จาก `portfolio` (live = lot-base; parity = 1000).
+- **แชร์ `strategies/_util.py` กับ MaiRuay v2** (scan_swings/_calc_r55/_compute_lots/_round_lot/_body_pips).
+- **Per-TF config:** M1 → tpsl (R:R 1.0) · M5 → rr85 (R:R 0.85). R55 anchor **ที่ bar i** (ต่างจาก MaiRuay ที่ i-1).
+- **ตัดทิ้ง:** trailing 3-stage (TP1/TP2/TP2+20%H) · zone 30% · force-close. `strategies/mountain.py` เดิม → `legacy/`.
+- **Live adapter (Option C):** ขับ core บน sliding window · persist core state ใน `mountain_state`
+  keyed by bar-time · `mountain_state['_live']` = pending/position tags (main.py ป้อน) ·
+  `mountain_state['_cancel']` = tags ที่ core สั่งยก (main.py route ไป cancel channel).
+
+---
+
 ## ⚠️ ไฟล์ที่ใช้งาน (Phase II)
 
 ### 🎯 Strategy Reference Notebooks (Source of Truth — 3 ไฟล์)

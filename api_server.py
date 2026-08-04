@@ -1113,10 +1113,18 @@ def _load_trades_from_db(
     return all_rows
 
 
-def _compute_trade_stats(trades: List[dict], initial_balance: float = 1000.0) -> dict:
+def _compute_trade_stats(trades: List[dict], initial_balance: Optional[float] = None) -> dict:
     """Aggregate stats over normalized trades.
     Equity curve uses cumulative pnl_usd starting from initial_balance.
-    Drawdown is computed against the running peak of that curve."""
+    Drawdown is computed against the running peak of that curve.
+
+    initial_balance defaults to the effective lot-base portfolio (the notional
+    the bot sizes lots from) so the reporting baseline scales WITH lot sizing:
+    lot ∝ portfolio and pnl_usd ∝ lot, so PnL%/drawdown% stay meaningful when
+    the operator changes lot_base_portfolio. Was hardcoded 1000 while pnl_usd is
+    sized on a 10× base → every %-stat was inflated 10×."""
+    if initial_balance is None:
+        initial_balance = _effective_lot_base()[0]
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     wins   = [t for t in closed if t["result"] == "WIN"]
     losses = [t for t in closed if t["result"] == "LOSS"]
@@ -1243,12 +1251,79 @@ async def trade_stats(
     mode:      Optional[str] = "all",
     pattern:   Optional[str] = "all",
     bot_id:    Optional[str] = None,
-    initial_balance: float = 1000.0,
+    initial_balance: Optional[float] = None,
 ):
-    """Aggregate analytics for TradeHistory.jsx. Same filters as /api/trades."""
+    """Aggregate analytics for TradeHistory.jsx. Same filters as /api/trades.
+    initial_balance omitted → derives from the effective lot-base portfolio
+    (config global_settings.lot_base_portfolio → env → ACCOUNT_BALANCE) so the
+    reporting baseline tracks lot sizing; pass an explicit value to override."""
     trades = _load_trades_from_db(from_date, to_date, mode, pattern, bot_id)
     stats = _compute_trade_stats(trades, initial_balance=initial_balance)
     return stats
+
+
+@app.get("/api/execution/summary")
+async def execution_summary(months: Optional[str] = None):
+    """Execution-quality summary for ExecutionQuality.jsx.
+
+    ?months=YYYY-MM,YYYY-MM → filter; omit = all months.
+    Adds "available_months" (from log files) so the frontend can build a
+    month dropdown. Never 500s on a missing log dir — summarize()/
+    list_available_months() both return safe empty structures.
+    """
+    from agents.g4_execution_logger import summarize, list_available_months
+    month_list = None
+    if months:
+        month_list = [m.strip() for m in months.split(",") if m.strip()]
+    summary = summarize(months=month_list)
+    summary["available_months"] = list_available_months()
+    return summary
+
+
+@app.get("/api/execution/records")
+async def execution_records(
+    month: Optional[str] = None,
+    limit: int = 200,
+    event: Optional[str] = None,
+):
+    """Raw execution records for the table. Reads the month's JSONL directly
+    from EXECUTION_LOG_DIR (files are tiny — no in-memory cache). Returns the
+    newest records first. Tolerant parse: a corrupt line is skipped, never
+    fails the whole response. Missing file → empty list, not 500.
+
+    ?month=YYYY-MM (default: current month) &limit=200 &event=order_send|close|paper_signal
+    """
+    log_dir = os.getenv("EXECUTION_LOG_DIR", "logs/execution")
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
+
+    path = Path(log_dir) / f"exec_{month}.jsonl"
+    records: List[dict] = []
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue  # tolerant: skip corrupt line
+                    if event and rec.get("event") != event:
+                        continue
+                    records.append(rec)
+        except Exception as e:
+            logger.warning(f"execution_records read failed for {path}: {e}")
+            records = []
+
+    # Newest first, then cap to limit.
+    records.reverse()
+    if limit and len(records) > limit:
+        records = records[:limit]
+
+    return {"month": month, "event": event or "all",
+            "count": len(records), "records": records}
 
 
 @app.get("/api/proposals")
@@ -1481,6 +1556,11 @@ async def mt5_status():
 
     sym_name = bot_state.get("symbol", "XAUUSDc")
     out = {"connected": False, "terminal": None, "account": None, "symbol": None, "error": None}
+    # Lot-base notional the bot sizes lots from (fixed, UI-editable — NOT equity).
+    # Present on every return path so the UI can always show "sizing lots from $X".
+    _lb_val, _lb_src = _effective_lot_base()
+    out["lot_base_portfolio"] = _lb_val
+    out["lot_base_source"] = _lb_src
 
     try:
         # Initialize if not already (idempotent — returns True if already connected)
@@ -1686,7 +1766,9 @@ async def get_backtest_results():
             "summary":      db.get_summary(),
             "by_pattern":   db.get_summary_by_pattern(),
             "trades":       db.get_all_trades()[-100:],
-            "equity_curve": db.get_equity_curve(initial_balance=1000.0),
+            # Baseline = effective lot-base portfolio (not a hardcoded 1000) so
+            # the equity curve seeds from the same notional lots are sized on.
+            "equity_curve": db.get_equity_curve(initial_balance=_effective_lot_base()[0]),
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -1812,6 +1894,69 @@ async def update_strategies(request: Request):
     except Exception as e:
         logger.error(f"Failed to update strategies: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+def _effective_lot_base() -> tuple:
+    """(value, source) for the notional the bot sizes lots from. Precedence:
+    config global_settings.lot_base_portfolio → env LOT_BASE_PORTFOLIO → ACCOUNT_BALANCE.
+    Mirrors main.resolve_lot_base_portfolio so the UI shows what the bot will use."""
+    try:
+        from utils.strategy_loader import get_lot_base_portfolio
+        cfg = get_lot_base_portfolio()
+        if cfg and cfg > 0:
+            return float(cfg), "config"
+    except Exception:
+        pass
+    env = os.getenv("LOT_BASE_PORTFOLIO", "").strip()
+    if env:
+        try:
+            v = float(env)
+            if v > 0:
+                return v, "env"
+        except ValueError:
+            pass
+    return float(os.getenv("ACCOUNT_BALANCE", "1000")), "account_balance"
+
+
+@app.get("/api/settings/lot-base")
+async def get_lot_base():
+    """Current lot-base portfolio (fixed notional lot sizing uses) — for the
+    Settings page. `configured` is the explicit value (null = falls back);
+    `effective` is what the bot actually uses this cycle."""
+    try:
+        from utils.strategy_loader import get_lot_base_portfolio
+        configured = get_lot_base_portfolio()
+    except Exception:
+        configured = None
+    effective, source = _effective_lot_base()
+    return {
+        "configured": configured,
+        "effective": effective,
+        "source": source,   # 'config' | 'env' | 'account_balance'
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "1000")),
+    }
+
+
+@app.post("/api/settings/lot-base")
+async def set_lot_base(request: Request):
+    """Set the lot-base portfolio (persisted to config/strategies.json).
+    Body: {"value": <number|null>} · ≤0 or null clears it (→ ACCOUNT_BALANCE).
+    A running bot picks it up on its next cycle — no restart needed."""
+    from utils.strategy_loader import save_lot_base_portfolio
+    try:
+        body = await request.json()
+        raw = body.get("value", None)
+        value = None if raw in (None, "") else float(raw)
+    except (ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "value must be a number or null"})
+    try:
+        stored = save_lot_base_portfolio(value)
+    except Exception as e:
+        logger.error(f"Failed to save lot_base_portfolio: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    effective, source = _effective_lot_base()
+    logger.info(f"lot_base_portfolio set → {stored} (effective={effective}, source={source})")
+    return {"success": True, "configured": stored, "effective": effective, "source": source}
 
 
 # ============================================================================

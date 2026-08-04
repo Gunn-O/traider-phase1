@@ -163,6 +163,38 @@ def get_global_settings() -> dict:
     return config.get('global_settings', {})
 
 
+def get_lot_base_portfolio() -> Optional[float]:
+    """Lot-base portfolio = the fixed notional lot sizing is based on
+    (budget = base × risk%). Returns a positive float, or None when unset
+    (caller then falls back to env LOT_BASE_PORTFOLIO / ACCOUNT_BALANCE).
+    This is an operator-set value — NOT the live broker equity."""
+    val = get_global_settings().get('lot_base_portfolio')
+    try:
+        f = float(val)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def save_lot_base_portfolio(value: Optional[float]) -> Optional[float]:
+    """Persist global_settings.lot_base_portfolio. value None or ≤0 CLEARS it
+    (bot then falls back to ACCOUNT_BALANCE). Returns the stored value (or None)."""
+    config = load_config()
+    gs = config.setdefault('global_settings', {})
+    stored: Optional[float]
+    if value is None or float(value) <= 0:
+        gs.pop('lot_base_portfolio', None)
+        stored = None
+    else:
+        stored = float(value)
+        gs['lot_base_portfolio'] = stored
+    config['last_updated'] = __import__('datetime').datetime.now().strftime("%Y-%m-%d")
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    logger.info(f"Updated lot_base_portfolio: {stored}")
+    return stored
+
+
 def get_patterns_by_priority() -> List[tuple]:
     """
     Get all patterns sorted by priority (lower number = higher priority)

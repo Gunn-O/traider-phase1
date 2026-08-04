@@ -72,3 +72,7 @@ backtest_results/
 # Auto-resume state (written by api_server /api/start, read by launcher on boot)
 last_session.json
 last_sessions.json
+
+# vendored snapshot backtest outputs (regenerated on demand)
+reference/mai_ruay_v2_snapshot/runs/
+reference/mountain_v3_snapshot/runs/

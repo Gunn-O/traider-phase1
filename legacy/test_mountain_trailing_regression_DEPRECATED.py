@@ -1,4 +1,11 @@
 """
+⛔ DEPRECATED — tests the OLD trailing Mountain (v4.45/v67): single-entry Signal
+   with trailing details (tp1/tp2_base/tp3_ref/tech_point). All removed in the
+   Mountain v3 rewrite (v3 = multi-entry LIMIT, %height TP/SL, no trailing).
+   Superseded by scripts/parity_mountain_v3.py (byte-identical, both configs) +
+   scripts/verify_mountain_v3_adapter.py (adapter placements). Do not run against
+   the current strategies/mountain.py.
+
 Mountain regression — รัน mountain.find_signal() บน CSV M1 แล้วตรวจว่า:
   - Signal field เดิม (pattern/direction/entry/sl/tp_order/tp_ref/...) ตรงเป๊ะ
   - field ใหม่ (entries/is_round2/father_pass/vol_ratio) มีค่า default

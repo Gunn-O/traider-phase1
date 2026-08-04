@@ -1,0 +1,13 @@
+{
+  "n_trades": 194,
+  "n_wins": 121,
+  "n_losses": 73,
+  "win_rate": 62.37,
+  "net_pip": 21745.8,
+  "net_usd": 4675.77,
+  "init_portfolio": 1000,
+  "final_portfolio": 5675.77,
+  "n_plans": 194,
+  "plan_wins": 121,
+  "plan_win_rate": 62.37
+}
