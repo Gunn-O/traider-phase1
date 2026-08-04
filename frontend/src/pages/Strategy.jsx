@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import './Strategy.css';
 
 export default function Strategy() {
   const [loading, setLoading] = useState(true);
@@ -88,23 +87,21 @@ export default function Strategy() {
 
   if (loading) {
     return (
-      <div className="strategy-page">
-        <div className="strategy-header"><h1>Strategy Manager</h1></div>
-        <div className="strategy-loading">Loading strategies...</div>
+      <div className="view">
+        <div className="view-head"><div><h1>STRATEGY MANAGER</h1></div></div>
+        <div className="panel" style={{ color: 'var(--muted)' }}>Loading strategies…</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="strategy-page">
-        <div className="strategy-header"><h1>Strategy Manager</h1></div>
-        <div className="strategy-error">
-          <strong>Error</strong>
-          {error}
-          <div>
-            <button className="strategy-retry-btn" onClick={loadStrategies}>Retry</button>
-          </div>
+      <div className="view">
+        <div className="view-head"><div><h1>STRATEGY MANAGER</h1></div></div>
+        <div className="panel" style={{ borderColor: 'var(--c-red)' }}>
+          <strong style={{ color: 'var(--c-red)' }}>Error</strong>
+          <div style={{ color: 'var(--muted)', margin: '8px 0' }}>{error}</div>
+          <button className="btn" onClick={loadStrategies}>Retry</button>
         </div>
       </div>
     );
@@ -112,9 +109,9 @@ export default function Strategy() {
 
   if (!strategies || !strategies.patterns) {
     return (
-      <div className="strategy-page">
-        <div className="strategy-header"><h1>Strategy Manager</h1></div>
-        <div className="strategy-empty">No strategies configured</div>
+      <div className="view">
+        <div className="view-head"><div><h1>STRATEGY MANAGER</h1></div></div>
+        <div className="panel" style={{ color: 'var(--muted)' }}>No strategies configured</div>
       </div>
     );
   }
@@ -124,16 +121,18 @@ export default function Strategy() {
   const allTfs = strategies.all_tfs || ['M1', 'M5', 'M15', 'M30', 'H1', 'H4'];
 
   return (
-    <div className="strategy-page">
-      <div className="strategy-header">
-        <h1>Strategy Manager</h1>
-        <div className="strategy-meta">
-          Version {strategies.version} · {activePatterns.length} active pattern
-          {activePatterns.length !== 1 ? 's' : ''} · Last updated: {strategies.last_updated}
+    <div className="view">
+      <div className="view-head">
+        <div>
+          <h1>STRATEGY MANAGER</h1>
+          <p>
+            Version {strategies.version} · {activePatterns.length} active pattern
+            {activePatterns.length !== 1 ? 's' : ''} · Last updated: {strategies.last_updated}
+          </p>
         </div>
       </div>
 
-      <div className="strategy-grid">
+      <div className="strat-grid">
         {Object.entries(patterns)
           .sort((a, b) => (a[1].priority || 99) - (b[1].priority || 99))
           .map(([patternName, meta]) => {
@@ -146,60 +145,51 @@ export default function Strategy() {
             return (
               <div
                 key={patternName}
-                className={`strategy-card ${isActive ? 'active' : ''} ${isDeprecated ? 'deprecated' : ''}`}
+                className={`strat-card ${isActive ? 'on' : 'off'} ${isDeprecated ? 'deprecated' : ''}`}
               >
-                <div className="strategy-card-head">
+                <div className="strat-top">
                   <div>
-                    <div className="strategy-card-title">
+                    <div className="strat-name">
                       <span>{meta.name}</span>
-                      {!isImplemented && <span className="strategy-badge warn">Not Implemented</span>}
-                      {isDeprecated && <span className="strategy-badge muted">Deprecated</span>}
+                      {!isImplemented && <span className="strat-badge warn">Not Implemented</span>}
+                      {isDeprecated && <span className="strat-badge muted">Deprecated</span>}
                     </div>
-                    <div className="strategy-card-subtitle">
+                    <div className="strat-meta">
                       {patternName} · v{meta.version}
                     </div>
                   </div>
                   <button
                     onClick={() => handleToggle(patternName)}
                     disabled={!!saving || !isImplemented}
-                    className={`strategy-toggle ${isActive ? 'on' : ''}`}
+                    className={`switch ${isActive ? 'on' : ''}`}
                     aria-label={`Toggle ${patternName}`}
                     title={!isImplemented ? 'Pattern not implemented yet' : ''}
                   >
-                    <span className="strategy-toggle-knob" />
+                    <span />
                   </button>
                 </div>
 
-                <p className="strategy-desc">{meta.description}</p>
+                <p className="strat-desc">{meta.description}</p>
 
-                <div className="strategy-meta-grid">
-                  <div className="strategy-meta-row">
-                    <span className="label">Direction</span>
-                    <span className={`value ${dirClass}`}>{meta.direction}</span>
-                  </div>
-                  <div className="strategy-meta-row">
-                    <span className="label">Priority</span>
-                    <span className="value">{meta.priority}</span>
-                  </div>
+                <div className="strat-stats">
+                  <span>Direction <b className={dirClass}>{meta.direction}</b></span>
+                  <span>Priority <b>{meta.priority}</b></span>
                 </div>
 
                 {meta.validations && meta.validations.length > 0 && (
-                  <div className="strategy-validations">
-                    <div className="strategy-validations-title">Validations</div>
-                    <ul>
-                      {meta.validations.map((v, i) => <li key={i}>{v}</li>)}
-                    </ul>
+                  <div className="strat-rules">
+                    <div className="strat-rules-title">Validations</div>
+                    {meta.validations.map((v, i) => (
+                      <div className="rule" key={i}><span className="rule-tick">✓</span>{v}</div>
+                    ))}
                   </div>
                 )}
 
-                <div className="strategy-tfs">
-                  <div className="strategy-tfs-title">
-                    Active on TF
-                    <span className="strategy-tfs-count">
-                      ({allowedTfs.length}/{allTfs.length})
-                    </span>
+                <div className="strat-tfs">
+                  <div className="strat-tfs-head">
+                    Active on TF ({allowedTfs.length}/{allTfs.length})
                   </div>
-                  <div className="strategy-tfs-pills">
+                  <div className="strat-tf-pills">
                     {allTfs.map(tf => {
                       const on = allowedTfs.includes(tf);
                       const busy = saving === patternName + ':' + tf;
@@ -218,8 +208,8 @@ export default function Strategy() {
                   </div>
                 </div>
 
-                <div className="strategy-status">
-                  <span className={`strategy-status-pill ${isActive ? 'active' : 'inactive'}`}>
+                <div className="strat-status">
+                  <span className={`pill ${isActive ? 'active' : 'inactive'}`}>
                     {isActive ? '✓ ACTIVE' : '✗ INACTIVE'}
                   </span>
                 </div>
@@ -228,7 +218,7 @@ export default function Strategy() {
           })}
       </div>
 
-      <div className="strategy-help">
+      <div className="panel strat-help">
         <h3>💡 How to use Strategy Manager</h3>
         <ul>
           <li>Master toggle (top-right) turns the whole strategy ON / OFF</li>

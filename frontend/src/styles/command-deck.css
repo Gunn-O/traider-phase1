@@ -338,6 +338,34 @@ h1, h2, h3 { font-family: "Chakra Petch", sans-serif; font-weight: 600; letter-s
 .switch span { position: absolute; top: 2px; left: 2px; width: 19px; height: 19px; border-radius: 50%; background: var(--muted); transition: 0.2s; }
 .switch.on { background: rgba(52,229,163,0.22); border-color: var(--c-green); }
 .switch.on span { left: 23px; background: var(--c-green); box-shadow: 0 0 10px rgba(52,229,163,0.6); }
+/* switch rendered as a <button> — strip native chrome so the knob sits right */
+button.switch { padding: 0; appearance: none; -webkit-appearance: none; }
+button.switch:disabled { cursor: not-allowed; opacity: 0.6; }
+
+/* Strategy page — extra bits not covered by the base .strat-* set */
+.strat-card.deprecated { opacity: 0.5; }
+.strat-name { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.strat-desc { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0 0 12px; }
+.strat-stats b.buy { color: var(--c-green); }
+.strat-stats b.sell { color: var(--c-red); }
+.strat-rules { margin-bottom: 12px; }
+.strat-rules-title { font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+.strat-tfs { margin-bottom: 12px; }
+.strat-tfs-head { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.strat-tf-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.tf-pill { font-family: "JetBrains Mono", monospace; font-size: 11px; padding: 4px 10px; border-radius: 7px; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--muted); cursor: pointer; transition: all 0.16s; }
+.tf-pill:hover:not(:disabled) { border-color: var(--c-cyan); color: var(--c-cyan); }
+.tf-pill.on { background: color-mix(in srgb, var(--c-cyan) 14%, transparent); border-color: var(--c-cyan); color: var(--c-cyan); box-shadow: 0 0 10px rgba(34,216,238,0.15); }
+.tf-pill.dim { opacity: 0.45; }
+.tf-pill:disabled { cursor: not-allowed; }
+.strat-badge { font-size: 9px; padding: 2px 8px; border-radius: 20px; letter-spacing: 0.06em; }
+.strat-badge.warn { color: var(--c-gold); border: 1px solid rgba(245,196,81,0.4); background: rgba(245,196,81,0.12); }
+.strat-badge.muted { color: var(--muted); border: 1px solid var(--line-2); }
+.strat-status { margin-top: 12px; }
+.strat-status .pill.active { color: var(--c-green); border-color: rgba(52,229,163,0.45); background: rgba(52,229,163,0.12); }
+.strat-status .pill.inactive { color: var(--muted); border-color: var(--line-2); }
+.strat-help h3 { font-size: 14px; color: #eaf4ff; margin-bottom: 10px; }
+.strat-help ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.8; }
 
 /* alerts */
 .alerts-table .al-title { color: var(--text); font-size: 12.5px; }

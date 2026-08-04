@@ -7,19 +7,21 @@ import {
 
 const API = 'http://127.0.0.1:8080'
 
-// Match index.css color tokens
+// Command Deck cyberpunk palette — real hex (NOT CSS var()) because recharts
+// renders stroke/fill as SVG presentation attributes, where var() is invalid.
+// Values mirror command-deck.css :root tokens so the page matches the theme.
 const COLOR = {
-  bg:       '#0a0a0f',
-  card:     '#12121a',
-  hover:    '#1a1a28',
-  border:   '#2a2a3a',
-  text:     '#e0e0e0',
-  muted:    '#888888',
-  green:    '#00ff88',
-  red:      '#ff4444',
-  yellow:   '#ffaa00',
-  blue:     '#00aaff',
-  pink:     '#ff88ff',
+  bg:       '#05080f',                    // --bg
+  card:     '#0c1322',                    // --panel-2
+  hover:    '#0e1526',                    // panel hover
+  border:   'rgba(120,160,220,0.14)',     // --line
+  text:     '#d6e3f7',                    // --text
+  muted:    '#6f819f',                    // --muted
+  green:    '#34e5a3',                    // --c-green
+  red:      '#ff5274',                    // --c-red
+  yellow:   '#f5c451',                    // --c-gold
+  blue:     '#22d8ee',                    // --c-cyan
+  pink:     '#ff2e9a',                    // --c-magenta
 }
 
 const todayIso = () => new Date().toISOString().slice(0, 10)
@@ -160,11 +162,11 @@ export default function TradeHistory() {
 
 // ─── Filters ──────────────────────────────────────────────────────
 const inputStyle = {
-  background: '#1a1a1a', border: `1px solid ${COLOR.border}`,
-  borderRadius: 6, padding: '8px 12px', color: '#fff', fontSize: 13,
+  background: COLOR.hover, border: `1px solid ${COLOR.border}`,
+  borderRadius: 6, padding: '8px 12px', color: COLOR.text, fontSize: 13,
 }
 const btnSecondary = {
-  background: '#1a1a1a', border: `1px solid ${COLOR.border}`,
+  background: COLOR.hover, border: `1px solid ${COLOR.border}`,
   borderRadius: 6, padding: '6px 14px', color: COLOR.text, fontSize: 13,
   cursor: 'pointer', fontFamily: 'inherit',
 }
@@ -210,7 +212,7 @@ function FiltersBar({ from, to, mode, pattern, setFrom, setTo, setMode, setPatte
 
       <button onClick={applyFilters}
         style={{
-          background: COLOR.green, color: '#000', border: 'none',
+          background: COLOR.green, color: '#04070e', border: 'none',
           padding: '9px 22px', borderRadius: 6, fontSize: 13,
           fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
         }}>
@@ -492,7 +494,7 @@ function PatternBreakdown({ stats }) {
           </thead>
           <tbody>
             {data.map(d => (
-              <tr key={d.pattern} style={{ borderBottom: '1px solid #1a1a1a' }}>
+              <tr key={d.pattern} style={{ borderBottom: `1px solid ${COLOR.border}` }}>
                 <td style={{ padding: '10px', color: COLOR.text }}>{d.pattern}</td>
                 <td style={{ padding: '10px', textAlign: 'right', color: COLOR.muted }}>{d.total}</td>
                 <td style={{ padding: '10px', textAlign: 'right', color: COLOR.green }}>{d.wins}</td>
@@ -582,14 +584,14 @@ function TradeTable({ trades }) {
               const rowIdx = (page - 1) * PAGE_SIZE + i + 1
               const isOpen = expanded === t.trade_id
               const tint = t.result === 'WIN'
-                ? 'rgba(0,255,136,0.04)'
-                : t.result === 'LOSS' ? 'rgba(255,68,68,0.04)' : 'transparent'
+                ? 'rgba(52,229,163,0.05)'
+                : t.result === 'LOSS' ? 'rgba(255,82,116,0.05)' : 'transparent'
               return (
                 <Fragment key={t.trade_id || i}>
                   <tr
                     onClick={() => setExpanded(isOpen ? null : t.trade_id)}
                     style={{
-                      borderBottom: '1px solid #1a1a1a',
+                      borderBottom: `1px solid ${COLOR.border}`,
                       background: tint,
                       cursor: 'pointer',
                     }}>
@@ -599,7 +601,7 @@ function TradeTable({ trades }) {
                     <td>
                       <span style={{
                         ...badgeStyle,
-                        background: t.direction === 'BUY' ? 'rgba(0,255,136,0.15)' : 'rgba(255,170,0,0.15)',
+                        background: t.direction === 'BUY' ? 'rgba(52,229,163,0.16)' : 'rgba(245,196,81,0.16)',
                         color:      t.direction === 'BUY' ? COLOR.green : COLOR.yellow,
                       }}>{t.direction || '—'}</span>
                     </td>
@@ -620,8 +622,8 @@ function TradeTable({ trades }) {
                     <td>
                       <span style={{
                         ...badgeStyle,
-                        background: t.result === 'WIN'  ? 'rgba(0,255,136,0.15)'
-                                  : t.result === 'LOSS' ? 'rgba(255,68,68,0.15)' : 'rgba(136,136,136,0.15)',
+                        background: t.result === 'WIN'  ? 'rgba(52,229,163,0.16)'
+                                  : t.result === 'LOSS' ? 'rgba(255,82,116,0.16)' : 'rgba(111,129,159,0.16)',
                         color: resultColor(t.result),
                       }}>
                         {t.result === 'WIN' ? '🟢 WIN' : t.result === 'LOSS' ? '🔴 LOSS' : `⚪ ${t.result || '—'}`}
@@ -648,7 +650,7 @@ function TradeTable({ trades }) {
 function ExpandedRow({ t }) {
   return (
     <tr>
-      <td colSpan={16} style={{ background: '#0d0d14', padding: 14, borderBottom: '1px solid #1a1a1a' }}>
+      <td colSpan={16} style={{ background: '#070b16', padding: 14, borderBottom: `1px solid ${COLOR.border}` }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
           <Detail label="Plan ID"    value={t.plan_id} mono />
           <Detail label="Trade ID"   value={t.trade_id} mono />
@@ -664,7 +666,7 @@ function ExpandedRow({ t }) {
           <Detail label="Source DB" value={t.source_db} mono />
         </div>
         {t.claude_reason && (
-          <div style={{ marginTop: 10, padding: 10, background: '#08080d', borderRadius: 6 }}>
+          <div style={{ marginTop: 10, padding: 10, background: '#05080f', borderRadius: 6 }}>
             <div style={{ fontSize: 10, color: COLOR.muted, marginBottom: 4 }}>REASON</div>
             <div style={{ fontSize: 12, color: COLOR.text, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
               {t.claude_reason}
@@ -729,7 +731,7 @@ function EmptyState({ from, to, mode }) {
 function ErrorBox({ message }) {
   return (
     <div style={{
-      background: 'rgba(255,68,68,0.1)', border: `1px solid ${COLOR.red}`,
+      background: 'rgba(255,82,116,0.1)', border: `1px solid ${COLOR.red}`,
       borderRadius: 8, padding: 12, marginBottom: 16,
       color: COLOR.red, fontSize: 13,
     }}>
