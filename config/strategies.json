@@ -1,9 +1,9 @@
 {
   "version": "66",
-  "last_updated": "2026-07-02",
+  "last_updated": "2026-07-06",
   "patterns": {
     "MOUNTAIN": {
-      "active": false,
+      "active": true,
       "implemented": true,
       "name": "ภูเขา v3 (config-driven)",
       "description": "Mountain v3 (BUY only) — swing ฐาน(ก้น)+ยอด, ล็อกยอดเมื่อ retrace แตะ base_lo+10%สูง (C), ฟิลเตอร์ F1/F4/F6/F7a/F7b/F8 + valid@C, วาง LIMIT ที่ base_lo+5%สูง, TP/SL = %คงที่ของความสูง, 1 ยอด 1 ไม้, pending 5 แท่ง (cancel เมื่อ repeak/base_change/expiry), ไม่มี trailing (ปิดที่ SL/TP ตายตัว). Engine: strategies/mountain.py → strategies/mountain_v3_core.py · source of truth: reference/mountain_v3_snapshot/ · per-TF: M1→tpsl (R:R 1.0), M5→rr85 (R:R 0.85)",
@@ -125,6 +125,6 @@
         4
       ]
     },
-    "lot_base_portfolio": 1000.0
+    "lot_base_portfolio": 10000.0
   }
 }
